@@ -1,0 +1,2064 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FictionPad</title>
+<meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0">
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.2.0/client?external=react",
+    "htm/react": "https://esm.sh/htm@3/react?external=react&react=19",
+    "marked": "https://esm.sh/marked@16.4.1"
+  }
+}
+</script>
+<style>
+:root {
+  /* Theme variables. Defaults below = "Dark" (the default theme); the active
+     theme is applied at runtime by setting these same vars on
+     documentElement (see THEMES). */
+  --chat-w: 780px; /* single source of truth for the central column width */
+  --c-bg-0: oklch(0.18 0.020 60);
+  --c-bg-1: oklch(0.22 0.020 60);
+  --c-bg-2: oklch(0.29 0.025 60);
+  --c-bg-3: oklch(0.36 0.030 60);
+  --c-chrome: oklch(0.22 0.020 60);
+  --c-text: oklch(0.95 0.040 70);
+  --c-accent: oklch(0.75 0.120 70);
+  --c-danger: oklch(0.65 0.20 25);
+  --c-warning: oklch(0.80 0.15 80);
+  --c-pin: oklch(0.80 0.15 80);
+  --c-user: oklch(0.78 0.10 65);
+  --c-action: oklch(0.74 0.05 75);
+  --c-dialogue: oklch(0.95 0.040 70);
+  --c-ooc: oklch(0.70 0.04 75);
+  --c-speaker-s: 65%;
+  --c-speaker-l: 72%;
+  --font-prose: system-ui, sans-serif;
+  /* Derived from the vars above — no per-theme values needed. */
+  --c-dim: color-mix(in oklch, var(--c-text) 55%, var(--c-bg-0));
+  --c-faint: color-mix(in oklch, var(--c-text) 35%, var(--c-bg-0));
+  --c-accent-dim: color-mix(in oklch, var(--c-accent) 30%, var(--c-bg-0));
+  --c-border: color-mix(in oklch, var(--c-text) 13%, var(--c-bg-0));
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--c-bg-0);
+  color: var(--c-text);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+#root { height: 100vh; display: flex; flex-direction: column; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+
+.app { display: flex; flex: 1; min-height: 0; }
+
+/* ---------- generic controls ---------- */
+.btn {
+  background: var(--c-bg-2); border: 1px solid var(--c-border);
+  border-radius: 6px; padding: 4px 10px; color: var(--c-text);
+}
+.btn:hover:not(:disabled) { background: var(--c-bg-3); }
+.btn.primary { background: var(--c-accent-dim); border-color: var(--c-accent); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--c-accent) 45%, var(--c-bg-0)); }
+.btn.danger { border-color: var(--c-danger); color: var(--c-danger); }
+.btn.small { padding: 1px 7px; font-size: 12px; border-radius: 4px; }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--c-dim); }
+.btn.ghost:hover:not(:disabled) { color: var(--c-text); background: var(--c-bg-2); }
+
+input[type=text], input[type=number], input[type=password], select, textarea {
+  background: var(--c-bg-2); border: 1px solid var(--c-border);
+  border-radius: 6px; padding: 5px 8px; width: 100%;
+}
+textarea { resize: vertical; }
+label.field { display: block; margin: 8px 0; }
+label.field > span { display: block; font-size: 12px; color: var(--c-dim); margin-bottom: 2px; }
+label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 13px; }
+.hint { font-size: 12px; color: var(--c-dim); }
+.warn { color: var(--c-warning); }
+
+/* ---------- sidebar (fixed overlay — consumes the slack margin, never shifts the chat column) ---------- */
+.sidebar {
+  position: fixed; left: 0; top: 0; bottom: 0; z-index: 40;
+  width: 280px; /* fallback only — inline style drives the actual width */
+  background: var(--c-chrome);
+  border-right: 1px solid var(--c-border);
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: width 0.15s ease, min-width 0.15s ease;
+  box-shadow: 4px 0 18px rgba(0,0,0,0.25);
+}
+.sidebar.collapsed { width: 0; min-width: 0; border-right-color: transparent; box-shadow: none; }
+.sidebar > *:not(.pane-handle) { min-width: 190px; } /* slide rather than squish during the animation */
+.pane-handle { position: absolute; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 45; }
+.pane-handle.right { right: 0; }
+.pane-handle.left { left: 0; }
+.pane-handle:hover { background: color-mix(in oklch, var(--c-accent) 35%, transparent); }
+.app.dragging, .app.dragging .sidebar, .app.dragging .drawer, .app.dragging .center-col { transition: none; }
+.app.dragging { user-select: none; }
+.sidebar .head {
+  display: flex; align-items: center; gap: 6px; padding: 10px 12px;
+  border-bottom: 1px solid var(--c-border);
+}
+.sidebar .head h1 { font-size: 17px; margin: 0; flex: 1; letter-spacing: 0.5px; }
+.sidebar .scroll { flex: 1; overflow-y: auto; padding: 8px; }
+.sidebar .foot { border-top: 1px solid var(--c-border); padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.side-section { margin-bottom: 10px; }
+.side-section > .title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--c-faint); padding: 4px 6px; display: flex; justify-content: space-between; align-items: center;
+}
+.side-item {
+  display: flex; align-items: center; gap: 4px; padding: 5px 8px;
+  border-radius: 6px; cursor: pointer; color: var(--c-text);
+}
+.side-item:hover { background: var(--c-bg-2); }
+.side-item.selected { background: var(--c-accent-dim); }
+.side-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-item .tools { display: none; gap: 2px; }
+.side-item:hover .tools { display: flex; }
+.side-item.chat { padding-left: 22px; font-size: 13.5px; color: var(--c-dim); }
+.side-item.chat.selected { color: var(--c-text); }
+
+/* ---------- main / chat ---------- */
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.center-col { transition: padding 0.15s ease; }
+/* Narrow-viewport padding (so content isn't hidden under an overlay pane) is
+   applied inline from JS using the panes' actual current widths. */
+.topbar {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--c-border); background: var(--c-chrome);
+}
+.topbar-inner {
+  display: flex; align-items: center; gap: 8px;
+  max-width: var(--chat-w); margin: 0 auto; padding: 0 14px;
+}
+.topbar .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .sub { color: var(--c-faint); font-size: 12.5px; }
+.topbar .spacer { flex: 1; }
+.chatlog { flex: 1; overflow-y: auto; padding: 18px 22px; }
+.empty { color: var(--c-faint); text-align: center; margin-top: 15vh; line-height: 2; }
+
+.msg { max-width: var(--chat-w); margin: 0 auto 14px; }
+.msg .bubble {
+  background: var(--c-bg-1); border: 1px solid var(--c-border);
+  border-radius: 10px; padding: 10px 14px;
+}
+.msg.user .bubble { background: color-mix(in oklch, var(--c-user) 9%, var(--c-bg-1)); }
+.msg.assistant .bubble { background: color-mix(in oklch, var(--c-accent) 6%, var(--c-bg-1)); }
+.msg .meta {
+  display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px;
+  font-size: 12px; color: var(--c-faint);
+}
+.msg .meta .who { font-weight: 600; color: var(--c-dim); }
+.msg.user .meta .who { color: var(--c-user); }
+.msg .actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; flex-wrap: wrap; }
+.msg:hover .actions { opacity: 1; }
+.msg .actions.always { opacity: 1; }
+.msg .swipes { display: flex; align-items: center; gap: 2px; font-size: 12px; color: var(--c-dim); }
+.msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
+
+/* ---------- RP prose formatting ---------- */
+.msg .md { line-height: 1.65; font-family: var(--font-prose); }
+.msg .plain { white-space: pre-wrap; font-family: var(--font-prose); }
+.msg .md em { color: var(--c-action); }
+.msg .md .dialogue { color: var(--c-dialogue); }
+.msg.ooc .bubble {
+  background: transparent; border-color: transparent;
+  border-left: 3px solid var(--c-ooc); border-radius: 4px;
+}
+.msg.ooc .plain { color: var(--c-ooc); font-style: italic; }
+.msg .md > :first-child { margin-top: 0; }
+.msg .md > :last-child { margin-bottom: 0; }
+.msg .md pre { background: var(--c-bg-2); padding: 8px; border-radius: 6px; overflow-x: auto; }
+.msg .md code { background: var(--c-bg-2); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+.msg textarea.edit { width: 100%; min-height: 120px; margin-bottom: 6px; }
+.streaming-cursor::after { content: "▌"; color: var(--c-accent); animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.composer { border-top: 1px solid var(--c-border); padding: 10px 14px; background: var(--c-chrome); }
+.composer .row { display: flex; gap: 8px; max-width: var(--chat-w); margin: 0 auto; align-items: flex-end; }
+.composer textarea { flex: 1; min-height: 44px; max-height: 200px; }
+.composer .hint { max-width: var(--chat-w); margin: 4px auto 0; }
+.gen-reply {
+  display: flex; justify-content: center; padding: 8px 14px; width: 100%;
+  max-width: var(--chat-w); margin: 0 auto;
+  border-top: 1px solid var(--c-border); background: var(--c-chrome);
+}
+
+/* ---------- drawer (fixed overlay — same trick as the sidebar) ---------- */
+.drawer {
+  position: fixed; right: 0; top: 0; bottom: 0; z-index: 40;
+  width: 330px; /* fallback only — inline style drives the actual width */
+  background: var(--c-chrome);
+  border-left: 1px solid var(--c-border); display: flex; flex-direction: column;
+  transition: width 0.15s ease, min-width 0.15s ease;
+  box-shadow: -4px 0 18px rgba(0,0,0,0.25);
+}
+.drawer .tabs { display: flex; border-bottom: 1px solid var(--c-border); }
+.drawer .tabs button {
+  flex: 1; background: transparent; border: none; padding: 8px 4px;
+  color: var(--c-dim); border-bottom: 2px solid transparent; font-size: 13px;
+}
+.drawer .tabs button.active { color: var(--c-text); border-bottom-color: var(--c-accent); }
+.drawer .body { flex: 1; overflow-y: auto; padding: 10px 12px; font-size: 13px; }
+.kv { display: flex; justify-content: space-between; padding: 2px 0; }
+.kv .k { color: var(--c-dim); }
+.pill {
+  display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); margin-right: 4px;
+}
+.pill.pinned { border-color: var(--c-pin); color: var(--c-pin); }
+.pill.triggered { border-color: var(--c-accent); color: var(--c-accent); }
+.pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
+.mem-item, .lore-item-row {
+  border: 1px solid var(--c-border); border-radius: 6px;
+  padding: 6px 8px; margin-bottom: 6px; background: var(--c-bg-2);
+}
+.mem-item .row, .lore-item-row .row { display: flex; gap: 4px; align-items: center; }
+.mem-item .text { margin-top: 4px; color: var(--c-dim); white-space: pre-wrap; }
+.lore-item-row .ir-preview {
+  margin-top: 2px; font-size: 12px; color: var(--c-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lore-item-row .ir-content {
+  margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--c-border);
+  font-size: 12.5px; color: var(--c-dim); white-space: pre-wrap;
+  max-height: 180px; overflow-y: auto;
+}
+.lore-item-row.dimmed { opacity: 0.6; }
+.ir-toggle { cursor: pointer; margin: 6px 0; user-select: none; }
+
+/* ---------- modal ---------- */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal {
+  background: var(--c-bg-1); border: 1px solid var(--c-border); border-radius: 10px;
+  width: min(560px, 92vw); max-height: 88vh; display: flex; flex-direction: column;
+}
+.modal.wide { width: min(760px, 94vw); }
+.modal .m-head {
+  display: flex; align-items: center; padding: 12px 16px;
+  border-bottom: 1px solid var(--c-border);
+}
+.modal .m-head h2 { margin: 0; font-size: 16px; flex: 1; }
+.modal .m-body { padding: 12px 16px; overflow-y: auto; }
+.modal .m-foot {
+  padding: 10px 16px; border-top: 1px solid var(--c-border);
+  display: flex; gap: 8px; justify-content: flex-end;
+}
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 12px; }
+.lore-card { border: 1px solid var(--c-border); border-radius: 8px; margin-bottom: 8px; background: var(--c-bg-2); }
+.lore-card > .lc-head { display: flex; gap: 6px; align-items: center; padding: 6px 10px; cursor: pointer; }
+.lore-card > .lc-head .t { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lore-card > .lc-body { padding: 4px 10px 10px; border-top: 1px solid var(--c-border); }
+/* fields inside a lore card sit on bg-2 already — give them bg-1 so they read as fields */
+.lore-card input[type=text], .lore-card input[type=number], .lore-card select, .lore-card textarea {
+  background: var(--c-bg-1);
+}
+.links-list { max-height: 110px; overflow-y: auto; border: 1px solid var(--c-border); border-radius: 6px; padding: 4px 8px; }
+
+.banner {
+  background: color-mix(in oklch, var(--c-danger) 18%, var(--c-bg-1));
+  border-bottom: 1px solid var(--c-danger); color: var(--c-text);
+  padding: 6px 14px; font-size: 13px; display: flex; gap: 10px; align-items: center;
+}
+.banner button { margin-left: auto; }
+
+.errbox {
+  margin: 12px; padding: 12px; border: 1px solid var(--c-danger); border-radius: 8px;
+  background: color-mix(in oklch, var(--c-danger) 10%, var(--c-bg-1)); font-size: 13px;
+}
+.errbox pre { white-space: pre-wrap; color: var(--c-dim); font-size: 12px; overflow-x: auto; }
+</style>
+<body>
+<div id="root"></div>
+<script type="module">
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createRoot } from 'react-dom/client';
+import { html } from 'htm/react';
+import { marked } from 'marked';
+
+marked.setOptions({ breaks: true, gfm: true });
+
+// ============================================================================
+// THEMES — variable→value maps applied to documentElement (mikupad-style
+// dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
+// --c-faint, --c-accent-dim, --c-border) are computed in static CSS from
+// these, so adding a theme is just a new entry here.
+// ============================================================================
+const THEMES = {
+  miku: {
+    name: 'Dark (default)',
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': 'oklch(0.18 0.020 60)',
+      '--c-bg-1': 'oklch(0.22 0.020 60)',
+      '--c-bg-2': 'oklch(0.29 0.025 60)',
+      '--c-bg-3': 'oklch(0.36 0.030 60)',
+      '--c-chrome': 'oklch(0.22 0.020 60)',
+      '--c-text': 'oklch(0.95 0.040 70)',
+      '--c-accent': 'oklch(0.75 0.120 70)',
+      '--c-danger': 'oklch(0.65 0.20 25)',
+      '--c-warning': 'oklch(0.80 0.15 80)',
+      '--c-pin': 'oklch(0.80 0.15 80)',
+      '--c-user': 'oklch(0.78 0.10 65)',
+      '--c-action': 'oklch(0.74 0.05 75)',
+      '--c-dialogue': 'oklch(0.95 0.040 70)',
+      '--c-ooc': 'oklch(0.70 0.04 75)',
+      '--c-speaker-s': '65%',
+      '--c-speaker-l': '72%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+  'ctp-mocha': {
+    name: 'Catppuccin Mocha', accentable: true,
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': '#181825', '--c-bg-1': '#1e1e2e', '--c-bg-2': '#313244', '--c-bg-3': '#45475a', '--c-chrome': '#1e1e2e',
+      '--c-text': '#cdd6f4',
+      '--c-danger': '#f38ba8',
+      '--c-warning': '#f9e2af',
+      '--c-pin': '#f9e2af',
+      '--c-action': '#a6adc8',
+      '--c-ooc': '#a6adc8',
+      '--c-speaker-s': '60%',
+      '--c-speaker-l': '72%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+  'ctp-macchiato': {
+    name: 'Catppuccin Macchiato', accentable: true,
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': '#1e2030', '--c-bg-1': '#24273a', '--c-bg-2': '#363a4f', '--c-bg-3': '#494d64', '--c-chrome': '#24273a',
+      '--c-text': '#cad3f5',
+      '--c-danger': '#ed8796',
+      '--c-warning': '#eed49f',
+      '--c-pin': '#eed49f',
+      '--c-action': '#a5adcb',
+      '--c-ooc': '#a5adcb',
+      '--c-speaker-s': '60%',
+      '--c-speaker-l': '72%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+  'ctp-frappe': {
+    name: 'Catppuccin Frappé', accentable: true,
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': '#292c3c', '--c-bg-1': '#303446', '--c-bg-2': '#414559', '--c-bg-3': '#51576d', '--c-chrome': '#303446',
+      '--c-text': '#c6d0f5',
+      '--c-danger': '#e78284',
+      '--c-warning': '#e5c890',
+      '--c-pin': '#e5c890',
+      '--c-action': '#a5adce',
+      '--c-ooc': '#a5adce',
+      '--c-speaker-s': '60%',
+      '--c-speaker-l': '72%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+};
+
+// Official Catppuccin accent colors per flavor (https://catppuccin.com/palette).
+// On accentable themes the chosen accent drives --c-accent / --c-user /
+// --c-dialogue (quotes, names on bubbles, buttons/highlights). Default: mauve
+// (the pink/lavender of the palette).
+const CTP_ACCENTS = {
+  'ctp-mocha': {
+    rosewater: '#f5e0dc', flamingo: '#f2cdcd', pink: '#f5c2e7', mauve: '#cba6f7',
+    red: '#f38ba8', maroon: '#eba0ac', peach: '#fab387', yellow: '#f9e2af',
+    green: '#a6e3a1', teal: '#94e2d5', sky: '#89dceb', sapphire: '#74c7ec',
+    blue: '#89b4fa', lavender: '#b4befe',
+  },
+  'ctp-macchiato': {
+    rosewater: '#f4dbd6', flamingo: '#f0c6c6', pink: '#f5bde6', mauve: '#c6a0f6',
+    red: '#ed8796', maroon: '#ee99a0', peach: '#f5a97f', yellow: '#eed49f',
+    green: '#a6da95', teal: '#8bd5ca', sky: '#91d7e3', sapphire: '#7dc4e4',
+    blue: '#8aadf4', lavender: '#b7bdf8',
+  },
+  'ctp-frappe': {
+    rosewater: '#f2d5cf', flamingo: '#eebebe', pink: '#f4b8e4', mauve: '#ca9ee6',
+    red: '#e78284', maroon: '#ea999c', peach: '#ef9f76', yellow: '#e5c890',
+    green: '#a6d189', teal: '#81c8be', sky: '#99d1db', sapphire: '#85c1dc',
+    blue: '#8caaee', lavender: '#babbf1',
+  },
+};
+const DEFAULT_ACCENT = 'mauve';
+
+function applyTheme(id, accentId = DEFAULT_ACCENT) {
+  const theme = THEMES[id] ?? THEMES.miku;
+  const style = document.documentElement.style;
+  for (const [k, v] of Object.entries(theme.vars)) style.setProperty(k, v);
+  if (theme.accentable) {
+    const palette = CTP_ACCENTS[id] ?? {};
+    const hex = palette[accentId] ?? palette[DEFAULT_ACCENT];
+    for (const v of ['--c-accent', '--c-user', '--c-dialogue']) style.setProperty(v, hex);
+  } else {
+    // restore the theme's own values if an accentable theme set them before
+    for (const v of ['--c-accent', '--c-user', '--c-dialogue']) style.removeProperty(v);
+    for (const [k, v2] of Object.entries(theme.vars)) style.setProperty(k, v2);
+  }
+}
+
+// ============================================================================
+// RP PROSE + SPEAKER helpers.
+// ============================================================================
+// Wrap quoted dialogue in <span class="dialogue"> before markdown parsing
+// (marked passes inline HTML through). Skips fenced code blocks; quotes inside
+// inline `code` spans still get wrapped (accepted limitation).
+function wrapDialogue(md) {
+  let inFence = false;
+  return String(md ?? '').split('\n').map(line => {
+    if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
+    if (inFence) return line;
+    return line.replace(/"[^"\n]+"|“[^”\n]+”/g, m => `<span class="dialogue">${m}</span>`);
+  }).join('\n');
+}
+
+// Heuristic speaker attribution: does the text start with a known character
+// name (titles of enabled character-type lore pieces) as `Name:`, `**Name:**`,
+// `*Name*:`, `**Name**` or `*Name*`? Returns the matching name, or null.
+// Unreliable when the model doesn't prefix names — purely cosmetic.
+function detectSpeaker(text, names) {
+  if (!text || !names?.length) return null;
+  const m = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{0,2}\s*:/u.exec(text)
+        ?? /^\s*\*{1,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{1,2}/u.exec(text);
+  if (!m) return null;
+  const candidate = m[1].trim().toLowerCase();
+  return names.find(n => n.toLowerCase() === candidate) ?? null;
+}
+
+const characterNamesOf = (scenario) =>
+  (scenario?.lorePieces ?? [])
+    .filter(p => p.type === 'character' && p.enabled !== false)
+    .map(p => p.title?.trim())
+    .filter(Boolean);
+
+const hueForName = (name) => {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 360;
+  return h;
+};
+
+// ============================================================================
+// PURE CORE — no DOM, no React, no imports. Everything between the markers is
+// extracted and unit-tested standalone by tests/assembler.test.mjs.
+// === PURE CORE START ===
+const TOKEN_CHARS = 3.3; // char-estimate fallback: ~3.3 chars per token
+const DEFAULT_SEARCH_DEPTH = 2048; // estimated tokens scanned for lore keys
+const LINK_BOOST = 2; // effective-weight bonus from one active linking piece
+const MEMORY_CAP = 100;
+const MEMORY_EVERY = 30; // messages on active path between auto-summaries
+const LAYER_CAPS = { static: 0.30, lore: 0.20, memory: 0.10 }; // history = rest
+const LENGTH_PRESETS = {
+  short:  { maxTokens: 150, directive: 'Keep your response concise: one or two short paragraphs.' },
+  medium: { maxTokens: 400, directive: 'Write a response of moderate length: a few paragraphs.' },
+  long:   { maxTokens: 800, directive: 'Write a long, detailed response with rich description.' },
+};
+
+const estimateTokens = (text) => Math.ceil(String(text ?? '').length / TOKEN_CHARS);
+// Single-line, whitespace-collapsed excerpt (for manifest previews/tooltips).
+const toPreview = (text, max = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
+const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
+// {{user}} is the only supported macro (no {{char}} — ambiguous in multi-char scenes).
+const subUser = (text, personaName) =>
+  String(text ?? '').replace(/\{\{user\}\}/gi, personaName || 'User');
+
+// ---- message tree -------------------------------------------------------
+const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
+
+// Oldest → newest path from the root down to activeLeafId.
+function getActivePath(messages, activeLeafId) {
+  const path = [];
+  const seen = new Set();
+  let id = activeLeafId;
+  while (id && messages?.[id] && !seen.has(id)) {
+    seen.add(id);
+    path.unshift(messages[id]);
+    id = messages[id].parentId;
+  }
+  return path;
+}
+
+function appendMessage(chat, parentId, role, text, modelId = null) {
+  const id = uid();
+  const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false };
+  return { chat: { ...chat, messages: { ...chat.messages, [id]: node }, activeLeafId: id }, id };
+}
+
+// Returns a new messages map with nodeId and all its descendants removed.
+function deleteSubtree(messages, nodeId) {
+  const copy = { ...messages };
+  const stack = [nodeId];
+  while (stack.length) {
+    const id = stack.pop();
+    for (const [cid, n] of Object.entries(copy))
+      if (n.parentId === id) stack.push(cid);
+    delete copy[id];
+  }
+  return copy;
+}
+
+// Truncate the active branch at nodeId and roll the memory store back to it.
+function rewindChat(chat, nodeId) {
+  const node = chat.messages[nodeId];
+  if (!node) return chat;
+  const cutoff = node.swipes[node.activeSwipe]?.createdAt ?? Date.now();
+  const memories = (chat.memoryStore?.memories ?? []).filter(m => m.createdAt <= cutoff);
+  const next = { ...chat, activeLeafId: nodeId, memoryStore: { memories, cursor: 0 } };
+  next.memoryStore.cursor = getActivePath(next.messages, nodeId).length;
+  return next;
+}
+
+// Fork the whole chat (messages + memory store) into a new chat rooted at the
+// same tree, with nodeId as the active leaf.
+function branchChat(chat, nodeId) {
+  const copy = deepClone(chat);
+  return { ...copy, id: uid(), name: `${chat.name} (branch)`, activeLeafId: nodeId, createdAt: Date.now() };
+}
+
+// ---- lore engine --------------------------------------------------------
+function keyMatches(key, text) {
+  if (!key || !text) return false;
+  try { return new RegExp(key, 'i').test(text); } catch { return false; }
+}
+
+// Determine which pieces are active this turn.
+// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'link-boosted', boost }).
+function scanLore(lorePieces, conversationText) {
+  const pieces = Array.isArray(lorePieces) ? lorePieces : [];
+  const active = new Map();
+  for (const piece of pieces) {
+    if (!piece || piece.enabled === false) continue;
+    if (piece.pinned) { active.set(piece.id, { piece, reason: 'pinned', boost: 0 }); continue; }
+    const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : DEFAULT_SEARCH_DEPTH;
+    const scanText = conversationText.slice(-Math.round(depth * TOKEN_CHARS));
+    if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText)))
+      active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
+  }
+  // One hop of link boosting: an active piece lends weight to its linked pieces.
+  for (const { piece } of [...active.values()]) {
+    for (const linkId of piece.links ?? []) {
+      const target = pieces.find(p => p.id === linkId);
+      if (!target || target.enabled === false || target.pinned) continue;
+      const entry = active.get(linkId);
+      if (entry) entry.boost += LINK_BOOST;
+      else active.set(linkId, { piece: target, reason: 'link-boosted', boost: LINK_BOOST });
+    }
+  }
+  return active;
+}
+
+// Sort candidates by effective weight desc and fill the lore budget.
+function selectLore(lorePieces, conversationText, budgetTokens) {
+  const candidates = [...scanLore(lorePieces, conversationText).values()].map(a => ({
+    id: a.piece.id,
+    title: a.piece.title ?? '',
+    content: a.piece.content ?? '',
+    type: a.piece.type ?? 'lore',
+    reason: a.reason,
+    boost: a.boost,
+    effWeight: (Number(a.piece.weight) || 0) + a.boost,
+    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`),
+  }));
+  candidates.sort((x, y) => y.effWeight - x.effWeight);
+  const selected = [];
+  let used = 0;
+  for (const c of candidates) {
+    if (used + c.tokens > budgetTokens) continue; // a smaller piece may still fit
+    selected.push(c);
+    used += c.tokens;
+  }
+  return selected;
+}
+
+// ---- memory store -------------------------------------------------------
+// Append a memory, then evict oldest unpinned entries until within cap.
+// Pinned entries always survive (store may exceed cap if everything is pinned).
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
+  const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now }];
+  while (memories.length > cap) {
+    const idx = memories.findIndex(m => !m.pinned);
+    if (idx === -1) break;
+    memories.splice(idx, 1);
+  }
+  return { ...(store ?? {}), memories };
+}
+
+// ---- context assembler --------------------------------------------------
+// Pure function: same inputs → same { messages, manifest }. The manifest
+// records exactly what was injected and why (powers the Context Inspector).
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '' }) {
+  const personaName = persona?.name?.trim() || 'User';
+  const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
+  const contextLength = Number(settings.contextLength) || 8192;
+  const budget = Math.max(0, contextLength - reserve);
+  const manifest = { contextLength, reserve, budget, layers: {}, warnings: [] };
+
+  // 1. static layer: platform prompt + scenario instructions + backstory +
+  //    persona block + per-chat custom instructions + length directive
+  const leadParts = [];
+  const plat = subUser(platformPrompt, personaName).trim();
+  if (plat) leadParts.push(plat);
+  const scenInstr = subUser(scenario?.scenarioInstructions ?? '', personaName).trim();
+  if (scenInstr) leadParts.push(scenInstr);
+  const tailParts = [];
+  if (persona?.description?.trim())
+    tailParts.push(`${personaName} is ${subUser(persona.description, personaName).trim()}`);
+  const customInstr = subUser(chat?.customInstructions ?? '', personaName).trim();
+  if (customInstr) tailParts.push(customInstr);
+  const directive = LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive;
+  if (directive) tailParts.push(directive);
+  let backstory = subUser(scenario?.backstory ?? '', personaName).trim();
+
+  const staticCap = Math.floor(budget * LAYER_CAPS.static);
+  const buildStatic = (bs) => [...leadParts, ...(bs ? [bs] : []), ...tailParts].join('\n\n');
+  let staticText = buildStatic(backstory);
+  if (backstory && estimateTokens(staticText) > staticCap) {
+    const allowedChars = Math.max(0, Math.floor((staticCap - estimateTokens(buildStatic(''))) * TOKEN_CHARS));
+    backstory = backstory.slice(0, allowedChars);
+    staticText = buildStatic(backstory);
+    manifest.warnings.push('Backstory truncated to fit the static-layer budget.');
+  }
+  const staticTokens = estimateTokens(staticText);
+  manifest.layers.static = { tokens: staticTokens, cap: staticCap };
+
+  // 2. conversation: root assistant node doubles as the scenario greeting.
+  //    The greeting is always injected, so its tokens are budgeted like a layer.
+  const path = getActivePath(chat?.messages ?? {}, chat?.activeLeafId);
+  let greetingNode = null;
+  let historyNodes = path;
+  if (path.length > 0 && !path[0].parentId && path[0].role === 'assistant') {
+    greetingNode = path[0];
+    historyNodes = path.slice(1);
+  }
+  const greetingTokens = greetingNode ? estimateTokens(subUser(activeText(greetingNode), personaName)) : 0;
+  manifest.layers.greeting = { tokens: greetingTokens };
+  const conversationText = path.map(activeText).join('\n');
+
+  // 3. lore layer
+  const loreCap = Math.floor(budget * LAYER_CAPS.lore);
+  const lorePieces = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
+  const loreScanned = scanLore(lorePieces, conversationText);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap);
+  const loreText = loreSel.map(s => `[${s.title}]\n${subUser(s.content, personaName)}`).join('\n\n');
+  const loreTokens = loreText ? estimateTokens(loreText) : 0;
+  // Enabled pieces that were NOT injected — observability for "did it even scan?"
+  const selectedIds = new Set(loreSel.map(s => s.id));
+  const inactive = [];
+  for (const p of lorePieces) {
+    if (!p || p.enabled === false || selectedIds.has(p.id)) continue;
+    inactive.push({
+      id: p.id, title: p.title ?? '',
+      reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
+      tokens: estimateTokens(`${p.title ?? ''}\n${p.content ?? ''}`),
+      preview: toPreview(p.content), content: p.content ?? '',
+    });
+  }
+  const overBudget = inactive.filter(p => p.reason === 'over-budget').length;
+  if (overBudget > 0)
+    manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
+  manifest.layers.lore = {
+    tokens: loreTokens, cap: loreCap,
+    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
+    inactive,
+  };
+
+  // 4. memory layer: pinned first (oldest→newest), then recent unpinned
+  const memCap = Math.floor(budget * LAYER_CAPS.memory);
+  const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
+  const memOrdered = [
+    ...memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt),
+    ...memAll.filter(m => !m.pinned).sort((a, b) => b.createdAt - a.createdAt),
+  ];
+  const memSel = [];
+  let memUsed = 0;
+  for (const m of memOrdered) {
+    const cost = estimateTokens(m.text);
+    if (memUsed + cost > memCap) continue;
+    memSel.push(m);
+    memUsed += cost;
+  }
+  const memText = memSel.length ? `[Memories]\n${memSel.map(m => `- ${m.text}`).join('\n')}` : '';
+  const memTokens = memText ? estimateTokens(memText) : 0;
+  manifest.layers.memory = {
+    tokens: memTokens, cap: memCap,
+    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: estimateTokens(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
+  };
+
+  // 5. history fills the remainder; oldest messages dropped first
+  const historyCap = Math.max(0, budget - staticTokens - loreTokens - memTokens - greetingTokens);
+  const kept = [];
+  let histUsed = 0;
+  for (let i = historyNodes.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(activeText(historyNodes[i]));
+    if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
+    kept.unshift(historyNodes[i]);
+    histUsed += cost;
+  }
+  const dropped = historyNodes.length - kept.length;
+  if (dropped > 0) manifest.warnings.push(`${dropped} oldest message(s) dropped to fit the context window.`);
+  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped };
+
+  // 6. chat-completions message array
+  const messages = [{ role: 'system', content: staticText }];
+  if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
+  if (memText) messages.push({ role: 'system', content: memText });
+  if (greetingNode) messages.push({ role: 'assistant', content: subUser(activeText(greetingNode), personaName) });
+  for (const n of kept)
+    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: subUser(activeText(n), personaName) });
+
+  manifest.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+  return { messages, manifest };
+}
+// === PURE CORE END ===
+
+// ============================================================================
+// STORAGE — AbstractStorage (EventTarget + 500 ms debounced save queue) with
+// an IndexedDB adapter. Entities are stored one-key-per-entity; the adapter
+// keeps an in-memory cache that React reads synchronously.
+// ============================================================================
+const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta'];
+
+class AbstractStorage extends EventTarget {
+  constructor() {
+    super();
+    this.cache = Object.fromEntries(STORES.map(s => [s, {}]));
+    this.saveQueue = new Map();
+    this.saveTimer = null;
+  }
+  async init() {}
+  getAll(store) { return this.cache[store] ?? {}; }
+  get(store, key) { return this.cache[store]?.[key]; }
+  set(store, key, value) {
+    this.cache[store][key] = value;
+    this.saveQueue.set(`${store}/${key}`, { op: 'put', store, key, value });
+    this.#schedule();
+    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+  }
+  remove(store, key) {
+    delete this.cache[store][key];
+    this.saveQueue.set(`${store}/${key}`, { op: 'delete', store, key });
+    this.#schedule();
+    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+  }
+  #schedule() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => this.flush(), 500);
+  }
+  async flush() {
+    clearTimeout(this.saveTimer);
+    const items = [...this.saveQueue.values()];
+    this.saveQueue.clear();
+    for (const item of items) {
+      try {
+        if (item.op === 'put') await this.persistPut(item.store, item.key, item.value);
+        else await this.persistDelete(item.store, item.key);
+      } catch (e) { console.error('FictionPad: persist failed', e); }
+    }
+  }
+  async persistPut() {}
+  async persistDelete() {}
+}
+
+class IndexedDBAdapter extends AbstractStorage {
+  constructor(dbName = 'FictionPad') {
+    super();
+    this.dbName = dbName;
+    this.db = null;
+  }
+  async init() {
+    this.db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open(this.dbName, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve(req.result);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        for (const s of STORES)
+          if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+      };
+    });
+    for (const s of STORES) this.cache[s] = await this.#readAll(s);
+    try {
+      if (navigator.storage?.persist && !(await navigator.storage.persisted()))
+        await navigator.storage.persist();
+    } catch {}
+  }
+  #readAll(store) {
+    return new Promise((resolve, reject) => {
+      const out = {};
+      const req = this.db.transaction(store, 'readonly').objectStore(store).openCursor();
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) { out[cursor.key] = cursor.value; cursor.continue(); }
+        else resolve(out);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+  persistPut(store, key, value) {
+    if (!this.db) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const req = this.db.transaction(store, 'readwrite').objectStore(store).put(value, key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+  persistDelete(store, key) {
+    if (!this.db) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const req = this.db.transaction(store, 'readwrite').objectStore(store).delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+}
+
+// ============================================================================
+// BACKEND — OpenAI-compatible chat completions only. Endpoint normalization,
+// hand-rolled SSE parser, AbortController cancel, normalized { content } chunks.
+// ============================================================================
+function normalizeEndpoint(url) {
+  return String(url ?? '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/v1\/(chat\/completions|models)$/i, '')
+    .replace(/\/v1$/i, '');
+}
+const chatCompletionsURL = (ep) => `${normalizeEndpoint(ep)}/v1/chat/completions`;
+const modelsURL = (ep) => `${normalizeEndpoint(ep)}/v1/models`;
+const authHeaders = (apiKey) => apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
+
+async function listModels({ endpoint, apiKey, signal } = {}) {
+  const res = await fetch(modelsURL(endpoint), { headers: { ...authHeaders(apiKey) }, signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
+}
+
+// Minimal SSE parser: line-based, only data: fields, JSON payloads.
+async function* parseEventStream(body) {
+  let buf = '';
+  const take = function* (line) {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    const json = JSON.parse(data);
+    if (json.error?.message) throw new Error(json.error.message);
+    yield json;
+  };
+  for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
+    const lines = (buf + chunk).split(/\r\n|\r|\n/);
+    buf = lines.pop();
+    for (const line of lines) yield* take(line);
+  }
+  if (buf) yield* take(buf);
+}
+
+// Normalized async-generator chunk stream: yields { content } deltas.
+async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers = {}, maxTokens, signal }) {
+  const res = await fetch(chatCompletionsURL(endpoint), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, ...samplers }),
+    signal,
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      msg = json?.error?.message ?? json?.message ?? msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  for await (const json of parseEventStream(res.body)) {
+    const delta = json.choices?.[0]?.delta?.content ?? json.choices?.[0]?.message?.content;
+    if (delta) yield { content: delta };
+  }
+}
+
+// ============================================================================
+// HOOKS — localStorage UI prefs + per-collection state over the storage layer.
+// ============================================================================
+function usePersistentState(name, initialState) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(name);
+      if (raw != null) return JSON.parse(raw);
+    } catch (e) { console.error(e); }
+    return typeof initialState === 'function' ? initialState() : initialState;
+  });
+  const update = useCallback((next) => {
+    setValue(prev => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      try { localStorage.setItem(name, JSON.stringify(v)); } catch (e) { console.error(e); }
+      return v;
+    });
+  }, [name]);
+  return [value, update];
+}
+
+function useStoredMap(storage, store) {
+  const [map, setMap] = useState(() => storage.getAll(store));
+  useEffect(() => {
+    setMap({ ...storage.getAll(store) });
+    const onChange = (e) => {
+      if (e.detail?.store === store) setMap({ ...storage.getAll(store) });
+    };
+    storage.addEventListener('storechange', onChange);
+    return () => storage.removeEventListener('storechange', onChange);
+  }, [storage, store]);
+  const upsert = useCallback((id, value) => {
+    setMap(m => ({ ...m, [id]: value }));
+    storage.set(store, id, value);
+  }, [storage, store]);
+  const remove = useCallback((id) => {
+    setMap(m => { const c = { ...m }; delete c[id]; return c; });
+    storage.remove(store, id);
+  }, [storage, store]);
+  return [map, upsert, remove];
+}
+
+// ============================================================================
+// HELPERS — export/import, misc UI utilities.
+// ============================================================================
+function downloadJSON(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function pickJSONFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try { resolve(JSON.parse(await file.text())); }
+      catch (e) { resolve({ __error: String(e) }); }
+    };
+    input.click();
+  });
+}
+
+const fmtDate = (ts) => ts ? new Date(ts).toLocaleString() : '';
+
+// ============================================================================
+// ERROR BOUNDARY — a pane/dialog crash shows an inline box instead of React
+// unmounting the whole root (which blanked the page before this existed).
+// ============================================================================
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('FictionPad render error:', error, info); }
+  render() {
+    if (this.state.error) return html`
+      <div class="errbox">
+        <div><b>Render error${this.props.name ? ` — ${this.props.name}` : ''}</b></div>
+        <pre>${String(this.state.error?.message ?? this.state.error)}</pre>
+        <button class="btn small" onClick=${() => this.setState({ error: null })}>Dismiss</button>
+      </div>`;
+    return this.props.children;
+  }
+}
+
+function Markdown({ text, prose = false }) {
+  const rendered = useMemo(
+    () => marked.parse(prose ? wrapDialogue(text ?? '') : (text ?? '')),
+    [text, prose]);
+  return html`<div class="md" dangerouslySetInnerHTML=${{ __html: rendered }} />`;
+}
+
+function Modal({ title, onClose, wide, children, footer }) {
+  return html`
+    <div class="modal-overlay" onMouseDown=${(e) => e.target === e.currentTarget && onClose()}>
+      <div class="modal ${wide ? 'wide' : ''}">
+        <div class="m-head">
+          <h2>${title}</h2>
+          <button class="btn ghost" onClick=${onClose}>✕</button>
+        </div>
+        <div class="m-body">${children}</div>
+        ${footer && html`<div class="m-foot">${footer}</div>`}
+      </div>
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: SCENARIO EDITOR — full CRUD incl. lore piece editor.
+// ============================================================================
+function newLorePiece() {
+  return {
+    id: uid(), type: 'lore', title: '', content: '', keys: [],
+    pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
+    hidden: false, playable: false,
+  };
+}
+
+// Text field for string-array values (lore keys, tags). Keeps the raw text
+// locally so in-progress typing (trailing newlines, ", " before the next
+// item) isn't destroyed by the parse→join roundtrip; only re-syncs from the
+// parent when the value genuinely changed externally (piece switch, import).
+function ListInput({ values, onChange, textarea, delim, ...rest }) {
+  const joiner = delim === '\n' ? '\n' : ', ';
+  const parse = (raw) => String(raw).split(delim).map(s => s.trim()).filter(Boolean);
+  const [text, setText] = useState(() => (values ?? []).join(joiner));
+  useEffect(() => {
+    const parsed = parse(text);
+    const v = values ?? [];
+    const same = parsed.length === v.length && parsed.every((x, i) => x === v[i]);
+    if (!same) setText(v.join(joiner));
+  }, [values]);
+  const handle = (e) => { setText(e.target.value); onChange(parse(e.target.value)); };
+  return textarea
+    ? html`<textarea value=${text} onInput=${handle} ...${rest} />`
+    : html`<input type="text" value=${text} onInput=${handle} ...${rest} />`;
+}
+
+function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
+  const [open, setOpen] = useState(false);
+  const set = (patch) => onChange({ ...piece, ...patch });
+  const others = allPieces.filter(p => p.id !== piece.id);
+  return html`
+    <div class="lore-card">
+      <div class="lc-head" onClick=${() => setOpen(!open)}>
+        <span>${open ? '▾' : '▸'}</span>
+        <span class="t">${piece.title || '(untitled)'}</span>
+        ${piece.type === 'character' && html`<span class="pill">character</span>`}
+        ${piece.pinned && html`<span class="pill pinned">pinned</span>`}
+        ${piece.enabled === false && html`<span class="pill">disabled</span>`}
+        <button class="btn small danger" onClick=${(e) => { e.stopPropagation(); onRemove(); }}>✕</button>
+      </div>
+      ${open && html`
+        <div class="lc-body">
+          <div class="grid2">
+            <label class="field"><span>Title</span>
+              <input type="text" value=${piece.title} onInput=${(e) => set({ title: e.target.value })} /></label>
+            <label class="field"><span>Type</span>
+              <select value=${piece.type} onChange=${(e) => set({ type: e.target.value })}>
+                <option value="lore">lore</option>
+                <option value="character">character</option>
+              </select></label>
+          </div>
+          <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
+            <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
+          <label class="field"><span>Trigger keys — one per line, case-insensitive regex</span>
+            <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
+              onChange=${(keys) => set({ keys })} /></label>
+          <div class="grid3">
+            <label class="field"><span>Weight</span>
+              <input type="number" value=${piece.weight ?? 0} onInput=${(e) => set({ weight: Number(e.target.value) })} /></label>
+            <label class="field"><span>Search depth (est. tokens)</span>
+              <input type="number" placeholder="2048" value=${piece.searchDepth ?? ''}
+                onInput=${(e) => set({ searchDepth: e.target.value === '' ? null : Number(e.target.value) })} /></label>
+            <div class="field"><span>Flags</span>
+              <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
+              <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
+            </div>
+          </div>
+          ${piece.type === 'character' && html`
+            <div class="field"><span>Character flags</span>
+              <label class="check"><input type="checkbox" checked=${!!piece.hidden} onChange=${(e) => set({ hidden: e.target.checked })} /> hidden</label>
+              <label class="check"><input type="checkbox" checked=${!!piece.playable} onChange=${(e) => set({ playable: e.target.checked })} /> playable</label>
+            </div>`}
+          ${others.length > 0 && html`
+            <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
+              <div class="links-list">
+                ${others.map(o => html`
+                  <label class="check" key=${o.id}>
+                    <input type="checkbox" checked=${(piece.links ?? []).includes(o.id)}
+                      onChange=${(e) => set({ links: e.target.checked
+                        ? [...(piece.links ?? []), o.id]
+                        : (piece.links ?? []).filter(id => id !== o.id) })} />
+                    ${o.title || '(untitled)'}
+                  </label>`)}
+              </div></label>`}
+        </div>`}
+    </div>`;
+}
+
+function newScenario() {
+  return {
+    id: uid(), name: 'New scenario', description: '', tags: [],
+    backstory: '', greeting: '', scenarioInstructions: '', lorePieces: [],
+    createdAt: Date.now(),
+  };
+}
+
+function ScenarioEditor({ scenario, onSave, onClose }) {
+  const [draft, setDraft] = useState(() => deepClone(scenario));
+  const set = (patch) => setDraft(d => ({ ...d, ...patch }));
+  const setPiece = (id, next) =>
+    set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
+  return html`
+    <${Modal} title="Scenario editor" wide onClose=${onClose}
+      footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
+      <div class="grid2">
+        <label class="field"><span>Name</span>
+          <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>
+        <label class="field"><span>Tags (comma-separated)</span>
+          <${ListInput} delim=',' values=${draft.tags} onChange=${(tags) => set({ tags })} /></label>
+      </div>
+      <label class="field"><span>Description — <b>metadata, not sent to the AI</b></span>
+        <textarea rows=${2} value=${draft.description} onInput=${(e) => set({ description: e.target.value })} /></label>
+      <label class="field"><span>Scenario instructions — sent to the AI, ranks above the platform prompt. {{user}} = persona name.</span>
+        <textarea rows=${3} value=${draft.scenarioInstructions} onInput=${(e) => set({ scenarioInstructions: e.target.value })} /></label>
+      <label class="field"><span>Backstory — sent to the AI (static layer, truncated first under budget pressure)</span>
+        <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
+      <label class="field"><span>Greeting — first assistant message of every new chat</span>
+        <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
+      <div class="field">
+        <span>Lore pieces (${draft.lorePieces.length})
+          <button class="btn small" style=${{ marginLeft: '8px' }}
+            onClick=${() => set({ lorePieces: [...draft.lorePieces, newLorePiece()] })}>+ add piece</button>
+        </span>
+        ${draft.lorePieces.map(p => html`
+          <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
+            onChange=${(next) => setPiece(p.id, next)}
+            onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })} />`)}
+      </div>
+    <//>`;
+}
+
+// ============================================================================
+// COMPONENTS: PERSONA MANAGER
+// ============================================================================
+function PersonaManager({ personas, onUpsert, onRemove, onClose }) {
+  const [editing, setEditing] = useState(null); // draft persona or null
+  const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
+  return html`
+    <${Modal} title="Personas" onClose=${onClose}>
+      ${editing ? html`
+        <label class="field"><span>Name — replaces {{user}} everywhere</span>
+          <input type="text" value=${editing.name} onInput=${(e) => setEditing({ ...editing, name: e.target.value })} /></label>
+        <label class="field"><span>Description — sent to the AI as "{{user}} is …"</span>
+          <textarea rows=${5} value=${editing.description} onInput=${(e) => setEditing({ ...editing, description: e.target.value })} /></label>
+        <div style=${{ display: 'flex', gap: '8px' }}>
+          <button class="btn primary" disabled=${!editing.name.trim()}
+            onClick=${() => { onUpsert(editing.id, editing); setEditing(null); }}>Save</button>
+          <button class="btn" onClick=${() => setEditing(null)}>Cancel</button>
+        </div>` : html`
+        <button class="btn" onClick=${() => setEditing({ id: uid(), name: '', description: '' })}>+ New persona</button>
+        <div style=${{ marginTop: '10px' }}>
+          ${list.length === 0 && html`<div class="hint">No personas yet. A persona feeds the {{user}} macro.</div>`}
+          ${list.map(p => html`
+            <div class="side-item" key=${p.id}>
+              <span class="name">${p.name}</span>
+              <span class="tools" style=${{ display: 'flex' }}>
+                <button class="btn small" onClick=${() => setEditing(deepClone(p))}>edit</button>
+                <button class="btn small danger" onClick=${() => confirm(`Delete persona "${p.name}"?`) && onRemove(p.id)}>✕</button>
+              </span>
+            </div>`)}
+        </div>`}
+    <//>`;
+}
+
+// ============================================================================
+// COMPONENTS: SETTINGS MODAL
+// ============================================================================
+const DEFAULT_PLATFORM_PROMPT =
+  'You are an AI collaborator in an immersive roleplay. Stay in character, write vivid, ' +
+  'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
+  'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
+  'characters; leave the actions, words, and thoughts of {{user}} to the user.';
+
+const DEFAULT_SETTINGS = {
+  endpoint: 'http://localhost:8080',
+  apiKey: '',
+  model: '',
+  auxModel: '',
+  contextLength: 8192,
+  maxTokens: LENGTH_PRESETS.medium.maxTokens,
+  responseLength: 'medium',
+  samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
+  platformPrompt: DEFAULT_PLATFORM_PROMPT,
+};
+
+function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange }) {
+  const [draft, setDraft] = useState(() => deepClone(settings));
+  const [models, setModels] = useState(null);
+  const [modelsError, setModelsError] = useState(null);
+  const set = (patch) => setDraft(d => ({ ...d, ...patch }));
+  const setSampler = (k, v) => setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } }));
+
+  const fetchModels = async () => {
+    setModelsError(null);
+    try { setModels(await listModels({ endpoint: draft.endpoint, apiKey: draft.apiKey })); }
+    catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
+  };
+
+  return html`
+    <${Modal} title="Settings" wide onClose=${onClose}
+      footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
+      <label class="field"><span>Theme — applies immediately, saved automatically</span>
+        <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
+          ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
+        </select></label>
+      ${THEMES[theme]?.accentable && html`
+        <label class="field"><span>Accent — drives quotes, names on bubbles, buttons</span>
+          <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <span style=${{ width: '14px', height: '14px', borderRadius: '50%', flex: 'none',
+              background: (CTP_ACCENTS[theme] ?? {})[accent] ?? 'transparent', border: '1px solid var(--c-border)' }}></span>
+            <select value=${accent} onChange=${(e) => onAccentChange(e.target.value)} style=${{ flex: 1 }}>
+              ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
+            </select>
+          </div></label>`}
+      <div class="grid2">
+        <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
+          <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} /></label>
+        <label class="field"><span>API key (sent as Bearer token; stored in localStorage)</span>
+          <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
+      </div>
+      <div class="grid2">
+        <label class="field"><span>Chat model</span>
+          <div style=${{ display: 'flex', gap: '6px' }}>
+            <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
+            <button class="btn" onClick=${fetchModels}>Fetch</button>
+          </div>
+          <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
+          ${modelsError && html`<span class="warn">${modelsError}</span>`}
+          ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
+        </label>
+        <label class="field"><span>Aux model (memory summaries; blank = chat model)</span>
+          <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
+      </div>
+      <div class="grid3">
+        <label class="field"><span>Context length (tokens)</span>
+          <input type="number" value=${draft.contextLength} onInput=${(e) => set({ contextLength: Number(e.target.value) })} /></label>
+        <label class="field"><span>Response length preset</span>
+          <select value=${draft.responseLength}
+            onChange=${(e) => set({ responseLength: e.target.value, maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens })}>
+            <option value="short">Short (~150 tokens)</option>
+            <option value="medium">Medium (~400 tokens)</option>
+            <option value="long">Long (~800 tokens)</option>
+          </select></label>
+        <label class="field"><span>Max tokens (response reserve)</span>
+          <input type="number" value=${draft.maxTokens} onInput=${(e) => set({ maxTokens: Number(e.target.value) })} /></label>
+      </div>
+      <div class="grid3">
+        <label class="field"><span>Temperature</span>
+          <input type="number" step="0.05" value=${draft.samplers.temperature} onInput=${(e) => setSampler('temperature', Number(e.target.value))} /></label>
+        <label class="field"><span>top_p</span>
+          <input type="number" step="0.01" value=${draft.samplers.top_p} onInput=${(e) => setSampler('top_p', Number(e.target.value))} /></label>
+        <label class="field"><span>top_k</span>
+          <input type="number" value=${draft.samplers.top_k} onInput=${(e) => setSampler('top_k', Number(e.target.value))} /></label>
+        <label class="field"><span>min_p</span>
+          <input type="number" step="0.01" value=${draft.samplers.min_p} onInput=${(e) => setSampler('min_p', Number(e.target.value))} /></label>
+        <label class="field"><span>Repetition penalty</span>
+          <input type="number" step="0.01" value=${draft.samplers.repetition_penalty} onInput=${(e) => setSampler('repetition_penalty', Number(e.target.value))} /></label>
+      </div>
+      <label class="field"><span>Platform system prompt — lowest instruction rank; {{user}} works here</span>
+        <textarea rows=${5} value=${draft.platformPrompt} onInput=${(e) => set({ platformPrompt: e.target.value })} /></label>
+      <button class="btn small" onClick=${() => set({ platformPrompt: DEFAULT_PLATFORM_PROMPT })}>Reset prompt to default</button>
+    <//>`;
+}
+
+// ============================================================================
+// COMPONENTS: CONTEXT INSPECTOR — renders the assembler manifest. This is the
+// activation-observability surface: exactly what was injected, and why.
+// ============================================================================
+// Expandable row: one-line preview collapsed, full content on click, native
+// tooltip with a longer excerpt on hover.
+function InspectorRow({ pills = [], title, meta, preview, content, dimmed = false }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class="lore-item-row ${dimmed ? 'dimmed' : ''}" title=${content ? String(content).slice(0, 500) : null}>
+      <div class="row" style=${{ cursor: 'pointer' }} onClick=${() => setOpen(!open)}>
+        <span class="hint">${open ? '▾' : '▸'}</span>
+        ${pills.map((p, i) => html`<span key=${i} class="pill ${p.cls}">${p.text}</span>`)}
+        <span style=${{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>${title}</span>
+        ${meta && html`<span class="hint">${meta}</span>`}
+      </div>
+      ${!open && preview && html`<div class="ir-preview">${preview}</div>`}
+      ${open && content && html`<div class="ir-content">${content}</div>`}
+    </div>`;
+}
+
+function ContextInspector({ manifest, onPreview, hasChat }) {
+  const [showInactive, setShowInactive] = useState(false);
+  if (!manifest?.layers) return html`
+    <div>
+      <div class="hint">No generation recorded yet. Send a message, or preview the context that would be sent right now.</div>
+      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Preview current context</button>`}
+    </div>`;
+  const L = manifest.layers;
+  const row = (k, v) => html`<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`;
+  return html`
+    <div>
+      ${row('Context budget', `${manifest.budget} tok (ctx ${manifest.contextLength} − reserve ${manifest.reserve})`)}
+      ${row('Total estimate', `${manifest.totalTokens} tok`)}
+      <h4>Layers</h4>
+      ${row('Static', `${L.static.tokens} / ${L.static.cap} tok`)}
+      ${row('Lore', `${L.lore.tokens} / ${L.lore.cap} tok`)}
+      ${row('Memory', `${L.memory.tokens} / ${L.memory.cap} tok`)}
+      ${row('Greeting', `${L.greeting?.tokens ?? 0} tok`)}
+      ${row('History', `${L.history.tokens} / ${L.history.cap} tok (${L.history.kept} kept, ${L.history.dropped} dropped)`)}
+      ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠ ${w}</div>`)}
+      <h4>Lore injected (${L.lore.pieces.length})</h4>
+      ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
+      ${L.lore.pieces.map(p => html`
+        <${InspectorRow} key=${p.id}
+          pills=${[{ text: p.reason, cls: p.reason },
+            ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : [])]}
+          title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
+          preview=${p.preview} content=${p.content} />`)}
+      ${(L.lore.inactive ?? []).length > 0 && html`
+        <div class="hint ir-toggle" onClick=${() => setShowInactive(!showInactive)}>
+          Not injected (${L.lore.inactive.length}) ${showInactive ? '▾' : '▸'}
+        </div>
+        ${showInactive && L.lore.inactive.map((p, i) => html`
+          <${InspectorRow} key=${p.id ?? i} dimmed
+            pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' }]}
+            title=${p.title} meta=${`${p.tokens}t`}
+            preview=${p.preview} content=${p.content} />`)}`}
+      <h4>Memories injected (${L.memory.memories.length})</h4>
+      ${L.memory.memories.length === 0 && html`<div class="hint">No memories injected.</div>`}
+      ${L.memory.memories.map((m, i) => html`
+        <${InspectorRow} key=${m.id ?? i}
+          pills=${m.pinned ? [{ text: 'pinned', cls: 'pinned' }] : []}
+          title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
+          preview=${m.preview} content=${m.text} />`)}
+      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Re-run assembler on current chat</button>`}
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
+// ============================================================================
+function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing }) {
+  if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
+  const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
+  const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } });
+  return html`
+    <div>
+      <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
+        <span class="hint" style=${{ flex: 1 }}>
+          ${memories.length}/${MEMORY_CAP} memories · auto-summary every ${MEMORY_EVERY} messages
+        </span>
+        <button class="btn small" disabled=${summarizing} onClick=${onSummarize}>
+          ${summarizing ? 'Summarizing…' : 'Summarize now'}</button>
+      </div>
+      ${memories.length === 0 && html`<div class="hint">No memories yet. They are created automatically as the chat grows, and are versioned with the chat (branches fork them, rewinds roll them back).</div>`}
+      ${memories.map(m => html`
+        <div class="mem-item" key=${m.id}>
+          <div class="row">
+            ${m.pinned && html`<span class="pill pinned">pinned</span>`}
+            <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt)}</span>
+            <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
+              ${m.pinned ? 'unpin' : 'pin'}</button>
+            <button class="btn small danger" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
+          </div>
+          <div class="text">${m.text}</div>
+        </div>`)}
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
+// ============================================================================
+function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
+  if (!chat) return html`<div class="hint">Select a chat first.</div>`;
+  return html`
+    <div>
+      <label class="field"><span>Chat name</span>
+        <input type="text" value=${chat.name} onInput=${(e) => onUpdateChat({ ...chat, name: e.target.value })} /></label>
+      <label class="field"><span>Persona ({{user}})</span>
+        <select value=${chat.personaId ?? ''} onChange=${(e) => onUpdateChat({ ...chat, personaId: e.target.value || null })}>
+          <option value="">— none ({{user}} → "User") —</option>
+          ${Object.values(personas).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+        </select></label>
+      <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
+        <textarea rows=${4} value=${chat.customInstructions ?? ''}
+          onInput=${(e) => onUpdateChat({ ...chat, customInstructions: e.target.value })} /></label>
+      <div style=${{ display: 'flex', gap: '6px' }}>
+        <button class="btn small" onClick=${onExport}>Export chat JSON</button>
+        <button class="btn small danger" onClick=${onDelete}>Delete chat</button>
+      </div>
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: MESSAGE + COMPOSER + CHAT PANE
+// ============================================================================
+function MessageItem({ node, isRoot, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onBranch, onRewind, onDelete, onReply }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
+  const text = subUser(swipe.text, personaName);
+  const isUser = node.role === 'user';
+  const isOOC = /^\[OOC:/i.test(text.trim());
+  const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
+  const isCharacter = !!speaker && speaker !== 'Narrator';
+  const n = node.activeSwipe + 1, m = node.swipes.length;
+  return html`
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}">
+      <div class="meta">
+        <span class="who ${isCharacter ? 'speaker' : ''}"
+          style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
+        ${node.edited && html`<span>(edited)</span>`}
+        ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
+        <span style=${{ flex: 1 }}></span>
+        ${m > 1 && html`
+          <span class="swipes">
+            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀</button>
+            ${n}/${m}
+            <button class="btn small ghost" disabled=${generating || n >= m} onClick=${() => onSwipe(node.id, 1)}>▶</button>
+          </span>`}
+        <span class="actions ${streaming ? 'always' : ''}">
+          <button class="btn small ghost" title="Edit" disabled=${generating}
+            onClick=${() => { setDraft(swipe.text); setEditing(true); }}>✎</button>
+          ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating}
+            onClick=${() => onRegenerate(node.id)}>↻</button>`}
+          ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating}
+            onClick=${() => onReply(node.id)}>↻</button>`}
+          <button class="btn small ghost" title="Branch from here" disabled=${generating}
+            onClick=${() => onBranch(node.id)}>⑂</button>
+          ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
+            onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮</button>`}
+          ${!isRoot && html`<button class="btn small ghost" title="Delete message (and its branch)" disabled=${generating}
+            onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
+        </span>
+      </div>
+      <div class="bubble">
+        ${editing ? html`
+          <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
+          <div style=${{ display: 'flex', gap: '6px' }}>
+            <button class="btn small primary" onClick=${() => { onEdit(node.id, draft); setEditing(false); }}>Save</button>
+            <button class="btn small" onClick=${() => setEditing(false)}>Cancel</button>
+          </div>` :
+          isOOC
+            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${text}</div>`
+            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${text} prose /></div>`}
+      </div>
+    </div>`;
+}
+
+function Composer({ generating, onSubmit, onStop }) {
+  const [text, setText] = useState('');
+  const [hint, setHint] = useState(null);
+  const send = () => {
+    const t = text.trim();
+    if (!t) return;
+    const res = onSubmit(t); // returns an error hint string, or null when consumed
+    if (res) setHint(res);
+    else { setText(''); setHint(null); }
+  };
+  return html`
+    <div class="composer">
+      <div class="row">
+        <textarea value=${text} rows=${2}
+          placeholder="Write a message…  (/ooc <text>, /continue, Enter to send)"
+          onInput=${(e) => setText(e.target.value)}
+          onKeyDown=${(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!generating) send(); }
+          }} />
+        ${generating
+          ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`
+          : html`<button class="btn primary" onClick=${send}>Send</button>`}
+      </div>
+      ${hint && html`<div class="hint warn">${hint}</div>`}
+    </div>`;
+}
+
+function ChatPane({ chat, persona, characterNames, generating, onSubmitInput, onStop, ...actions }) {
+  const logRef = useRef(null);
+  const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chat, generating]);
+  if (!chat) return html`
+    <div class="main"><div class="chatlog"><div class="empty">
+      <div style=${{ fontSize: '22px' }}>FictionPad</div>
+      <div>Create a scenario in the sidebar, then start a chat from it.<br/>
+      Configure an OpenAI-compatible endpoint in Settings to begin generating.</div>
+    </div></div></div>`;
+  const personaName = persona?.name?.trim() || 'User';
+  const leaf = path[path.length - 1];
+  return html`
+    <div class="main">
+      <div class="chatlog" ref=${logRef}>
+        ${path.map(node => html`
+          <${MessageItem} key=${node.id} node=${node} isRoot=${!node.parentId}
+            personaName=${personaName} characterNames=${characterNames}
+            streaming=${generating?.nodeId === node.id}
+            generating=${!!generating}
+            onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
+            onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
+            onReply=${actions.onReply} />`)}
+      </div>
+      ${!generating && leaf?.role === 'user' && html`
+        <div class="gen-reply">
+          <button class="btn primary" onClick=${() => actions.onGenerateReply()}>✨ Generate response</button>
+        </div>`}
+      <${Composer} generating=${!!generating} onSubmit=${onSubmitInput} onStop=${onStop} />
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: SIDEBAR
+// ============================================================================
+function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelectScenario, onSelectChat,
+                  onNewScenario, onEditScenario, onDeleteScenario, onNewChat, onExportScenario, onImport,
+                  onOpenPersonas, onOpenSettings, collapsed, onToggleCollapse, onDeleteChat,
+                  width, onDragStart, onResetWidth }) {
+  const chatList = Object.values(chats)
+    .filter(c => !selectedScenarioId || c.scenarioId === selectedScenarioId)
+    .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+  const scenarioList = Object.values(scenarios).sort((a, b) => a.name.localeCompare(b.name));
+  return html`
+    <div class="sidebar ${collapsed ? 'collapsed' : ''}"
+      style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
+      <div class="head">
+        <h1>FictionPad</h1>
+        <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
+        <button class="btn small ghost" title="Settings" onClick=${onOpenSettings}>⚙</button>
+        <button class="btn small ghost" title="Collapse sidebar" onClick=${onToggleCollapse}>«</button>
+      </div>
+      <div class="scroll">
+        <div class="side-section">
+          <div class="title">Scenarios
+            <button class="btn small ghost" title="New scenario" onClick=${onNewScenario}>＋</button>
+          </div>
+          ${scenarioList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No scenarios yet.</div>`}
+          ${scenarioList.map(s => html`
+            <div class="side-item ${s.id === selectedScenarioId ? 'selected' : ''}" key=${s.id}
+              onClick=${() => onSelectScenario(s.id === selectedScenarioId ? null : s.id)}>
+              <span class="name">${s.name}</span>
+              <span class="tools">
+                <button class="btn small ghost" title="New chat from this scenario"
+                  onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>💬</button>
+                <button class="btn small ghost" title="Edit"
+                  onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
+                <button class="btn small ghost" title="Export JSON"
+                  onClick=${(e) => { e.stopPropagation(); onExportScenario(s.id); }}>⤓</button>
+                <button class="btn small ghost" title="Delete"
+                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete scenario "${s.name}"? Its chats are NOT deleted.`) && onDeleteScenario(s.id); }}>✕</button>
+              </span>
+            </div>`)}
+        </div>
+        <div class="side-section">
+          <div class="title">Chats${selectedScenarioId ? '' : ' (all)'}</div>
+          ${chatList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use 💬 on a scenario.</div>`}
+          ${chatList.map(c => html`
+            <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
+              onClick=${() => onSelectChat(c.id)}>
+              <span class="name">${c.name}</span>
+              <span class="tools">
+                <button class="btn small ghost" title="Delete chat"
+                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete chat "${c.name}"?`) && onDeleteChat(c.id); }}>✕</button>
+              </span>
+            </div>`)}
+        </div>
+      </div>
+      <div class="foot">
+        <button class="btn small" onClick=${onImport}>Import JSON</button>
+      </div>
+      ${!collapsed && html`<div class="pane-handle right" title="Drag to resize · double-click to reset"
+        onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
+        onDoubleClick=${onResetWidth} />`}
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: NEW CHAT MODAL (scenario → pick persona)
+// ============================================================================
+function NewChatModal({ scenario, personas, onCreate, onClose }) {
+  const list = Object.values(personas);
+  const [personaId, setPersonaId] = useState(list[0]?.id ?? '');
+  const [newName, setNewName] = useState('');
+  return html`
+    <${Modal} title=${`New chat — ${scenario.name}`} onClose=${onClose}
+      footer=${html`<button class="btn primary" onClick=${() => onCreate(personaId, newName)}>Start chat</button>`}>
+      <label class="field"><span>Persona ({{user}})</span>
+        <select value=${personaId} onChange=${(e) => setPersonaId(e.target.value)}>
+          <option value="">— none ({{user}} → "User") —</option>
+          ${list.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+        </select></label>
+      <label class="field"><span>…or create a persona inline (used when nothing is selected above)</span>
+        <input type="text" placeholder="New persona name" value=${newName} onInput=${(e) => setNewName(e.target.value)} />
+      </label>
+    <//>`;
+}
+
+// ============================================================================
+// APP — wires storage, collections, generation orchestration, and the panels.
+// ============================================================================
+function newChat(scenario, personaId) {
+  const rootId = uid();
+  return {
+    id: uid(), scenarioId: scenario.id, personaId: personaId ?? null,
+    name: `${scenario.name} — ${fmtDate(Date.now())}`,
+    customInstructions: '',
+    rootMessageId: rootId, activeLeafId: rootId,
+    messages: {
+      [rootId]: { id: rootId, parentId: null, role: 'assistant', edited: false, activeSwipe: 0,
+        swipes: [{ text: scenario.greeting ?? '', createdAt: Date.now(), modelId: null }] },
+    },
+    memoryStore: { memories: [], cursor: 0 },
+    settings: {},
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+}
+
+const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
+
+// Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
+// when unset, a pane auto-sizes to consume the slack margin around the chat
+// column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
+const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16;
+
+function Main({ storage, storageFailed }) {
+  const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
+  const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
+  const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
+  const [settingsRaw, setSettings] = usePersistentState('fictionpad.settings', DEFAULT_SETTINGS);
+  const settings = useMemo(() => ({
+    ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
+    samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
+  }), [settingsRaw]);
+  const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
+  const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
+  const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
+  useEffect(() => applyTheme(theme, accent), [theme, accent]);
+  const [manifest, setManifest] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [generating, setGenerating] = useState(null); // { chatId, nodeId }
+  const [summarizing, setSummarizing] = useState(false);
+  const [error, setError] = useState(null);
+  const genRef = useRef(null); // { abort }
+
+  // Always-fresh refs for async generation loops (avoid stale closures).
+  const ref = useRef({});
+  ref.current = { scenarios, personas, chats, settings };
+
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 9000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  const chat = chats[ui.chatId] ?? null;
+  const persona = chat?.personaId ? personas[chat.personaId] : null;
+  const personaName = persona?.name?.trim() || 'User';
+  const characterNames = useMemo(
+    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null),
+    [chat, scenarios]);
+  const sidebarCollapsed = ui.sidebarCollapsed ?? false;
+  const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
+  const saveChat = useCallback((c) => upsertChat(c.id, { ...c, updatedAt: Date.now() }), [upsertChat]);
+
+  // ---- side-pane sizing (auto slack-fill + drag-to-resize) ----
+  const [viewportW, setViewportW] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setViewportW(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const chatW = useMemo(() => {
+    const v = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--chat-w'), 10);
+    return Number.isFinite(v) ? v : 780;
+  }, []);
+  const drawerOpen = ui.drawer && chat;
+  const clampPane = (w) => Math.round(Math.max(PANE_MIN, Math.min(w, viewportW * PANE_MAX_VW)));
+  const autoPaneW = clampPane(Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
+  const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
+  const dwW = drawerOpen ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
+  // Narrow-viewport fallback: pad the center column with the *actual* pane
+  // widths only when the slack margin can't contain them — chat never hides.
+  const padL = viewportW < chatW + 2 * sbW ? sbW : 0;
+  const padR = viewportW < chatW + 2 * dwW ? dwW : 0;
+  const [dragging, setDragging] = useState(false);
+  const paneDragStart = (side) => (startX) => {
+    const key = side === 'left' ? 'sbWidth' : 'dwWidth';
+    const startW = side === 'left' ? sbW : dwW;
+    setDragging(true);
+    const onMove = (ev) => {
+      const dx = side === 'left' ? ev.clientX - startX : startX - ev.clientX;
+      const w = clampPane(startW + dx);
+      setUi(u => (u[key] === w ? u : { ...u, [key]: w }));
+    };
+    const onUp = () => {
+      setDragging(false);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+  const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
+
+  // ---- memory subsystem ----
+  async function summarizeNow(chatObj) {
+    const { personas: pe, settings: st } = ref.current;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
+    const recent = path.slice(-MEMORY_EVERY)
+      .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    if (!recent.trim()) return;
+    setSummarizing(true);
+    try {
+      let out = '';
+      const memMessages = [
+        { role: 'system', content: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.' },
+        { role: 'user', content: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):` },
+      ];
+      for await (const chunk of openaiChatStream({
+        endpoint: st.endpoint, apiKey: st.apiKey, model, messages: memMessages,
+        samplers: { temperature: 0.3 }, maxTokens: 220,
+      })) out += chunk.content;
+      out = out.trim().slice(0, 500);
+      if (out) {
+        const store = addMemory(chatObj.memoryStore, out);
+        saveChat({ ...chatObj, memoryStore: { ...store, cursor: path.length } });
+      }
+    } catch (e) {
+      setError(`Memory summarization failed: ${e.message ?? e}`);
+    } finally {
+      setSummarizing(false);
+    }
+  }
+  function maybeSummarize(chatObj) {
+    const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
+    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= MEMORY_EVERY) summarizeNow(chatObj);
+  }
+
+  // ---- generation ----
+  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false } = {}) {
+    const { scenarios: sc, personas: pe, settings: st } = ref.current;
+    if (!st.endpoint || !st.model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    const scen = sc[chatObj.scenarioId];
+    const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
+    const node = chatObj.messages[nodeId];
+    // The node being generated is excluded from the prompt unless continuing it.
+    const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
+    const { messages, manifest: man } = assemblePrompt({
+      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt,
+    });
+    setManifest(man);
+    const abort = new AbortController();
+    genRef.current = { abort };
+    setGenerating({ chatId: chatObj.id, nodeId });
+    let work = chatObj;
+    let acc = continuation ? activeText(node) : '';
+    const applyText = (text) => {
+      const n = work.messages[nodeId];
+      if (!n) return;
+      const swipes = n.swipes.slice();
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: st.model };
+      work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } }, updatedAt: Date.now() };
+      upsertChat(work.id, work);
+    };
+    try {
+      for await (const chunk of openaiChatStream({
+        endpoint: st.endpoint, apiKey: st.apiKey, model: st.model, messages,
+        samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
+      })) {
+        acc += chunk.content;
+        applyText(acc);
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') {
+        setError(`Generation failed: ${e.message ?? e}`);
+        if (!acc) {
+          // Clean up the empty swipe / node so no blank bubble is left behind.
+          const n = work.messages[nodeId];
+          if (n && n.swipes.length > 1) {
+            const swipes = n.swipes.slice(0, -1);
+            work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } } };
+            upsertChat(work.id, work);
+          } else if (n && fresh) {
+            const messages = { ...work.messages };
+            delete messages[nodeId];
+            work = { ...work, messages, activeLeafId: n.parentId };
+            upsertChat(work.id, work);
+          }
+        }
+      }
+    } finally {
+      genRef.current = null;
+      setGenerating(null);
+      if (acc) {
+        // Attribute the finished swipe to a character (or "Narrator").
+        const names = characterNamesOf(scen);
+        const n = work.messages[nodeId];
+        if (n) {
+          const swipes = n.swipes.slice();
+          swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator' };
+          work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } } };
+          upsertChat(work.id, work);
+        }
+        maybeSummarize(work);
+      }
+      storage.flush();
+    }
+  }
+
+  // ---- chat input / slash commands ----
+  function sendUserMessage(c, content) {
+    const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
+    const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
+    upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+    runGeneration(c2, asstId, { fresh: true });
+  }
+  function handleContinue(c) {
+    const path = getActivePath(c.messages, c.activeLeafId);
+    const last = path[path.length - 1];
+    if (last?.role === 'assistant' && activeText(last)) {
+      runGeneration(c, last.id, { continuation: true });
+    } else {
+      const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
+      upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+      runGeneration(c1, id, { fresh: true });
+    }
+  }
+  function handleInput(raw) {
+    const c = ref.current.chats[ui.chatId];
+    if (!c) return 'Select or create a chat first.';
+    if (genRef.current) return 'Already generating — press Stop first.';
+    if (raw.startsWith('/')) {
+      const sp = raw.indexOf(' ');
+      const cmd = (sp === -1 ? raw : raw.slice(0, sp)).toLowerCase();
+      const arg = sp === -1 ? '' : raw.slice(sp + 1).trim();
+      if (cmd === '/ooc') {
+        if (!arg) return 'Usage: /ooc <text>';
+        sendUserMessage(c, `[OOC: ${arg}]`);
+        return null;
+      }
+      if (cmd === '/continue') { handleContinue(c); return null; }
+      return `Unknown command ${cmd}. Available: /ooc <text>, /continue`;
+    }
+    sendUserMessage(c, raw);
+    return null;
+  }
+
+  // ---- per-message actions ----
+  const onEdit = (nodeId, text) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n) return;
+    const swipes = n.swipes.slice();
+    swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text };
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, edited: true } } });
+  };
+  const onRegenerate = (nodeId) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n || genRef.current) return;
+    const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    upsertChat(c1.id, c1);
+    runGeneration(c1, nodeId);
+  };
+  const onSwipe = (nodeId, dir) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n) return;
+    const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } });
+  };
+  const onBranch = (nodeId) => {
+    const c = ref.current.chats[ui.chatId];
+    if (!c) return;
+    const b = branchChat(c, nodeId); // deep-copies messages + memoryStore
+    upsertChat(b.id, b);
+    setUi(u => ({ ...u, chatId: b.id }));
+  };
+  const onRewind = (nodeId) => {
+    const c = ref.current.chats[ui.chatId];
+    if (c) saveChat(rewindChat(c, nodeId)); // rolls memoryStore back too
+  };
+  const onDeleteMsg = (nodeId) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n?.parentId) return;
+    const messages = deleteSubtree(c.messages, nodeId);
+    const leaf = messages[c.activeLeafId] ? c.activeLeafId : n.parentId;
+    saveChat({ ...c, messages, activeLeafId: leaf });
+  };
+
+  // ---- scenarios / personas / chats ----
+  const onSaveScenario = (draft) => { upsertScenario(draft.id, draft); setModal(null); };
+  const onDeleteScenario = (id) => {
+    removeScenario(id);
+    if (ui.scenarioId === id) setUi(u => ({ ...u, scenarioId: null }));
+  };
+  const createChat = (scenarioId, personaId, newPersonaName) => {
+    let pid = personaId || null;
+    if (!pid && newPersonaName.trim()) {
+      pid = uid();
+      upsertPersona(pid, { id: pid, name: newPersonaName.trim(), description: '' });
+    }
+    const scen = ref.current.scenarios[scenarioId];
+    if (!scen) return;
+    const c = newChat(scen, pid);
+    upsertChat(c.id, c);
+    setUi(u => ({ ...u, chatId: c.id, scenarioId }));
+    setModal(null);
+  };
+  const onDeleteChat = (id) => {
+    // Abort generation in flight for this chat before removing it.
+    if (generating?.chatId === id) genRef.current?.abort.abort();
+    removeChat(id);
+    if (ui.chatId === id) setUi(u => ({ ...u, chatId: null }));
+  };
+
+  // Generate an assistant reply as a child of a user message (defaults to the
+  // active leaf). A new assistant child becomes the active leaf, so repeated
+  // calls create sibling assistant branches — same semantics as swipes.
+  const onGenerateReply = (nodeId = null) => {
+    const c = ref.current.chats[ui.chatId];
+    if (!c || genRef.current) return;
+    const parent = c.messages[nodeId ?? c.activeLeafId];
+    if (!parent || parent.role !== 'user') return;
+    const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
+    upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+    runGeneration(c1, id, { fresh: true });
+  };
+
+  // ---- export / import ----
+  const onExportScenario = (id) =>
+    downloadJSON(`fictionpad-scenario-${scenarios[id]?.name ?? id}.json`, { type: 'fictionpad-scenario', version: 1, data: scenarios[id] });
+  const onExportChat = (c) =>
+    downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  const onImport = async () => {
+    const obj = await pickJSONFile();
+    if (!obj) return;
+    if (obj.__error) return setError(`Import failed: ${obj.__error}`);
+    if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
+      const s = { ...obj.data, id: uid() };
+      upsertScenario(s.id, s);
+      setUi(u => ({ ...u, scenarioId: s.id }));
+    } else if (obj.type === 'fictionpad-chat' && obj.data?.messages) {
+      const c = { ...obj.data, id: uid() };
+      upsertChat(c.id, c);
+      setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId }));
+      if (!ref.current.scenarios[c.scenarioId])
+        setError('Chat imported, but its scenario is not present in this browser.');
+    } else {
+      setError('Unrecognized JSON: expected a FictionPad scenario or chat export.');
+    }
+  };
+
+  const onPreview = () => {
+    const c = ref.current.chats[ui.chatId];
+    if (!c) return;
+    const { manifest: man } = assemblePrompt({
+      scenario: ref.current.scenarios[c.scenarioId],
+      persona: c.personaId ? ref.current.personas[c.personaId] : null,
+      chat: c, settings: ref.current.settings, platformPrompt: ref.current.settings.platformPrompt,
+    });
+    setManifest(man);
+  };
+
+  return html`
+    <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${drawerOpen ? 'dw-open' : ''} ${dragging ? 'dragging' : ''}">
+      <${Sidebar}
+        scenarios=${scenarios} chats=${chats}
+        selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
+        onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id }))}
+        onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id }))}
+        onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
+        onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
+        onDeleteScenario=${onDeleteScenario}
+        onNewChat=${(scenarioId) => setModal({ kind: 'newChat', scenarioId })}
+        onExportScenario=${onExportScenario}
+        onImport=${onImport}
+        onOpenPersonas=${() => setModal({ kind: 'personas' })}
+        onOpenSettings=${() => setModal({ kind: 'settings' })}
+        collapsed=${sidebarCollapsed} onToggleCollapse=${toggleSidebar}
+        onDeleteChat=${onDeleteChat}
+        width=${sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
+      <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
+        ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
+        ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
+        <div class="topbar">
+          <div class="topbar-inner">
+            ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
+            <span class="title">${chat ? chat.name : 'FictionPad'}</span>
+            ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
+            <span class="spacer"></span>
+            ${chat && Object.entries(DRAWER_TABS).map(([tab, label]) => html`
+              <button key=${tab} class="btn small ${ui.drawer === tab ? 'primary' : ''}"
+                onClick=${() => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }))}>${label}</button>`)}
+          </div>
+        </div>
+        <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <${ErrorBoundary} name="chat">
+            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
+              generating=${generating?.chatId === chat?.id ? generating : null}
+              onSubmitInput=${handleInput} onStop=${() => genRef.current?.abort.abort()}
+              onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe}
+              onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
+              onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} />
+          <//>
+          ${drawerOpen && html`
+            <div class="drawer" style=${{ width: dwW, minWidth: dwW }}>
+              <div class="pane-handle left" title="Drag to resize · double-click to reset"
+                onPointerDown=${(e) => { e.preventDefault(); paneDragStart('right')(e.clientX); }}
+                onDoubleClick=${() => resetPaneWidth('right')} />
+              <div class="tabs">
+                ${Object.entries(DRAWER_TABS).map(([tab, label]) => html`
+                  <button key=${tab} class=${ui.drawer === tab ? 'active' : ''}
+                    onClick=${() => setUi(u => ({ ...u, drawer: tab }))}>${label}</button>`)}
+              </div>
+              <div class="body">
+                <${ErrorBoundary} name="panel">
+                  ${ui.drawer === 'inspector' && html`<${ContextInspector} manifest=${manifest} hasChat=${!!chat} onPreview=${onPreview} />`}
+                  ${ui.drawer === 'memory' && html`<${MemoryPanel} chat=${chat} onUpdateChat=${saveChat} onSummarize=${() => summarizeNow(chat)} summarizing=${summarizing} />`}
+                  ${ui.drawer === 'chat' && html`<${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${saveChat}
+                    onExport=${() => onExportChat(chat)} onDelete=${() => confirm(`Delete chat "${chat.name}"?`) && onDeleteChat(chat.id)} />`}
+                <//>
+              </div>
+            </div>`}
+        </div>
+      </div>
+    </div>
+    ${modal?.kind === 'scenario' && html`
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'personas' && html`
+      <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona} onRemove=${removePersona} onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'settings' && html`
+      <${ErrorBoundary} name="settings"><${SettingsModal} settings=${settings} theme=${theme} onThemeChange=${setTheme}
+        accent=${accent} onAccentChange=${setAccent}
+        onSave=${(s) => { setSettings(s); setModal(null); }} onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
+      <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}
+        onCreate=${(pid, newName) => createChat(modal.scenarioId, pid, newName)}
+        onClose=${() => setModal(null)} /><//>`}
+  `;
+}
+
+function App() {
+  const [storage] = useState(() => new IndexedDBAdapter());
+  const [ready, setReady] = useState(false);
+  const [storageFailed, setStorageFailed] = useState(false);
+  useEffect(() => {
+    storage.init()
+      .catch(e => { console.error(e); setStorageFailed(true); })
+      .finally(() => setReady(true));
+    const flush = () => storage.flush();
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', flush);
+    };
+  }, [storage]);
+  if (!ready) return html`<div class="empty">Loading FictionPad…</div>`;
+  return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageFailed=${storageFailed} /><//>`;
+}
+
+createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script>
