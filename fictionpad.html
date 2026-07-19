@@ -893,6 +893,45 @@ class IndexedDBAdapter extends AbstractStorage {
   }
 }
 
+// Server storage adapter (mikupad ServerDBAdapter pattern): same interface as
+// IndexedDBAdapter — the debounced save queue and synchronous cache reads in
+// AbstractStorage are shared, so React never knows which backend is active.
+// init() throws when the server doesn't speak the storage protocol → boot
+// falls back to IndexedDB silently.
+class ServerDBAdapter extends AbstractStorage {
+  constructor(serverToken = '') {
+    super();
+    this.serverToken = serverToken;
+  }
+  #headers() {
+    return {
+      'Content-Type': 'application/json',
+      ...(this.serverToken ? { 'Authorization': `Bearer ${this.serverToken}` } : {}),
+    };
+  }
+  async #post(route, body) {
+    const res = await fetch(route, { method: 'POST', headers: this.#headers(), body: JSON.stringify(body ?? {}) });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try { msg = (await res.json())?.error ?? msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+  async init() {
+    const res = await fetch('/version', { headers: this.#headers() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = await res.json();
+    if (info?.version !== 1 || info?.storage !== true) throw new Error('not a FictionPad storage server');
+    for (const s of STORES) this.cache[s] = await this.remoteAll(s);
+  }
+  async persistPut(store, key, value) { await this.#post('/save', { store, key, data: value }); }
+  async persistDelete(store, key) { await this.#post('/delete', { store, key }); }
+  // Used by the settings migration helpers.
+  async remoteAll(store) { return (await this.#post('/all', { store })).entries ?? {}; }
+  async remoteSave(store, key, data) { await this.#post('/save', { store, key, data }); }
+}
+
 // ============================================================================
 // BACKEND — OpenAI-compatible chat completions only. Endpoint normalization,
 // hand-rolled SSE parser, AbortController cancel, normalized { content } chunks.
@@ -1405,15 +1444,31 @@ const DEFAULT_SETTINGS = {
   tokenProbs: true, // request logprobs + top_logprobs on generations
   suggestions: true, // response-suggestion chips after generations
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
+  serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
   logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
 };
 
-function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias }) {
+function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
+                        storageKind, onUpload, onDownload }) {
   const [draft, setDraft] = useState(() => deepClone(settings));
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
+  const [migBusy, setMigBusy] = useState(null);
+  const [migNote, setMigNote] = useState(null);
   const set = (patch) => setDraft(d => ({ ...d, ...patch }));
   const setSampler = (k, v) => setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } }));
+
+  const migrate = async (dir) => {
+    const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
+    if (!confirm(`${label}? Rows with the same keys are overwritten (last write wins, no merging).`)) return;
+    setMigBusy(dir); setMigNote(null);
+    try {
+      const n = await (dir === 'up' ? onUpload() : onDownload());
+      setMigNote(`Done — ${n} entit${n === 1 ? 'y' : 'ies'} ${dir === 'up' ? 'uploaded' : 'downloaded'}.`);
+    } catch (e) {
+      setMigNote(`Failed: ${e.message ?? e}`);
+    } finally { setMigBusy(null); }
+  };
 
   const fetchModels = async () => {
     setModelsError(null);
@@ -1492,6 +1547,22 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
           placeholder="e.g. your EOS marker, if your model emits one"
           onChange=${(stopStrings) => set({ stopStrings })} /></label>
+      <div class="field"><span>Storage</span>
+        <div class="hint">${storageKind === 'server'
+          ? 'Server storage active — scenarios, personas and chats are shared via this server.'
+          : 'Local storage — data lives in this browser only.'}</div>
+        <label class="field" style=${{ marginTop: '6px' }}>
+          <span>Server token (only when the server sets FICTIONPAD_TOKEN; applies after reload)</span>
+          <input type="password" value=${draft.serverToken ?? ''} onInput=${(e) => set({ serverToken: e.target.value })} /></label>
+        ${storageKind === 'server' && html`
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('up')}>
+              ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
+            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
+              ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+          </div>
+          ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
+      </div>
       <label class="field"><span>Platform system prompt — lowest instruction rank; {{user}} works here</span>
         <textarea rows=${5} value=${draft.platformPrompt} onInput=${(e) => set({ platformPrompt: e.target.value })} /></label>
       <button class="btn small" onClick=${() => set({ platformPrompt: DEFAULT_PLATFORM_PROMPT })}>Reset prompt to default</button>
@@ -2096,7 +2167,7 @@ const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 // column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
 const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16;
 
-function Main({ storage, storageFailed }) {
+function Main({ storage, storageKind, storageFailed }) {
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
@@ -2218,6 +2289,32 @@ function Main({ storage, storageFailed }) {
     window.addEventListener('pointerup', onUp);
   };
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
+
+  // ---- storage migration helpers (settings; last write wins per key) ----
+  async function migrateUpload() {
+    const idb = new IndexedDBAdapter();
+    await idb.init();
+    const srv = new ServerDBAdapter(ref.current.settings.serverToken ?? '');
+    let n = 0;
+    for (const store of STORES)
+      for (const [key, data] of Object.entries(idb.getAll(store))) {
+        await srv.remoteSave(store, key, data);
+        n++;
+      }
+    return n;
+  }
+  async function migrateDownload() {
+    const idb = new IndexedDBAdapter();
+    await idb.init();
+    const srv = new ServerDBAdapter(ref.current.settings.serverToken ?? '');
+    let n = 0;
+    for (const store of STORES)
+      for (const [key, data] of Object.entries(await srv.remoteAll(store))) {
+        await idb.persistPut(store, key, data);
+        n++;
+      }
+    return n;
+  }
 
   // ---- memory subsystem ----
   // Shared memory-card generation (auto-summarize + /memory). Returns the
@@ -2704,6 +2801,9 @@ function Main({ storage, storageFailed }) {
             <span class="title">${chat ? chat.name : 'FictionPad'}</span>
             ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
             <span class="spacer"></span>
+            <span class="hint" title=${storageKind === 'server'
+              ? 'Scenarios, personas and chats are stored on this server (shared).'
+              : 'Data is stored locally in this browser.'}>${storageKind === 'server' ? 'server storage' : 'local storage'}</span>
             ${chat && Object.entries(DRAWER_TABS).map(([tab, label]) => html`
               <button key=${tab} class="btn small ${ui.drawer === tab ? 'primary' : ''}"
                 onClick=${() => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }))}>${label}</button>`)}
@@ -2755,6 +2855,7 @@ function Main({ storage, storageFailed }) {
       <${ErrorBoundary} name="settings"><${SettingsModal} settings=${settings} theme=${theme} onThemeChange=${setTheme}
         accent=${accent} onAccentChange=${setAccent}
         onOpenLogitBias=${() => setModal({ kind: 'logitBias' })}
+        storageKind=${storageKind} onUpload=${migrateUpload} onDownload=${migrateDownload}
         onSave=${(s) => { setSettings(prev => ({ ...s, logitBias: prev?.logitBias ?? s.logitBias ?? {} })); setModal(null); }}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'logitBias' && html`
@@ -2780,13 +2881,36 @@ function Main({ storage, storageFailed }) {
 }
 
 function App() {
-  const [storage] = useState(() => new IndexedDBAdapter());
-  const [ready, setReady] = useState(false);
+  const [storage, setStorage] = useState(null);
+  const [storageKind, setStorageKind] = useState(null); // 'server' | 'local'
   const [storageFailed, setStorageFailed] = useState(false);
   useEffect(() => {
-    storage.init()
-      .catch(e => { console.error(e); setStorageFailed(true); })
-      .finally(() => setReady(true));
+    let alive = true;
+    (async () => {
+      let adapter = null, kind = 'local';
+      // Server storage when served over http(s) and the handshake succeeds;
+      // any error or wrong shape → silent IndexedDB fallback.
+      if (location.protocol === 'http:' || location.protocol === 'https:') {
+        try {
+          const saved = JSON.parse(localStorage.getItem('fictionpad.settings') ?? '{}');
+          const server = new ServerDBAdapter(saved?.serverToken ?? '');
+          await server.init();
+          adapter = server;
+          kind = 'server';
+        } catch (e) {
+          console.warn('FictionPad: server storage unavailable, using browser storage.', e);
+        }
+      }
+      if (!adapter) {
+        adapter = new IndexedDBAdapter();
+        try { await adapter.init(); }
+        catch (e) { console.error(e); if (alive) setStorageFailed(true); }
+      }
+      if (alive) { setStorage(adapter); setStorageKind(kind); }
+    })();
+  }, []);
+  useEffect(() => {
+    if (!storage) return;
     const flush = () => storage.flush();
     window.addEventListener('beforeunload', flush);
     document.addEventListener('visibilitychange', flush);
@@ -2795,8 +2919,8 @@ function App() {
       document.removeEventListener('visibilitychange', flush);
     };
   }, [storage]);
-  if (!ready) return html`<div class="empty">Loading FictionPad…</div>`;
-  return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageFailed=${storageFailed} /><//>`;
+  if (!storage) return html`<div class="empty">Loading FictionPad…</div>`;
+  return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;
 }
 
 createRoot(document.getElementById('root')).render(html`<${App} />`);

@@ -17,9 +17,28 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { gzipSync, gunzipSync } from 'node:zlib';
 
 const PORT = Number(process.argv[2]) || 8788;
 const ROOT = dirname(fileURLToPath(import.meta.url));
+const DB_PATH = process.env.FICTIONPAD_DB || join(ROOT, 'fictionpad.db');
+const TOKEN = process.env.FICTIONPAD_TOKEN || null; // when set, storage routes need Bearer auth
+
+// ---- server-side storage (mikupad-style): one kv table, gzip-compressed JSON ----
+const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta']);
+const db = new DatabaseSync(DB_PATH);
+db.exec('CREATE TABLE IF NOT EXISTS kv (store TEXT, key TEXT, data BLOB, PRIMARY KEY (store, key))');
+const authed = (req) => !TOKEN || req.headers.authorization === `Bearer ${TOKEN}`;
+const sendJson = (res, status, obj) => {
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(obj));
+};
+const readJsonBody = async (req) => {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+};
 
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'transfer-encoding', 'te',
@@ -55,6 +74,52 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true }));
+  }
+
+  // ---- storage protocol ----
+  if (url.pathname === '/version' && req.method === 'GET') {
+    if (!authed(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    return sendJson(res, 200, { version: 1, storage: true });
+  }
+
+  if (['/load', '/save', '/all', '/delete', '/list'].includes(url.pathname)) {
+    if (!authed(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'POST required' });
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { return sendJson(res, 400, { error: 'invalid JSON' }); }
+    const { store, key, data } = body ?? {};
+    if (url.pathname !== '/list' && !KNOWN_STORES.has(store))
+      return sendJson(res, 400, { error: `unknown store: ${store}` });
+    switch (url.pathname) {
+      case '/load': {
+        const row = db.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get(store, String(key));
+        if (!row) return sendJson(res, 404, { error: 'not found' });
+        return sendJson(res, 200, { data: JSON.parse(gunzipSync(row.data).toString('utf8')) });
+      }
+      case '/save': {
+        if (data === undefined) return sendJson(res, 400, { error: 'missing data' });
+        const blob = gzipSync(Buffer.from(JSON.stringify(data), 'utf8'));
+        db.prepare('INSERT OR REPLACE INTO kv (store, key, data) VALUES (?, ?, ?)').run(store, String(key), blob);
+        return sendJson(res, 200, { ok: true });
+      }
+      case '/all': {
+        const entries = {};
+        for (const row of db.prepare('SELECT key, data FROM kv WHERE store = ?').all(store))
+          entries[row.key] = JSON.parse(gunzipSync(row.data).toString('utf8'));
+        return sendJson(res, 200, { entries });
+      }
+      case '/delete': {
+        db.prepare('DELETE FROM kv WHERE store = ? AND key = ?').run(store, String(key));
+        return sendJson(res, 200, { ok: true });
+      }
+      case '/list': {
+        const stores = {};
+        for (const row of db.prepare('SELECT store, COUNT(*) AS n FROM kv GROUP BY store').all())
+          stores[row.store] = row.n;
+        return sendJson(res, 200, { stores });
+      }
+    }
   }
 
   if (url.pathname.startsWith('/proxy/')) {
@@ -125,6 +190,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`FictionPad server running:`);
-  console.log(`  app:   http://localhost:${PORT}/`);
-  console.log(`  proxy: http://localhost:${PORT}/proxy/<real-endpoint>`);
+  console.log(`  app:     http://localhost:${PORT}/`);
+  console.log(`  proxy:   http://localhost:${PORT}/proxy/<real-endpoint>`);
+  console.log(`  storage: SQLite kv at ${DB_PATH}`);
+  if (TOKEN) console.log(`  auth:    FICTIONPAD_TOKEN required for storage routes`);
 });

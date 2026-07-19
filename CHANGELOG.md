@@ -46,3 +46,20 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Fixed**
 - Stop tokens/strings never leak into the visible reply text
 
+
+## v2.0 - Server-Side Storage
+
+**Added**
+
+- Optional server-side storage: `server.mjs` now persists scenarios, personas, chats and metadata in a SQLite database (`fictionpad.db`), stored as gzip-compressed JSON in a single key/value table
+- New storage protocol endpoints on the server: `/version`, `/load`, `/save`, `/all`, `/delete`, `/list`
+- Optional Bearer-token protection for storage routes via the `FICTIONPAD_TOKEN` environment variable, with a matching "Server token" field in Settings
+- One-click migration in Settings: upload local browser data to the server, or download server data back to the browser (last write wins per key)
+- Header indicator showing whether server or local storage is active
+- `tests/server.test.mjs` covering the storage protocol over HTTP and the on-disk gzip encoding
+
+**Changed**
+
+- On startup the app probes the server for storage support and uses it when available; otherwise it falls back silently to browser IndexedDB storage
+- Removed the bundled `reference/mikupad` folder
+
