@@ -265,6 +265,29 @@ trial('effectiveEndpoint rewriting', () => {
   if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
 });
 
+// delta.content is the text authority: misaligned logprobs must not lose text.
+trial('openaiChatStream: misaligned vs aligned delta/logprobs', async () => {
+  const sse = [
+    // misaligned: delta has "*He" but logprobs only cover "He" → one plain chunk, text intact
+    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"He","logprob":-0.5,"top_logprobs":[]}]}}]}',
+    // aligned: delta "*He" tiled exactly by lp entries ["*","He"] → two per-token chunks
+    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"*","logprob":-0.1,"top_logprobs":[{"token":"*","logprob":-0.1}]},{"token":"He","logprob":-0.7,"top_logprobs":[]}]}}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sse, { status: 200 });
+  try {
+    const chunks = [];
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true })) chunks.push(c);
+    const text = chunks.map(c => c.content).join('');
+    if (text !== '*He*He') throw new Error('text lost or reordered: ' + JSON.stringify(text));
+    if (chunks.length !== 3) throw new Error('expected 1 plain + 2 token chunks, got ' + chunks.length);
+    if (chunks[0].content !== '*He' || chunks[0].logprob !== undefined) throw new Error('misaligned chunk should be a single plain chunk: ' + JSON.stringify(chunks[0]));
+    if (chunks[1].content !== '*' || chunks[1].logprob !== -0.1) throw new Error('aligned token 1: ' + JSON.stringify(chunks[1]));
+    if (chunks[2].content !== 'He' || chunks[2].logprob !== -0.7) throw new Error('aligned token 2: ' + JSON.stringify(chunks[2]));
+  } finally { globalThis.fetch = oldFetch; }
+});
+
 for (const [name, fn] of trials) {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) { failures++; console.error(`THROW ${name}: ${e.message}`); }

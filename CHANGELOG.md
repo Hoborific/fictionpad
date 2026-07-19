@@ -85,3 +85,21 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 
 - Streaming with logprobs enabled could drop or duplicate generated text when the backend's logprob tokens didn't line up with the content delta (e.g. detokenizer merges); the content delta is now the text authority and misaligned chunks are yielded intact with per-token probs attached only when they tile the delta exactly
 
+
+## v2.3 - Mobile UI overhaul
+
+**Added**
+- Per-chat "Model override" field in chat settings (blank falls back to the global chat model).
+- Quick-action buttons on chat rows in the sidebar: Inspector, Rename, Export JSON, Delete.
+- Right-click (desktop) or long-press (touch) a chat row to open a context menu with Inspector, Chat settings, Memories, Rename, Export, and Delete.
+
+**Changed**
+- The right-hand Inspector/Memory/Chat drawer is now a tabbed modal sheet: a centered dialog on desktop and a full-screen sheet on phones; the drawer buttons left the topbar.
+- On phones the sidebar is a slide-in overlay drawer over a dimmed scrim instead of a full-screen pane; it starts closed, and tapping the scrim dismisses it.
+- Mobile gestures: swipe right from the left screen edge opens the sidebar drawer; swipe left closes it (message-bubble swipes keep priority).
+- Layout hardened for notched phones: `viewport-fit=cover`, safe-area-inset padding on the topbar, sidebar, and composer, dynamic viewport height (`100dvh`), and the page itself no longer scrolls - only the message list does.
+- Chat row action buttons are always visible (dimmed) on touch devices, where hover doesn't exist.
+
+**Fixed**
+- The token-probability view no longer chokes on streamed chunks that carry no logprob data - they render as plain text spans.
+

@@ -950,10 +950,10 @@ function Markdown({ text, prose = false }) {
   return html`<div class="md" dangerouslySetInnerHTML=${{ __html: rendered }} />`;
 }
 
-function Modal({ title, onClose, wide, children, footer }) {
+function Modal({ title, onClose, wide, cls, children, footer }) {
   return html`
     <div class="modal-overlay" onMouseDown=${(e) => e.target === e.currentTarget && onClose()}>
-      <div class="modal ${wide ? 'wide' : ''}">
+      <div class="modal ${wide ? 'wide' : ''} ${cls ?? ''}">
         <div class="m-head">
           <h2>${title}</h2>
           <button class="btn ghost" onClick=${onClose}>✕</button>
@@ -1499,6 +1499,9 @@ function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
           <option value="">— none ({{user}} → "User") —</option>
           ${Object.values(personas).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
         </select></label>
+      <label class="field"><span>Model override (this chat only; blank = global chat model)</span>
+        <input type="text" value=${chat.settings?.model ?? ''} placeholder="(global)"
+          onInput=${(e) => onUpdateChat({ ...chat, settings: { ...(chat.settings ?? {}), model: e.target.value.trim() || undefined } })} /></label>
       <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
         <textarea rows=${4} value=${chat.customInstructions ?? ''}
           onInput=${(e) => onUpdateChat({ ...chat, customInstructions: e.target.value })} /></label>
@@ -1523,6 +1526,8 @@ function ProbsView({ tokens, onPick }) {
   return html`
     <div class="probs-view">
       ${tokens.map((t, i) => {
+        if (t.logprob == null) // no prob data for this chunk: plain span, no popover
+          return html`<span key=${i}>${t.text}</span>`;
         const pct = probPct(t.logprob);
         const bg = pct == null ? 'transparent'
           : `color-mix(in oklch, color-mix(in oklch, var(--c-good) ${Math.round(pct)}%, var(--c-danger)) 30%, transparent)`;
@@ -1766,11 +1771,26 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
 function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelectScenario, onSelectChat,
                   onNewScenario, onEditScenario, onDeleteScenario, onNewChat, onExportScenario, onImport,
                   onOpenPersonas, onOpenSettings, collapsed, onToggleCollapse, onDeleteChat,
-                  width, onDragStart, onResetWidth }) {
+                  width, onDragStart, onResetWidth, onChatAction, onChatContextMenu }) {
   const chatList = Object.values(chats)
     .filter(c => !selectedScenarioId || c.scenarioId === selectedScenarioId)
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
   const scenarioList = Object.values(scenarios).sort((a, b) => a.name.localeCompare(b.name));
+  // Long-press (touch) → same context menu as right-click. Cancelled by movement.
+  const lp = useRef(null);
+  const lpStart = (e, id) => {
+    if (e.pointerType === 'mouse') return;
+    const { clientX: x, clientY: y } = e;
+    lp.current = { x, y, timer: setTimeout(() => { lp.current = null; onChatContextMenu(id, x, y); }, 500) };
+  };
+  const lpCancel = (e) => {
+    if (!lp.current) return;
+    if (e.type === 'pointermove'
+        && Math.abs(e.clientX - lp.current.x) < 10 && Math.abs(e.clientY - lp.current.y) < 10) return;
+    clearTimeout(lp.current.timer);
+    lp.current = null;
+  };
+  const act = (e, id, action) => { e.stopPropagation(); onChatAction(id, action); };
   return html`
     <div class="sidebar ${collapsed ? 'collapsed' : ''}"
       style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
@@ -1807,11 +1827,20 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
           ${chatList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use 💬 on a scenario.</div>`}
           ${chatList.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
-              onClick=${() => onSelectChat(c.id)}>
+              onClick=${() => onSelectChat(c.id)}
+              onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
+              onPointerDown=${(e) => lpStart(e, c.id)}
+              onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               <span class="name">${c.name}</span>
               <span class="tools">
+                <button class="btn small ghost" title="Inspector"
+                  onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
+                <button class="btn small ghost" title="Rename"
+                  onClick=${(e) => act(e, c.id, 'rename')}>✎</button>
+                <button class="btn small ghost" title="Export JSON"
+                  onClick=${(e) => act(e, c.id, 'export')}>⤓</button>
                 <button class="btn small ghost" title="Delete chat"
-                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete chat "${c.name}"?`) && onDeleteChat(c.id); }}>✕</button>
+                  onClick=${(e) => act(e, c.id, 'delete')}>✕</button>
               </span>
             </div>`)}
         </div>
@@ -1867,6 +1896,61 @@ function RecapModal({ text, onSaveMemory, onClose }) {
 }
 
 // ============================================================================
+// COMPONENTS: CONTEXT MENU (chat rows — right-click / long-press)
+// ============================================================================
+function ContextMenu({ x, y, items, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, []);
+  const style = {
+    left: Math.max(4, Math.min(x, window.innerWidth - 190)),
+    top: Math.max(4, Math.min(y, window.innerHeight - items.length * 34 - 12)),
+  };
+  return html`
+    <div class="ctx-menu" ref=${ref} style=${style}>
+      ${items.map((it, i) => it === '-'
+        ? html`<div key=${i} class="ctx-sep" />`
+        : html`<button key=${i} class="ctx-item ${it.danger ? 'danger' : ''}"
+            onClick=${() => { onClose(); it.fn(); }}>${it.label}</button>`)}
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: CHAT PANEL — the former right pane as a tabbed modal sheet
+// (Inspector / Memory / Chat). Centered dialog on desktop, full-screen sheet
+// on phones (CSS .modal.sheet).
+// ============================================================================
+const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
+
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas,
+                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose }) {
+  return html`
+    <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
+      <div class="ptabs">
+        ${Object.entries(PANEL_TABS).map(([t, label]) => html`
+          <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+      </div>
+      <div class="pbody">
+        ${tab === 'inspector' && html`
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+        ${tab === 'memory' && html`
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} />`}
+        ${tab === 'chat' && html`
+          <${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${onUpdateChat}
+            onExport=${onExport} onDelete=${onDelete} />`}
+      </div>
+    <//>`;
+}
+
+// ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
 function newChat(scenario, personaId) {
@@ -1885,8 +1969,6 @@ function newChat(scenario, personaId) {
     createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
-
-const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
 // Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
 // when unset, a pane auto-sizes to consume the slack margin around the chat
@@ -1998,7 +2080,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterNames = useMemo(
     () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null),
     [chat, scenarios]);
-  const sidebarCollapsed = ui.sidebarCollapsed ?? false;
+  const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
   const saveChat = useCallback((c) => upsertChat(c.id, { ...c, updatedAt: Date.now() }), [upsertChat]);
 
@@ -2013,17 +2095,15 @@ function Main({ storage, storageKind, storageFailed }) {
     const v = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--chat-w'), 10);
     return Number.isFinite(v) ? v : 780;
   }, []);
-  const drawerOpen = ui.drawer && chat;
   const clampPane = (w) => Math.round(Math.max(PANE_MIN, Math.min(w, viewportW * PANE_MAX_VW)));
   const autoPaneW = clampPane(Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
   const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
-  const dwW = drawerOpen ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
-  // Narrow-viewport fallback: pad the center column with the *actual* pane
-  // widths only when the slack margin can't contain them — chat never hides.
-  // At the phone breakpoint panes go full-screen and share no space at all.
+  // Narrow-viewport fallback: pad the center column with the sidebar's actual
+  // width only when the slack margin can't contain it — chat never hides.
+  // At the phone breakpoint the sidebar is a full overlay (scrim), no sharing.
   const MOBILE_BP = 700;
-  const padL = viewportW > MOBILE_BP && viewportW < chatW + 2 * sbW ? sbW : 0;
-  const padR = viewportW > MOBILE_BP && viewportW < chatW + 2 * dwW ? dwW : 0;
+  const isMobile = viewportW <= MOBILE_BP;
+  const padL = !isMobile && viewportW < chatW + 2 * sbW ? sbW : 0;
   const [dragging, setDragging] = useState(false);
   const paneDragStart = (side) => (startX) => {
     const key = side === 'left' ? 'sbWidth' : 'dwWidth';
@@ -2043,6 +2123,64 @@ function Main({ storage, storageKind, storageFailed }) {
     window.addEventListener('pointerup', onUp);
   };
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
+
+  // ---- mobile edge swipe: open/close the sidebar overlay drawer ----
+  // Open: touch starts within 24px of the left edge and swipes right (never on
+  // a message bubble — bubble swipe navigation keeps priority there).
+  // Close: swipe left anywhere while the drawer is open (scrim tap also closes).
+  const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed });
+  navStateRef.current = { isMobile, collapsed: sidebarCollapsed };
+  useEffect(() => {
+    let g = null;
+    const down = (e) => {
+      if (e.pointerType === 'mouse') return;
+      const st = navStateRef.current;
+      if (!st.isMobile) return;
+      if (st.collapsed) {
+        if (e.clientX <= 24 && !e.target.closest?.('.bubble')) g = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      } else {
+        g = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      }
+    };
+    const move = (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) {
+        if (navStateRef.current.collapsed ? dx > 0 : dx < 0) toggleSidebar();
+        g = null;
+      }
+    };
+    const up = () => { g = null; };
+    for (const [ev, fn] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', up]])
+      window.addEventListener(ev, fn, { passive: true });
+    return () => {
+      for (const [ev, fn] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', up]])
+        window.removeEventListener(ev, fn);
+    };
+  }, []);
+
+  // ---- chat row actions + context menu ----
+  const [ctxMenu, setCtxMenu] = useState(null); // { chatId, x, y }
+  const openChatPanel = (chatId, tab) => {
+    setUi(u => ({ ...u, chatId }));
+    setModal({ kind: 'chatPanel', chatId, tab });
+  };
+  const chatAction = (chatId, action) => {
+    const c = ref.current.chats[chatId];
+    if (!c) return;
+    switch (action) {
+      case 'inspector': return openChatPanel(chatId, 'inspector');
+      case 'memory': return openChatPanel(chatId, 'memory');
+      case 'settings': return openChatPanel(chatId, 'chat');
+      case 'rename': {
+        const name = prompt('Rename chat', c.name);
+        if (name?.trim()) saveChat({ ...c, name: name.trim() });
+        return;
+      }
+      case 'export': return onExportChat(c);
+      case 'delete': if (confirm(`Delete chat "${c.name}"?`)) onDeleteChat(chatId);
+    }
+  };
 
   // ---- storage migration helpers (settings; last write wins per key) ----
   async function migrateUpload() {
@@ -2533,7 +2671,8 @@ function Main({ storage, storageKind, storageFailed }) {
   };
 
   return html`
-    <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${drawerOpen ? 'dw-open' : ''} ${dragging ? 'dragging' : ''}">
+    <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
+      ${isMobile && !sidebarCollapsed && html`<div class="scrim" onClick=${toggleSidebar} />`}
       <${Sidebar}
         scenarios=${scenarios} chats=${chats}
         selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
@@ -2549,8 +2688,10 @@ function Main({ storage, storageKind, storageFailed }) {
         onOpenSettings=${() => setModal({ kind: 'settings' })}
         collapsed=${sidebarCollapsed} onToggleCollapse=${toggleSidebar}
         onDeleteChat=${onDeleteChat}
+        onChatAction=${chatAction}
+        onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
         width=${sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
-      <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
+      <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div class="topbar">
@@ -2562,9 +2703,6 @@ function Main({ storage, storageKind, storageFailed }) {
             <span class="hint" title=${storageKind === 'server'
               ? 'Scenarios, personas and chats are stored on this server (shared).'
               : 'Data is stored locally in this browser.'}>${storageKind === 'server' ? 'server storage' : 'local storage'}</span>
-            ${chat && Object.entries(DRAWER_TABS).map(([tab, label]) => html`
-              <button key=${tab} class="btn small ${ui.drawer === tab ? 'primary' : ''}"
-                onClick=${() => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }))}>${label}</button>`)}
           </div>
         </div>
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
@@ -2583,25 +2721,6 @@ function Main({ storage, storageKind, storageFailed }) {
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
-          ${drawerOpen && html`
-            <div class="drawer" style=${{ width: dwW, minWidth: dwW }}>
-              <div class="pane-handle left" title="Drag to resize · double-click to reset"
-                onPointerDown=${(e) => { e.preventDefault(); paneDragStart('right')(e.clientX); }}
-                onDoubleClick=${() => resetPaneWidth('right')} />
-              <div class="tabs">
-                ${Object.entries(DRAWER_TABS).map(([tab, label]) => html`
-                  <button key=${tab} class=${ui.drawer === tab ? 'active' : ''}
-                    onClick=${() => setUi(u => ({ ...u, drawer: tab }))}>${label}</button>`)}
-              </div>
-              <div class="body">
-                <${ErrorBoundary} name="panel">
-                  ${ui.drawer === 'inspector' && html`<${ContextInspector} manifest=${manifest} hasChat=${!!chat} onPreview=${onPreview} realCounts=${realCounts} />`}
-                  ${ui.drawer === 'memory' && html`<${MemoryPanel} chat=${chat} onUpdateChat=${saveChat} onSummarize=${() => summarizeNow(chat)} summarizing=${summarizing} />`}
-                  ${ui.drawer === 'chat' && html`<${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${saveChat}
-                    onExport=${() => onExportChat(chat)} onDelete=${() => confirm(`Delete chat "${chat.name}"?`) && onDeleteChat(chat.id)} />`}
-                <//>
-              </div>
-            </div>`}
         </div>
       </div>
     </div>
@@ -2635,6 +2754,27 @@ function Main({ storage, storageKind, storageFailed }) {
             saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
           }
         }} /><//>`}
+    ${modal?.kind === 'chatPanel' && chats[modal.chatId] && html`
+      <${ErrorBoundary} name="chat panel"><${ChatPanelModal}
+        chat=${chats[modal.chatId]} tab=${modal.tab}
+        onTab=${(tab) => setModal(m => ({ ...m, tab }))}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
+        personas=${personas} onUpdateChat=${saveChat}
+        onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
+        onExport=${() => onExportChat(chats[modal.chatId])}
+        onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
+        onClose=${() => setModal(null)} /><//>`}
+    ${ctxMenu && html`
+      <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
+        items=${[
+          { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
+          { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
+          { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },
+          { label: 'Export JSON', fn: () => chatAction(ctxMenu.chatId, 'export') },
+          '-',
+          { label: 'Delete…', fn: () => chatAction(ctxMenu.chatId, 'delete'), danger: true },
+        ]} />`}
   `;
 }
 
