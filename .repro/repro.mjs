@@ -11,7 +11,8 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 // Neutralize the browser boot line; export what we need instead.
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD, html };`);
+  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  effectiveEndpoint, html };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -163,6 +164,32 @@ trial('openaiChatStream: logprobs chunks + request body', async () => {
   } finally { globalThis.fetch = oldFetch; }
 });
 
+// delta.content is the text authority: misaligned logprobs must never drop
+// text; aligned logprobs tile the delta exactly for per-token probs.
+trial('openaiChatStream: delta/logprobs alignment', async () => {
+  const sse = [
+    // misaligned: delta "*He" (detokenizer merge) but logprobs cover only "He"
+    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"He","logprob":-0.5,"top_logprobs":[]}]}}]}',
+    // aligned: two logprob tokens tile the delta exactly
+    'data: {"choices":[{"delta":{"content":"*She"},"logprobs":{"content":[{"token":"*","logprob":-0.1,"top_logprobs":[{"token":"*","logprob":-0.1}]},{"token":"She","logprob":-0.3,"top_logprobs":[]}]}}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  try {
+    const chunks = [];
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true }))
+      chunks.push(c);
+    const text = chunks.map(c => c.content).join('');
+    if (text !== '*He*She') throw new Error('text lost or duplicated: ' + JSON.stringify(text));
+    if (chunks.length !== 3) throw new Error('chunk count ' + chunks.length + ': ' + JSON.stringify(chunks));
+    if (chunks[0].content !== '*He' || chunks[0].logprob !== undefined)
+      throw new Error('misaligned chunk should be one plain chunk: ' + JSON.stringify(chunks[0]));
+    if (chunks[1].content !== '*' || chunks[1].logprob !== -0.1 || chunks[2].content !== 'She' || chunks[2].logprob !== -0.3)
+      throw new Error('aligned chunk should yield per-token probs: ' + JSON.stringify(chunks.slice(1)));
+  } finally { globalThis.fetch = oldFetch; }
+});
+
 // /tokenize shape tolerance: {tokens:[ids]}, count-only, and 404 → null.
 trial('tokenize: ids / count-only / unavailable', async () => {
   const oldFetch = globalThis.fetch;
@@ -207,6 +234,35 @@ trial('embed: response parsing, cache, errors', async () => {
     if (fp.cosine([1, 0], [0, 1]) !== 0) throw new Error('cosine orthogonal');
     if (!(fp.SEMANTIC_THRESHOLD > 0 && fp.SEMANTIC_THRESHOLD < 1)) throw new Error('threshold sane');
   } finally { globalThis.fetch = oldFetch; }
+});
+
+// authHeaders: direct endpoint → Authorization; same-origin /proxy/ → X-Real-Authorization.
+trial('authHeaders: proxy vs direct credential mapping', async () => {
+  const seen = [];
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push({ url, headers: opts.headers });
+    return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\ndata: [DONE]\n', { status: 200 });
+  };
+  try {
+    for await (const _ of fp.openaiChatStream({ endpoint: 'http://llm.local/v1', apiKey: 'k1', model: 'm', messages: [] })) {}
+    for await (const _ of fp.openaiChatStream({ endpoint: '/proxy/http://llm.local', apiKey: 'k1', model: 'm', messages: [] })) {}
+    const [direct, proxied] = seen;
+    if (direct.headers.Authorization !== 'Bearer k1') throw new Error('direct endpoint should send Authorization');
+    if ('X-Real-Authorization' in direct.headers) throw new Error('direct endpoint should not send X-Real-Authorization');
+    if (proxied.headers['X-Real-Authorization'] !== 'Bearer k1') throw new Error('proxy endpoint should send X-Real-Authorization');
+    if ('Authorization' in proxied.headers) throw new Error('proxy endpoint must not clobber Authorization (Basic lives there)');
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+// effectiveEndpoint: /proxy/ rewrite only when toggle on + server storage active.
+trial('effectiveEndpoint rewriting', () => {
+  const s = (over) => ({ endpoint: 'http://llm.local:8080', ...over });
+  if (fp.effectiveEndpoint(s({}), true) !== '/proxy/http://llm.local:8080') throw new Error('toggle on + server should rewrite');
+  if (fp.effectiveEndpoint(s({ routeViaServer: false }), true) !== 'http://llm.local:8080') throw new Error('toggle off → raw');
+  if (fp.effectiveEndpoint(s({}), false) !== 'http://llm.local:8080') throw new Error('server inactive → raw despite toggle');
+  if (fp.effectiveEndpoint(s({ endpoint: '/proxy/http://x' }), true) !== '/proxy/http://x') throw new Error('already /proxy/ unchanged (no double-proxy)');
+  if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
 });
 
 for (const [name, fn] of trials) {

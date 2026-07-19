@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { gunzipSync } from 'node:zlib';
+import http from 'node:http';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SERVER = join(ROOT, 'server.mjs');
@@ -45,8 +46,8 @@ const stopServer = (child) => child && new Promise(r => { child.on('exit', r); c
 
 const tmp = mkdtempSync(join(tmpdir(), 'fp-server-test-'));
 const dbPath = join(tmp, 'test.db');
-const portA = 18931, portB = 18932;
-let a = null, b = null;
+const portA = 18931, portB = 18932, portC = 18933, portU = 18934;
+let a = null, b = null, c = null, upstream = null;
 
 try {
   a = startServer(portA, { FICTIONPAD_DB: dbPath });
@@ -93,8 +94,50 @@ try {
   ok((await post(portB, '/save', { store: 'Chats', key: 'x', data: { id: 'x' } }, auth)).ok, 'token: /save with header → 200');
   // open routes stay open even with a token set
   ok((await fetch(`http://127.0.0.1:${portB}/health`)).ok, 'token: /health stays open');
+
+  // ---- whole-server Basic auth (server C: FICTIONPAD_AUTH + FICTIONPAD_TOKEN) ----
+  c = startServer(portC, {
+    FICTIONPAD_DB: join(tmp, 'basic.db'),
+    FICTIONPAD_AUTH: 'alice:wonderland',
+    FICTIONPAD_TOKEN: 'secret-tok',
+  });
+  await waitReady(portC);
+  const basic = { Authorization: `Basic ${Buffer.from('alice:wonderland').toString('base64')}` };
+  const basicWrong = { Authorization: `Basic ${Buffer.from('alice:nope').toString('base64')}` };
+
+  const noCreds = await fetch(`http://127.0.0.1:${portC}/`);
+  ok(noCreds.status === 401, 'basic: / without creds → 401');
+  ok((noCreds.headers.get('www-authenticate') ?? '').includes('Basic realm="fictionpad"'),
+    'basic: 401 carries WWW-Authenticate challenge');
+  ok((await fetch(`http://127.0.0.1:${portC}/version`)).status === 401, 'basic: storage route without creds → 401');
+  ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basicWrong })).status === 401, 'basic: wrong creds → 401');
+  ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basic })).ok, 'basic: correct creds → 200 on /');
+  ok((await fetch(`http://127.0.0.1:${portC}/health`)).ok, 'basic: /health stays open');
+  // both set → Basic is checked first and suffices (one Authorization header
+  // per request); Bearer alone can't pass the whole-server Basic gate.
+  ok((await fetch(`http://127.0.0.1:${portC}/version`, { headers: basic })).ok,
+    'basic+bearer: storage route with Basic → 200 (Basic suffices)');
+  ok((await fetch(`http://127.0.0.1:${portC}/version`, { headers: auth })).status === 401,
+    'basic+bearer: Bearer-only → 401 (whole-server Basic checked first)');
+
+  // ---- proxy credential hygiene (mock upstream echoes headers) ----
+  upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(req.headers));
+  });
+  await new Promise(r => upstream.listen(portU, '127.0.0.1', r));
+  const viaProxy = (headers) => fetch(`http://127.0.0.1:${portC}/proxy/http://127.0.0.1:${portU}/echo`, { headers });
+
+  const echoed1 = await (await viaProxy({ ...basic, cookie: 'session=abc' })).json();
+  ok(!('authorization' in echoed1), 'proxy: server Basic creds NOT forwarded upstream');
+  ok(!('cookie' in echoed1), 'proxy: Cookie NOT forwarded upstream');
+
+  const echoed2 = await (await viaProxy({ ...basic, 'X-Real-Authorization': 'Bearer llm-key-123' })).json();
+  ok(echoed2.authorization === 'Bearer llm-key-123', 'proxy: X-Real-Authorization mapped to upstream Authorization');
+  ok(!('x-real-authorization' in echoed2), 'proxy: X-Real-Authorization itself NOT forwarded upstream');
 } finally {
-  await Promise.all([stopServer(a), stopServer(b)]);
+  await Promise.all([stopServer(a), stopServer(b), stopServer(c)]);
+  upstream?.close();
 }
 
 // On-disk gzip integrity (checked after the server released the db file).

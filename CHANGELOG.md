@@ -63,3 +63,25 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 - On startup the app probes the server for storage support and uses it when available; otherwise it falls back silently to browser IndexedDB storage
 - Removed the bundled `reference/mikupad` folder
 
+
+## v2.2 - Logprobs Fix & Server Proxy Routing
+
+**Added**
+
+- "Route API requests through this server" setting (on by default when server storage is active): all LLM requests go through the server's `/proxy/` endpoint, avoiding browser CORS/mixed-content blocks; the configured endpoint is rewritten at request time only, never persisted
+- Optional whole-server HTTP Basic auth via `FICTIONPAD_AUTH=user:password` for LAN exposure; everything except `/health` requires it
+- `/health` endpoint on the server
+- Settings sync via server storage: settings are shared through the server (server copy wins at boot, last-write-wins after); the server token stays per-device and `localStorage` remains the offline fallback
+- Mobile layout: at ≤700px the sidebar and drawer open full-screen, inputs no longer trigger iOS auto-zoom, and message actions stay visible on touch devices
+
+**Changed**
+
+- API key travels as `X-Real-Authorization` when going through the built-in proxy, so it never collides with the server's own Basic auth; the proxy maps it to the upstream `Authorization` header
+- The proxy no longer forwards cookies or the server's Basic credentials to the LLM endpoint
+- Top ribbon is now a fixed height with the side panes sitting below it
+- Token-probability recording now covers every streamed chunk (chunks without prob data get `logprob: null`), and the per-token data is only attached once real probabilities actually arrive
+
+**Fixed**
+
+- Streaming with logprobs enabled could drop or duplicate generated text when the backend's logprob tokens didn't line up with the content delta (e.g. detokenizer merges); the content delta is now the text authority and misaligned chunks are yielded intact with per-token probs attached only when they tile the delta exactly
+

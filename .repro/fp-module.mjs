@@ -622,10 +622,40 @@ function normalizeEndpoint(url) {
 }
 const chatCompletionsURL = (ep) => `${normalizeEndpoint(ep)}/v1/chat/completions`;
 const modelsURL = (ep) => `${normalizeEndpoint(ep)}/v1/models`;
-const authHeaders = (apiKey) => apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
+// True when the endpoint goes through OUR server's /proxy/ (same-origin).
+// Relative '/proxy/…' is same-origin by construction; absolute URLs must match.
+function isServerProxy(endpoint) {
+  const ep = String(endpoint ?? '');
+  if (ep.startsWith('/proxy/')) return true;
+  try {
+    const u = new URL(ep, location.href);
+    return u.origin === location.origin && u.pathname.startsWith('/proxy/');
+  } catch { return false; }
+}
+
+// "Route API requests through the server": rewrite the configured endpoint to
+// a relative /proxy/ URL at request time (never persisted). Only when server
+// storage is active AND the toggle is on; empty and hand-written /proxy/
+// endpoints pass through unchanged.
+function effectiveEndpoint(settings, serverStorageActive) {
+  const ep = String(settings?.endpoint ?? '');
+  if (!ep || ep.startsWith('/proxy/')) return ep;
+  return serverStorageActive && settings?.routeViaServer !== false ? `/proxy/${ep}` : ep;
+}
+
+// LLM credential header. Through our own (possibly Basic-authed) proxy the
+// browser already attaches the server's Basic creds to same-origin fetches —
+// so the LLM key travels as X-Real-Authorization, which the proxy maps to the
+// upstream Authorization header (and never leaks the Basic creds upstream).
+const authHeaders = (apiKey, endpoint) => {
+  if (!apiKey) return {};
+  return isServerProxy(endpoint)
+    ? { 'X-Real-Authorization': `Bearer ${apiKey}` }
+    : { 'Authorization': `Bearer ${apiKey}` };
+};
 
 async function listModels({ endpoint, apiKey, signal } = {}) {
-  const res = await fetch(modelsURL(endpoint), { headers: { ...authHeaders(apiKey) }, signal });
+  const res = await fetch(modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint) }, signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
@@ -657,7 +687,7 @@ async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers =
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetch(chatCompletionsURL(endpoint), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
     body: JSON.stringify({
       model, messages, stream: true, max_tokens: maxTokens, ...samplers,
       ...(tokenProbs ? { logprobs: true, top_logprobs: 10 } : {}),
@@ -676,25 +706,35 @@ async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers =
   }
   for await (const json of parseEventStream(res.body)) {
     const choice = json.choices?.[0];
+    // delta.content is the text authority — logprobs only annotate it.
+    const deltaText = choice?.delta?.content ?? choice?.message?.content;
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
-    if (Array.isArray(lpContent) && lpContent.length) {
-      // Stop-token emission: a finish chunk with empty/missing delta carries
-      // the sampled EOS in logprobs — never yield it as content.
-      if (choice.finish_reason && !choice.delta?.content) continue;
-      for (const t of lpContent) {
-        if (!t?.token || stopSet?.has(t.token)) continue; // defensive: stop strings never leak inline
-        yield {
-          content: t.token,
-          logprob: t.logprob ?? null,
-          top: (t.top_logprobs ?? []).slice(0, 10)
-            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-        };
-      }
-      continue;
+    const lp = Array.isArray(lpContent) ? lpContent.filter(t => t?.token && !stopSet?.has(t.token)) : [];
+    // Stop-token emission: a finish chunk with empty/missing delta carries
+    // the sampled EOS in logprobs — never yield it as content.
+    if (choice.finish_reason && !deltaText) continue;
+    if (lp.length && deltaText && lp.map(t => t.token).join('') === deltaText) {
+      // Aligned: logprob tokens exactly tile the delta — full per-token probs.
+      for (const t of lp) yield {
+        content: t.token,
+        logprob: t.logprob ?? null,
+        top: (t.top_logprobs ?? []).slice(0, 10)
+          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+      };
+    } else if (deltaText && !stopSet?.has(deltaText)) {
+      // Misaligned or absent logprobs: yield the delta text intact (this
+      // chunk simply carries no prob data — text is never dropped).
+      yield { content: deltaText };
+    } else if (lp.length) {
+      // No delta text at all — fall back to the logprob tokens themselves.
+      for (const t of lp) yield {
+        content: t.token,
+        logprob: t.logprob ?? null,
+        top: (t.top_logprobs ?? []).slice(0, 10)
+          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+      };
     }
-    const delta = choice?.delta?.content ?? choice?.message?.content;
-    if (delta && !stopSet?.has(delta)) yield { content: delta };
   }
 }
 
@@ -710,7 +750,7 @@ async function tokenize({ endpoint, apiKey, model, prompt }) {
   try {
     const res = await fetch(`${normalizeEndpoint(endpoint)}/tokenize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
       body: JSON.stringify({ model, prompt }),
     });
     if (res.ok) {
@@ -749,7 +789,7 @@ const textHash = (s) => {
 async function embed({ endpoint, apiKey, model, inputs }) {
   const res = await fetch(`${normalizeEndpoint(endpoint)}/v1/embeddings`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
     body: JSON.stringify({ model, input: inputs }),
   });
   if (!res.ok) {
@@ -787,7 +827,7 @@ const cosine = (a, b) => {
 async function auxCall({ endpoint, apiKey, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
   const res = await fetch(chatCompletionsURL(endpoint), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
     body: JSON.stringify({
       model,
       messages: [
@@ -1121,6 +1161,7 @@ const DEFAULT_SETTINGS = {
   tokenProbs: true, // request logprobs + top_logprobs on generations
   suggestions: true, // response-suggestion chips after generations
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
+  routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
   logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
 };
@@ -1149,7 +1190,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   const fetchModels = async () => {
     setModelsError(null);
-    try { setModels(await listModels({ endpoint: draft.endpoint, apiKey: draft.apiKey })); }
+    try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey })); }
     catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
   };
 
@@ -1171,10 +1212,18 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div></label>`}
       <div class="grid2">
         <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
-          <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} /></label>
+          <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
+          ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
+            <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
+        </label>
         <label class="field"><span>API key (sent as Bearer token; stored in localStorage)</span>
           <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
       </div>
+      ${storageKind === 'server' && html`
+        <label class="check">
+          <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
+          Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
+        </label>`}
       <div class="grid2">
         <label class="field"><span>Chat model</span>
           <div style=${{ display: 'flex', gap: '6px' }}>
@@ -1226,7 +1275,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           onChange=${(stopStrings) => set({ stopStrings })} /></label>
       <div class="field"><span>Storage</span>
         <div class="hint">${storageKind === 'server'
-          ? 'Server storage active — scenarios, personas and chats are shared via this server.'
+          ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
           : 'Local storage — data lives in this browser only.'}</div>
         <label class="field" style=${{ marginTop: '6px' }}>
           <span>Server token (only when the server sets FICTIONPAD_TOKEN; applies after reload)</span>
@@ -1845,6 +1894,8 @@ const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16;
 
 function Main({ storage, storageKind, storageFailed }) {
+  // Request-time endpoint rewrite ("route via server") — never persisted.
+  const effEp = (st) => effectiveEndpoint(st, storageKind === 'server');
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
@@ -1853,6 +1904,30 @@ function Main({ storage, storageKind, storageFailed }) {
     ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
     samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
   }), [settingsRaw]);
+  // Settings sync via server storage: Meta/app.settings is the shared source
+  // when server storage is active (server wins at boot, last-write-wins after).
+  // serverToken is a per-device credential — stripped on upload, preserved
+  // locally on download. localStorage remains the offline cache/fallback.
+  const SETTINGS_SYNC_KEY = 'app.settings';
+  const settingsSync = useRef({ adopted: false, lastWritten: null });
+  useEffect(() => { // adopt the server copy once at boot
+    if (storageKind !== 'server') return;
+    const remote = storage.get('Meta', SETTINGS_SYNC_KEY);
+    if (remote && typeof remote === 'object') {
+      setSettings(prev => ({ ...remote, serverToken: prev?.serverToken ?? '' }));
+      // Skip the pre-adoption upload: the write effect fires in this same
+      // commit with the *local* settings — don't let them clobber the server.
+      settingsSync.current.lastWritten = settingsRaw;
+    }
+    settingsSync.current.adopted = true;
+  }, [storageKind]);
+  useEffect(() => { // upload on every change (token stripped; first boot seeds it)
+    if (storageKind !== 'server' || !settingsSync.current.adopted) return;
+    if (settingsSync.current.lastWritten === settingsRaw) return;
+    settingsSync.current.lastWritten = settingsRaw;
+    const { serverToken, ...rest } = settingsRaw ?? {};
+    storage.set('Meta', SETTINGS_SYNC_KEY, rest);
+  }, [settingsRaw, storageKind]);
   const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
   const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
@@ -1890,7 +1965,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let alive = true;
     const t = setTimeout(async () => {
       const count = (text) => text
-        ? getTokenCount({ endpoint: st.endpoint, apiKey: st.apiKey, model, text })
+        ? getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, model, text })
         : Promise.resolve(null);
       // Reconstruct the exact blocks as sent from the same message array.
       const sysBlocks = lastMessages.filter(m => m.role === 'system');
@@ -1945,8 +2020,10 @@ function Main({ storage, storageKind, storageFailed }) {
   const dwW = drawerOpen ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
   // Narrow-viewport fallback: pad the center column with the *actual* pane
   // widths only when the slack margin can't contain them — chat never hides.
-  const padL = viewportW < chatW + 2 * sbW ? sbW : 0;
-  const padR = viewportW < chatW + 2 * dwW ? dwW : 0;
+  // At the phone breakpoint panes go full-screen and share no space at all.
+  const MOBILE_BP = 700;
+  const padL = viewportW > MOBILE_BP && viewportW < chatW + 2 * sbW ? sbW : 0;
+  const padR = viewportW > MOBILE_BP && viewportW < chatW + 2 * dwW ? dwW : 0;
   const [dragging, setDragging] = useState(false);
   const paneDragStart = (side) => (startX) => {
     const key = side === 'left' ? 'sbWidth' : 'dwWidth';
@@ -2008,7 +2085,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     if (!recent.trim()) return null;
     const out = await auxCall({
-      endpoint: st.endpoint, apiKey: st.apiKey, model,
+      endpoint: effEp(st), apiKey: st.apiKey, model,
       system: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.',
       user: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):`,
       maxTokens: 220, temperature: 0.3, stop: st.stopStrings,
@@ -2056,9 +2133,9 @@ function Main({ storage, storageKind, storageFailed }) {
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
         try {
-          const [queryVec] = await embed({ endpoint: st.endpoint, apiKey: st.apiKey, model: st.embeddingModel, inputs: [queryText] });
+          const [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, model: st.embeddingModel, inputs: [queryText] });
           const vecs = await Promise.all(smartPieces.map(p =>
-            embedCached({ endpoint: st.endpoint, apiKey: st.apiKey, model: st.embeddingModel,
+            embedCached({ endpoint: effEp(st), apiKey: st.apiKey, model: st.embeddingModel,
               text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}` })));
           preActivated = new Set();
           for (let i = 0; i < smartPieces.length; i++)
@@ -2087,24 +2164,28 @@ function Main({ storage, storageKind, storageFailed }) {
     setGenerating({ chatId: chatObj.id, nodeId });
     let work = chatObj;
     let acc = continuation ? activeText(node) : '';
-    let toks = continuation ? (node?.swipes?.[node.activeSwipe]?.tokens ?? null) : null;
+    // Token coverage: every content chunk is recorded so the probs view never
+    // drops text; chunks without prob data get logprob: null. The tokens array
+    // is only attached to the swipe once real prob data actually arrives.
+    let toks = continuation ? [...(node?.swipes?.[node.activeSwipe]?.tokens ?? [])] : [];
+    let sawLogprob = continuation && toks.some(t => t.logprob != null);
     const applyText = (text) => {
       const n = work.messages[nodeId];
       if (!n) return;
       const swipes = n.swipes.slice();
-      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(toks ? { tokens: toks } : {}) };
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(sawLogprob ? { tokens: toks } : {}) };
       work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } }, updatedAt: Date.now() };
       upsertChat(work.id, work);
     };
     try {
       for await (const chunk of openaiChatStream({
-        endpoint: st.endpoint, apiKey: st.apiKey, model, messages,
+        endpoint: effEp(st), apiKey: st.apiKey, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
         tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
       })) {
         acc += chunk.content;
-        if (chunk.logprob !== undefined) // absent entirely when the backend ignores logprobs
-          toks = [...(toks ?? []), { text: chunk.content, logprob: chunk.logprob, top: chunk.top ?? [] }];
+        if (chunk.logprob !== undefined) sawLogprob = true; // absent entirely when the backend ignores logprobs
+        toks.push({ text: chunk.content, logprob: chunk.logprob ?? null, top: chunk.top ?? [] });
         applyText(acc);
       }
     } catch (e) {
@@ -2165,7 +2246,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setSuggestions({ ...key, loading: true, items: null });
     try {
       const out = await auxCall({
-        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, model,
         system: `You suggest what the user's character (${pName}) might say or do next in this roleplay. Reply with exactly 2 options as a numbered list, one per line, at most 20 words each, written in first person as ${pName}. In-character; do not narrate other characters' actions; no commentary.`,
         user: `Recent scene:\n\n${recent}\n\nTwo options for ${pName}:`,
         maxTokens: 120, temperature: 0.9, stop: st.stopStrings,
@@ -2256,7 +2337,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setAuxBusy('improve');
     try {
       const out = await auxCall({
-        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, model,
         system: `Rewrite the user's draft in first person as ${pName}${personaDesc}, matching the roleplay's tone. Output only the rewritten text.`,
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
         maxTokens: 400, temperature: 0.7, stop: st.stopStrings,
@@ -2282,7 +2363,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setAuxBusy('recap');
     try {
       const out = await auxCall({
-        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, model,
         system: 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.',
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: 700, temperature: 0.4, stop: st.stopStrings,
@@ -2539,7 +2620,7 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="logit bias"><${LogitBiasModal}
         logitBias=${settings.logitBias ?? {}}
         onChange=${(map) => setSettings(s => ({ ...(s ?? {}), logitBias: map }))}
-        onTokenize=${(prompt) => tokenize({ endpoint: settings.endpoint, apiKey: settings.apiKey, model: settings.model, prompt })}
+        onTokenize=${(prompt) => tokenize({ endpoint: effectiveEndpoint(settings, storageKind === 'server'), apiKey: settings.apiKey, model: settings.model, prompt })}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
       <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}
@@ -2602,4 +2683,5 @@ function App() {
 
 
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD, html };
+  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  effectiveEndpoint, html };

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// FictionPad local server: serves fictionpad.html and proxies LLM API calls
-// so the browser never hits CORS or mixed-content blocks (mikupad-style /proxy/*).
+// FictionPad local server: serves fictionpad.html, proxies LLM API calls
+// (mikupad-style /proxy/*), and optionally stores sessions in SQLite.
 // Zero dependencies — requires Node.js >= 18.
 //
 // Usage:
@@ -12,6 +12,13 @@
 //           http://localhost:8788/proxy/https://api.openai.com
 // (The app normalizes and appends /v1/chat/completions etc. — everything after
 // /proxy/ is forwarded verbatim as the target URL.)
+//
+// Env:
+//   FICTIONPAD_DB       SQLite path (default: fictionpad.db next to server.mjs)
+//   FICTIONPAD_TOKEN    storage routes require Authorization: Bearer <token>
+//   FICTIONPAD_AUTH     user:password — whole-server HTTP Basic auth (except
+//                       /health). The proxy never forwards these creds upstream;
+//                       the app sends its LLM key as X-Real-Authorization instead.
 
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -24,6 +31,24 @@ const PORT = Number(process.argv[2]) || 8788;
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.FICTIONPAD_DB || join(ROOT, 'fictionpad.db');
 const TOKEN = process.env.FICTIONPAD_TOKEN || null; // when set, storage routes need Bearer auth
+
+// Whole-server HTTP Basic auth (LAN exposure): FICTIONPAD_AUTH=user:password.
+// Everything except /health requires it; checked before the Bearer token.
+let BASIC_USER = null, BASIC_HEADER = null;
+if (process.env.FICTIONPAD_AUTH) {
+  const i = process.env.FICTIONPAD_AUTH.indexOf(':');
+  if (i > 0) {
+    BASIC_USER = process.env.FICTIONPAD_AUTH.slice(0, i);
+    BASIC_HEADER = `Basic ${Buffer.from(process.env.FICTIONPAD_AUTH, 'utf8').toString('base64')}`;
+  } else {
+    console.warn('FICTIONPAD_AUTH is malformed (expected user:password) — ignoring it.');
+  }
+}
+const basicOk = (req) => !BASIC_HEADER || req.headers.authorization === BASIC_HEADER;
+const basicChallenge = (res) => {
+  res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Basic realm="fictionpad"' });
+  res.end(JSON.stringify({ error: 'unauthorized' }));
+};
 
 // ---- server-side storage (mikupad-style): one kv table, gzip-compressed JSON ----
 const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta']);
@@ -60,6 +85,15 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  if (url.pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+
+  // Whole-server Basic auth (when FICTIONPAD_AUTH is set) — before everything
+  // else, including the Bearer-gated storage routes. /health stays open.
+  if (!basicOk(req)) return basicChallenge(res);
+
   if (url.pathname === '/' || url.pathname === '/fictionpad.html') {
     try {
       const html = await readFile(join(ROOT, 'fictionpad.html'));
@@ -77,13 +111,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- storage protocol ----
+  // When Basic auth is configured, the whole-server check above already gated
+  // these routes (a request can only carry one Authorization header, so Basic
+  // suffices). Bearer FICTIONPAD_TOKEN applies to API-only use without Basic.
+  const storageOk = (req) => BASIC_HEADER || authed(req);
   if (url.pathname === '/version' && req.method === 'GET') {
-    if (!authed(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (!storageOk(req)) return sendJson(res, 401, { error: 'unauthorized' });
     return sendJson(res, 200, { version: 1, storage: true });
   }
 
   if (['/load', '/save', '/all', '/delete', '/list'].includes(url.pathname)) {
-    if (!authed(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (!storageOk(req)) return sendJson(res, 401, { error: 'unauthorized' });
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'POST required' });
     let body;
     try { body = await readJsonBody(req); }
@@ -136,8 +174,15 @@ const server = http.createServer(async (req, res) => {
 
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!HOP_BY_HOP.has(k.toLowerCase()) && typeof v === 'string') headers[k] = v;
+      const lk = k.toLowerCase();
+      if (HOP_BY_HOP.has(lk) || lk === 'cookie' || lk === 'x-real-authorization') continue;
+      if (lk === 'authorization' && BASIC_HEADER && v === BASIC_HEADER) continue; // never leak our own Basic creds upstream
+      if (typeof v === 'string') headers[k] = v;
     }
+    // The app sends the LLM key as X-Real-Authorization when routing through
+    // this proxy; map it to the upstream Authorization header.
+    const realAuth = req.headers['x-real-authorization'];
+    if (typeof realAuth === 'string') headers['authorization'] = realAuth;
 
     // Propagate client disconnects to the upstream request.
     const ac = new AbortController();
@@ -193,5 +238,6 @@ server.listen(PORT, () => {
   console.log(`  app:     http://localhost:${PORT}/`);
   console.log(`  proxy:   http://localhost:${PORT}/proxy/<real-endpoint>`);
   console.log(`  storage: SQLite kv at ${DB_PATH}`);
+  if (BASIC_HEADER) console.log(`  auth:    basic (user ${BASIC_USER}) — FICTIONPAD_AUTH, whole server except /health`);
   if (TOKEN) console.log(`  auth:    FICTIONPAD_TOKEN required for storage routes`);
 });
