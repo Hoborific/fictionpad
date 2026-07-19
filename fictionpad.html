@@ -31,6 +31,7 @@
   --c-user: oklch(0.78 0.10 65);
   --c-action: oklch(0.74 0.05 75);
   --c-dialogue: oklch(0.95 0.040 70);
+  --c-good: oklch(0.78 0.12 155);
   --c-ooc: oklch(0.70 0.04 75);
   --c-speaker-s: 65%;
   --c-speaker-l: 72%;
@@ -123,7 +124,14 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .side-item.chat.selected { color: var(--c-text); }
 
 /* ---------- main / chat ---------- */
-.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+.jump-latest {
+  position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%); z-index: 10;
+  background: var(--c-accent-dim); border: 1px solid var(--c-accent); color: var(--c-text);
+  border-radius: 14px; padding: 3px 12px; font-size: 12.5px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+}
+.jump-latest:hover { background: color-mix(in oklch, var(--c-accent) 45%, var(--c-bg-0)); }
 .center-col { transition: padding 0.15s ease; }
 /* Narrow-viewport padding (so content isn't hidden under an overlay pane) is
    applied inline from JS using the panes' actual current widths. */
@@ -145,7 +153,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .bubble {
   background: var(--c-bg-1); border: 1px solid var(--c-border);
   border-radius: 10px; padding: 10px 14px;
+  touch-action: pan-y; /* vertical scroll stays native; horizontal is ours */
+  transition: transform 0.18s ease; /* snap-back after a sub-threshold drag */
 }
+.msg .bubble.dragging { transition: none; }
 .msg.user .bubble { background: color-mix(in oklch, var(--c-user) 9%, var(--c-bg-1)); }
 .msg.assistant .bubble { background: color-mix(in oklch, var(--c-accent) 6%, var(--c-bg-1)); }
 .msg .meta {
@@ -158,6 +169,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg:hover .actions { opacity: 1; }
 .msg .actions.always { opacity: 1; }
 .msg .swipes { display: flex; align-items: center; gap: 2px; font-size: 12px; color: var(--c-dim); }
+.msg .swipes .used-dot { color: var(--c-accent); font-size: 9px; padding: 0 1px; }
+.msg .swipes .used-dot.jump { color: var(--c-faint); cursor: pointer; }
+.msg .swipes .used-dot.jump:hover { color: var(--c-accent); }
+.msg .swipes .gen { color: var(--c-accent); }
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
 
 /* ---------- RP prose formatting ---------- */
@@ -170,6 +185,24 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   border-left: 3px solid var(--c-ooc); border-radius: 4px;
 }
 .msg.ooc .plain { color: var(--c-ooc); font-style: italic; }
+
+/* ---------- token probabilities view ---------- */
+.probs-view { white-space: pre-wrap; line-height: 1.65; font-family: var(--font-prose); }
+.probs-view .tok { position: relative; border-radius: 3px; }
+.probs-view .tok:hover { outline: 1px solid var(--c-accent); }
+.probs-view .pop {
+  display: none; position: absolute; bottom: 1.5em; left: 0; z-index: 60;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 6px;
+  padding: 4px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.3); min-width: 190px;
+}
+.probs-view .tok:hover .pop { display: block; }
+.probs-view .pop-row { display: flex; gap: 8px; padding: 1px 6px; white-space: nowrap; align-items: baseline; }
+.probs-view .pop-row.head { color: var(--c-dim); border-bottom: 1px solid var(--c-border); margin-bottom: 2px; }
+.probs-view .pop-row.alt { cursor: pointer; border-radius: 4px; }
+.probs-view .pop-row.alt:hover { background: var(--c-bg-3); }
+.probs-view .pop-row .rank { color: var(--c-faint); font-size: 11px; }
+.probs-view .pop-row .tt { font-family: monospace; }
+.probs-view .pop-row .pc { color: var(--c-dim); margin-left: auto; }
 .msg .md > :first-child { margin-top: 0; }
 .msg .md > :last-child { margin-bottom: 0; }
 .msg .md pre { background: var(--c-bg-2); padding: 8px; border-radius: 6px; overflow-x: auto; }
@@ -187,6 +220,15 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   max-width: var(--chat-w); margin: 0 auto;
   border-top: 1px solid var(--c-border); background: var(--c-chrome);
 }
+.sugg-row {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  max-width: var(--chat-w); margin: -6px auto 14px; padding: 0 4px;
+}
+.sugg-chip {
+  background: var(--c-bg-1); border: 1px dashed var(--c-border); border-radius: 14px;
+  padding: 3px 10px; font-size: 12.5px; color: var(--c-dim); cursor: pointer; text-align: left;
+}
+.sugg-chip:hover { color: var(--c-text); border-color: var(--c-accent); }
 
 /* ---------- drawer (fixed overlay — same trick as the sidebar) ---------- */
 .drawer {
@@ -211,6 +253,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   background: var(--c-bg-2); border: 1px solid var(--c-border); margin-right: 4px;
 }
 .pill.pinned { border-color: var(--c-pin); color: var(--c-pin); }
+.pill.semantic { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.triggered { border-color: var(--c-accent); color: var(--c-accent); }
 .pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
 .mem-item, .lore-item-row {
@@ -310,6 +353,7 @@ const THEMES = {
       '--c-user': 'oklch(0.78 0.10 65)',
       '--c-action': 'oklch(0.74 0.05 75)',
       '--c-dialogue': 'oklch(0.95 0.040 70)',
+      '--c-good': 'oklch(0.78 0.12 155)',
       '--c-ooc': 'oklch(0.70 0.04 75)',
       '--c-speaker-s': '65%',
       '--c-speaker-l': '72%',
@@ -400,9 +444,10 @@ function applyTheme(id, accentId = DEFAULT_ACCENT) {
     const palette = CTP_ACCENTS[id] ?? {};
     const hex = palette[accentId] ?? palette[DEFAULT_ACCENT];
     for (const v of ['--c-accent', '--c-user', '--c-dialogue']) style.setProperty(v, hex);
+    style.setProperty('--c-good', palette.green ?? '#a6e3a1');
   } else {
     // restore the theme's own values if an accentable theme set them before
-    for (const v of ['--c-accent', '--c-user', '--c-dialogue']) style.removeProperty(v);
+    for (const v of ['--c-accent', '--c-user', '--c-dialogue', '--c-good']) style.removeProperty(v);
     for (const [k, v2] of Object.entries(theme.vars)) style.setProperty(k, v2);
   }
 }
@@ -491,7 +536,27 @@ function getActivePath(messages, activeLeafId) {
 function appendMessage(chat, parentId, role, text, modelId = null) {
   const id = uid();
   const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false };
-  return { chat: { ...chat, messages: { ...chat.messages, [id]: node }, activeLeafId: id }, id };
+  const messages = { ...chat.messages, [id]: node };
+  // Record which swipe of the parent the conversation continues from.
+  const parent = messages[parentId];
+  if (parent) messages[parentId] = { ...parent, usedSwipe: parent.activeSwipe };
+  return { chat: { ...chat, messages, activeLeafId: id }, id };
+}
+
+// Reset every node's activeSwipe to its recorded usedSwipe (the version the
+// conversation actually continued from). No-op (same object) when nothing
+// needs changing. Called on chat open and after branching.
+function applyUsedSwipes(chat) {
+  let changed = false;
+  const messages = { ...chat.messages };
+  for (const [id, n] of Object.entries(messages)) {
+    if (Number.isInteger(n.usedSwipe) && n.usedSwipe !== n.activeSwipe
+        && n.usedSwipe >= 0 && n.usedSwipe < n.swipes.length) {
+      messages[id] = { ...n, activeSwipe: n.usedSwipe };
+      changed = true;
+    }
+  }
+  return changed ? { ...chat, messages } : chat;
 }
 
 // Returns a new messages map with nodeId and all its descendants removed.
@@ -526,19 +591,25 @@ function branchChat(chat, nodeId) {
 }
 
 // ---- lore engine --------------------------------------------------------
+// Semantic ("smart") activation: pieces may set `smart: true` and the app
+// (settings.embeddingModel) then embeds them + the recent conversation at
+// generation time; ids above SEMANTIC_THRESHOLD arrive here via the
+// `preActivated` set and activate with reason 'semantic' — otherwise they
+// behave exactly like keyword-triggered pieces (weight, budget, link boost).
 function keyMatches(key, text) {
   if (!key || !text) return false;
   try { return new RegExp(key, 'i').test(text); } catch { return false; }
 }
 
 // Determine which pieces are active this turn.
-// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'link-boosted', boost }).
-function scanLore(lorePieces, conversationText) {
+// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'link-boosted', boost }).
+function scanLore(lorePieces, conversationText, preActivated = null) {
   const pieces = Array.isArray(lorePieces) ? lorePieces : [];
   const active = new Map();
   for (const piece of pieces) {
     if (!piece || piece.enabled === false) continue;
     if (piece.pinned) { active.set(piece.id, { piece, reason: 'pinned', boost: 0 }); continue; }
+    if (preActivated?.has(piece.id)) { active.set(piece.id, { piece, reason: 'semantic', boost: 0 }); continue; }
     const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : DEFAULT_SEARCH_DEPTH;
     const scanText = conversationText.slice(-Math.round(depth * TOKEN_CHARS));
     if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText)))
@@ -558,8 +629,8 @@ function scanLore(lorePieces, conversationText) {
 }
 
 // Sort candidates by effective weight desc and fill the lore budget.
-function selectLore(lorePieces, conversationText, budgetTokens) {
-  const candidates = [...scanLore(lorePieces, conversationText).values()].map(a => ({
+function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null) {
+  const candidates = [...scanLore(lorePieces, conversationText, preActivated).values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
     content: a.piece.content ?? '',
@@ -596,7 +667,7 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
-function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '' }) {
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null }) {
   const personaName = persona?.name?.trim() || 'User';
   const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
   const contextLength = Number(settings.contextLength) || 8192;
@@ -647,8 +718,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // 3. lore layer
   const loreCap = Math.floor(budget * LAYER_CAPS.lore);
   const lorePieces = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
-  const loreScanned = scanLore(lorePieces, conversationText);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap);
+  const loreScanned = scanLore(lorePieces, conversationText, preActivated);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preActivated);
   const loreText = loreSel.map(s => `[${s.title}]\n${subUser(s.content, personaName)}`).join('\n\n');
   const loreTokens = loreText ? estimateTokens(loreText) : 0;
   // Enabled pieces that were NOT injected — observability for "did it even scan?"
@@ -863,12 +934,20 @@ async function* parseEventStream(body) {
   if (buf) yield* take(buf);
 }
 
-// Normalized async-generator chunk stream: yields { content } deltas.
-async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers = {}, maxTokens, signal }) {
+// Normalized async-generator chunk stream: yields { content } deltas; when the
+// backend returns logprobs (vLLM: logprobs:true + top_logprobs:N), yields
+// { content, logprob, top: [{token, logprob}] } per token instead.
+async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
+  const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetch(chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
-    body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, ...samplers }),
+    body: JSON.stringify({
+      model, messages, stream: true, max_tokens: maxTokens, ...samplers,
+      ...(tokenProbs ? { logprobs: true, top_logprobs: 10 } : {}),
+      ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
+      ...(stopSet ? { stop } : {}),
+    }),
     signal,
   });
   if (!res.ok) {
@@ -880,9 +959,142 @@ async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers =
     throw new Error(msg);
   }
   for await (const json of parseEventStream(res.body)) {
-    const delta = json.choices?.[0]?.delta?.content ?? json.choices?.[0]?.message?.content;
-    if (delta) yield { content: delta };
+    const choice = json.choices?.[0];
+    // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
+    const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
+    if (Array.isArray(lpContent) && lpContent.length) {
+      // Stop-token emission: a finish chunk with empty/missing delta carries
+      // the sampled EOS in logprobs — never yield it as content.
+      if (choice.finish_reason && !choice.delta?.content) continue;
+      for (const t of lpContent) {
+        if (!t?.token || stopSet?.has(t.token)) continue; // defensive: stop strings never leak inline
+        yield {
+          content: t.token,
+          logprob: t.logprob ?? null,
+          top: (t.top_logprobs ?? []).slice(0, 10)
+            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+        };
+      }
+      continue;
+    }
+    const delta = choice?.delta?.content ?? choice?.message?.content;
+    if (delta && !stopSet?.has(delta)) yield { content: delta };
   }
+}
+
+// ---- /tokenize (vLLM; degrade to null when unavailable) ----
+// Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
+// count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text.
+const tokenizeCache = new Map();
+async function tokenize({ endpoint, apiKey, model, prompt }) {
+  const key = `${endpoint}|${model}|${prompt}`;
+  if (tokenizeCache.has(key)) return tokenizeCache.get(key);
+  if (tokenizeCache.size > 500) tokenizeCache.clear();
+  let out = null;
+  try {
+    const res = await fetch(`${normalizeEndpoint(endpoint)}/tokenize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+      body: JSON.stringify({ model, prompt }),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const raw = json?.tokens ?? json?.data?.tokens ?? null;
+      let ids = null, strings = null, count = null;
+      if (Array.isArray(raw)) {
+        count = raw.length;
+        if (raw.every(t => Number.isInteger(t))) ids = raw;
+        else if (raw.every(t => typeof t === 'string')) strings = raw;
+      }
+      if (Number.isFinite(json?.count)) count = json.count;
+      if (count != null || ids || strings) out = { ids, strings, count };
+    }
+  } catch {}
+  tokenizeCache.set(key, out);
+  return out;
+}
+
+async function getTokenCount({ endpoint, apiKey, model, text }) {
+  const r = await tokenize({ endpoint, apiKey, model, prompt: text });
+  return r?.count ?? null;
+}
+
+// ---- /embeddings (OpenAI-style; semantic lore activation) ----
+// Similarity threshold for smart lore activation — tune in one place.
+const SEMANTIC_THRESHOLD = 0.55;
+// Session-lifetime cache for piece embeddings: model|hash(text) → vector.
+const embedCache = new Map();
+const textHash = (s) => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h.toString(36);
+};
+
+async function embed({ endpoint, apiKey, model, inputs }) {
+  const res = await fetch(`${normalizeEndpoint(endpoint)}/v1/embeddings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    body: JSON.stringify({ model, input: inputs }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      msg = json?.error?.message ?? json?.message ?? msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  if (!Array.isArray(json?.data)) throw new Error('Malformed embeddings response');
+  return [...json.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map(d => d.embedding);
+}
+
+// Cached single-text embedding (piece match texts change rarely).
+async function embedCached({ endpoint, apiKey, model, text }) {
+  const key = `${model}|${textHash(text)}`;
+  if (embedCache.has(key)) return embedCache.get(key);
+  if (embedCache.size > 500) embedCache.clear();
+  const [vec] = await embed({ endpoint, apiKey, model, inputs: [text] });
+  embedCache.set(key, vec);
+  return vec;
+}
+
+const cosine = (a, b) => {
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a?.length ?? 0, b?.length ?? 0);
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+};
+
+// Single NON-streaming chat completion for auxiliary tasks (memory, recap,
+// suggestions, /improve). Returns trimmed text; throws on HTTP/API errors.
+async function auxCall({ endpoint, apiKey, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
+  const res = await fetch(chatCompletionsURL(endpoint), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
+    body: JSON.stringify({
+      model,
+      messages: [
+        ...(system ? [{ role: 'system', content: system }] : []),
+        { role: 'user', content: user },
+      ],
+      stream: false,
+      max_tokens: maxTokens,
+      temperature,
+      ...(Array.isArray(stop) && stop.length ? { stop } : {}),
+    }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      msg = json?.error?.message ?? json?.message ?? msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  if (json?.error?.message) throw new Error(json.error.message);
+  return String(json.choices?.[0]?.message?.content ?? '').trim();
 }
 
 // ============================================================================
@@ -1003,6 +1215,7 @@ function newLorePiece() {
   return {
     id: uid(), type: 'lore', title: '', content: '', keys: [],
     pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
+    smart: false, // semantic (embedding) activation — needs settings.embeddingModel
     hidden: false, playable: false,
   };
 }
@@ -1057,6 +1270,10 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
           <label class="field"><span>Trigger keys — one per line, case-insensitive regex</span>
             <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
               onChange=${(keys) => set({ keys })} /></label>
+          <label class="check" title="Embed this piece + the recent conversation each generation; activates on similarity even without keyword overlap">
+            <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
+            Smart activation (semantic) — requires an embeddings model in Settings
+          </label>
           <div class="grid3">
             <label class="field"><span>Weight</span>
               <input type="number" value=${piece.weight ?? 0} onInput=${(e) => set({ weight: Number(e.target.value) })} /></label>
@@ -1179,14 +1396,19 @@ const DEFAULT_SETTINGS = {
   apiKey: '',
   model: '',
   auxModel: '',
+  embeddingModel: '', // semantic lore activation; empty = disabled
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
   responseLength: 'medium',
   samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
+  tokenProbs: true, // request logprobs + top_logprobs on generations
+  suggestions: true, // response-suggestion chips after generations
+  stopStrings: [],  // sent as OpenAI `stop` when non-empty
+  logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
 };
 
-function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange }) {
+function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias }) {
   const [draft, setDraft] = useState(() => deepClone(settings));
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
@@ -1234,6 +1456,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Aux model (memory summaries; blank = chat model)</span>
           <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
       </div>
+      <div class="grid2">
+        <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
+          <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
+            onInput=${(e) => set({ embeddingModel: e.target.value })} />
+          <span class="hint">Often a separate model name on vLLM; Fetch above populates the list.</span>
+        </label>
+      </div>
       <div class="grid3">
         <label class="field"><span>Context length (tokens)</span>
           <input type="number" value=${draft.contextLength} onInput=${(e) => set({ contextLength: Number(e.target.value) })} /></label>
@@ -1259,9 +1488,99 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Repetition penalty</span>
           <input type="number" step="0.01" value=${draft.samplers.repetition_penalty} onInput=${(e) => setSampler('repetition_penalty', Number(e.target.value))} /></label>
       </div>
+      <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
+        <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
+          placeholder="e.g. your EOS marker, if your model emits one"
+          onChange=${(stopStrings) => set({ stopStrings })} /></label>
       <label class="field"><span>Platform system prompt — lowest instruction rank; {{user}} works here</span>
         <textarea rows=${5} value=${draft.platformPrompt} onInput=${(e) => set({ platformPrompt: e.target.value })} /></label>
       <button class="btn small" onClick=${() => set({ platformPrompt: DEFAULT_PLATFORM_PROMPT })}>Reset prompt to default</button>
+      <div class="field"><span>Auxiliary features</span>
+        <label class="check">
+          <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
+          Token probabilities (request logprobs + top-10 alternatives per token)
+        </label>
+        <label class="check">
+          <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
+          Response suggestions (2 clickable options after each AI reply)
+        </label>
+        <div style=${{ marginTop: '4px' }}>
+          <button class="btn small" onClick=${onOpenLogitBias}>Edit logit bias…</button>
+          <span class="hint" style=${{ marginLeft: '8px' }}>${Object.keys(draft.logitBias ?? {}).length} entr(ies)</span>
+        </div>
+      </div>
+    <//>`;
+}
+
+// ============================================================================
+// COMPONENTS: LOGIT BIAS EDITOR — { [inputString]: { ids, strings, power } }.
+// Literal strings are tokenized via /tokenize ("!==" + s, prefix tokens sliced
+// off to dodge the leading-space artifact); raw "/id,id/" syntax always works.
+// ============================================================================
+function LogitBiasModal({ logitBias, onChange, onTokenize, onClose }) {
+  const [text, setText] = useState('');
+  const [power, setPower] = useState(-10);
+  const [busy, setBusy] = useState(false);
+  const [hint, setHint] = useState(null);
+  const entries = Object.entries(logitBias ?? {});
+  const remove = (key) => onChange(Object.fromEntries(entries.filter(([k]) => k !== key)));
+
+  const add = async () => {
+    const s = text.trim();
+    if (!s) return;
+    setBusy(true); setHint(null);
+    try {
+      let ids = null, strings = null;
+      const raw = /^\/([\d,\s]+)\/$/.exec(s);
+      if (raw) {
+        ids = raw[1].split(',').map(x => parseInt(x.trim(), 10)).filter(Number.isFinite);
+        strings = ids.map(String);
+      } else {
+        const full = await onTokenize(`!==${s}`);
+        const pre = await onTokenize('!==');
+        if (full?.ids) {
+          ids = full.ids.slice(pre?.ids?.length ?? 0);
+          strings = full.strings ? full.strings.slice((full.strings.length ?? 0) - ids.length) : ids.map(String);
+        }
+        if (!ids?.length) {
+          setHint('Tokenizer endpoint unavailable for literal strings — use raw /id,id/ syntax (e.g. /123,456/).');
+          return;
+        }
+      }
+      const p = Math.max(-100, Math.min(100, Number(power) || 0));
+      if (p === 0) remove(s); // power 0 deletes
+      else onChange({ ...(logitBias ?? {}), [s]: { ids, strings, power: p } });
+      setText('');
+    } finally { setBusy(false); }
+  };
+
+  const Row = ({ k, e }) => html`
+    <div class="kv" key=${k}>
+      <span class="k" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '55%' }}
+        title=${(e.strings ?? []).join('')}>${k} <span class="hint">[${(e.ids ?? []).join(',')}]</span></span>
+      <span>${e.power > 0 ? '+' : ''}${e.power}
+        <button class="btn small ghost" style=${{ marginLeft: '6px' }} onClick=${() => remove(k)}>✕</button></span>
+    </div>`;
+  const pos = entries.filter(([, e]) => e.power > 0).sort((a, b) => b[1].power - a[1].power);
+  const neg = entries.filter(([, e]) => e.power < 0).sort((a, b) => a[1].power - b[1].power);
+
+  return html`
+    <${Modal} title="Logit bias" onClose=${onClose}>
+      <div class="hint" style=${{ marginBottom: '8px' }}>
+        Applied to every generation as OpenAI logit_bias (first token of each entry). −100…100; 0 deletes.
+      </div>
+      <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
+        <input type="text" style=${{ flex: 1 }} placeholder='Literal string, or /id,id/' value=${text}
+          onInput=${(e) => setText(e.target.value)}
+          onKeyDown=${(e) => { if (e.key === 'Enter' && !busy) add(); }} />
+        <input type="number" style=${{ width: '80px' }} min="-100" max="100" value=${power}
+          onInput=${(e) => setPower(Number(e.target.value))} title="Bias −100…100" />
+        <button class="btn primary" disabled=${busy || !text.trim()} onClick=${add}>${busy ? '…' : 'Add'}</button>
+      </div>
+      ${hint && html`<div class="hint warn">${hint}</div>`}
+      ${entries.length === 0 && html`<div class="hint">No entries.</div>`}
+      ${pos.length > 0 && html`<h4>Encouraged</h4>${pos.map(([k, e]) => html`<${Row} k=${k} e=${e} />`)}`}
+      ${neg.length > 0 && html`<h4>Discouraged</h4>${neg.map(([k, e]) => html`<${Row} k=${k} e=${e} />`)}`}
     <//>`;
 }
 
@@ -1286,7 +1605,7 @@ function InspectorRow({ pills = [], title, meta, preview, content, dimmed = fals
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
   const [showInactive, setShowInactive] = useState(false);
   if (!manifest?.layers) return html`
     <div>
@@ -1295,16 +1614,20 @@ function ContextInspector({ manifest, onPreview, hasChat }) {
     </div>`;
   const L = manifest.layers;
   const row = (k, v) => html`<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`;
+  // Real count leads when available; estimate is the dim parenthetical.
+  const estReal = (est, real) => real != null
+    ? html`<span>${real} tok <span class="hint">(est ${est})</span></span>`
+    : html`<span>${est} tok <span class="hint">(est)</span></span>`;
   return html`
     <div>
       ${row('Context budget', `${manifest.budget} tok (ctx ${manifest.contextLength} − reserve ${manifest.reserve})`)}
-      ${row('Total estimate', `${manifest.totalTokens} tok`)}
+      ${row('Total', estReal(manifest.totalTokens, realCounts?.total))}
       <h4>Layers</h4>
-      ${row('Static', `${L.static.tokens} / ${L.static.cap} tok`)}
-      ${row('Lore', `${L.lore.tokens} / ${L.lore.cap} tok`)}
-      ${row('Memory', `${L.memory.tokens} / ${L.memory.cap} tok`)}
-      ${row('Greeting', `${L.greeting?.tokens ?? 0} tok`)}
-      ${row('History', `${L.history.tokens} / ${L.history.cap} tok (${L.history.kept} kept, ${L.history.dropped} dropped)`)}
+      ${row('Static', html`<span>${estReal(L.static.tokens, realCounts?.static)} <span class="hint">(cap ${L.static.cap})</span></span>`)}
+      ${row('Lore', html`<span>${estReal(L.lore.tokens, realCounts?.lore)} <span class="hint">(cap ${L.lore.cap})</span></span>`)}
+      ${row('Memory', html`<span>${estReal(L.memory.tokens, realCounts?.memory)} <span class="hint">(cap ${L.memory.cap})</span></span>`)}
+      ${row('Greeting', estReal(L.greeting?.tokens ?? 0, realCounts?.greeting))}
+      ${row('History', html`<span>${estReal(L.history.tokens, realCounts?.history)} <span class="hint">(cap ${L.history.cap}; ${L.history.kept} kept, ${L.history.dropped} dropped)</span></span>`)}
       ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠ ${w}</div>`)}
       <h4>Lore injected (${L.lore.pieces.length})</h4>
       ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
@@ -1392,16 +1715,85 @@ function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
 // ============================================================================
 // COMPONENTS: MESSAGE + COMPOSER + CHAT PANE
 // ============================================================================
-function MessageItem({ node, isRoot, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onBranch, onRewind, onDelete, onReply }) {
+// ============================================================================
+// COMPONENTS: PROBS VIEW — per-token spans with probability tint + hover
+// popover (top-10 alternatives, click to branch generation from that token).
+// ============================================================================
+const visibleTok = (t) => String(t ?? '').replace(/ /g, '␣').replace(/\t/g, '⇥').replace(/\n/g, '↵\n');
+const probPct = (lp) => lp == null ? null : Math.exp(lp) * 100;
+
+function ProbsView({ tokens, onPick }) {
+  return html`
+    <div class="probs-view">
+      ${tokens.map((t, i) => {
+        const pct = probPct(t.logprob);
+        const bg = pct == null ? 'transparent'
+          : `color-mix(in oklch, color-mix(in oklch, var(--c-good) ${Math.round(pct)}%, var(--c-danger)) 30%, transparent)`;
+        return html`
+          <span key=${i} class="tok" style=${{ background: bg }}>${t.text}<span class="pop">
+            <div class="pop-row head"><span class="tt">${visibleTok(t.text) || '∅'}</span>
+              <span class="pc">${pct == null ? 'n/a' : pct.toFixed(1) + '%'}</span></div>
+            ${(t.top ?? []).map((alt, j) => {
+              const ap = probPct(alt.logprob);
+              return html`<div key=${j} class="pop-row alt" onClick=${() => onPick(i, alt.token)}>
+                <span class="rank">#${j + 1}</span><span class="tt">${visibleTok(alt.token)}</span>
+                <span class="pc">${ap == null ? '' : ap.toFixed(1) + '%'}</span></div>`;
+            })}
+            <div class="pop-row alt" onClick=${() => onPick(i, null)}><span class="tt">↻ from here</span></div>
+          </span></span>`;
+      })}
+    </div>`;
+}
+
+function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [showProbs, setShowProbs] = useState(false);
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());
+  const hasProbs = !isUser && Array.isArray(swipe.tokens) && swipe.tokens.length > 0;
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
   const n = node.activeSwipe + 1, m = node.swipes.length;
+  const isLeafAssistant = isLeaf && !isUser;
+  const showNav = m > 1 || isLeafAssistant;
+  const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
+  const atUsed = usedIdx === node.activeSwipe;
+
+  // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
+  // right = next swipe / ▶⁺ on the leaf, left = previous swipe.
+  const [dragX, setDragX] = useState(0);
+  const gestureRef = useRef(null);
+  const gestureHandlers = (isUser || generating) ? {} : {
+    onPointerDown: (e) => {
+      if (e.pointerType === 'mouse' || editing) return;
+      gestureRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, consumed: false };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    },
+    onPointerMove: (e) => {
+      const g = gestureRef.current;
+      if (!g || g.id !== e.pointerId) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (g.consumed) return; // one action per gesture
+      if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
+        g.consumed = true;
+        setDragX(0);
+        if (dx > 0) { // forward: next swipe, or generate on the leaf's last
+          if (n < m) onSwipe(node.id, 1);
+          else if (isLeafAssistant) onRegenerate(node.id);
+        } else if (n > 1) { // back
+          onSwipe(node.id, -1);
+        }
+        return;
+      }
+      // sub-threshold feedback, only while clearly horizontal-dominant
+      setDragX(Math.abs(dx) > 2 * Math.abs(dy) ? Math.max(-30, Math.min(30, dx * 0.3)) : 0);
+    },
+    onPointerUp: () => { gestureRef.current = null; setDragX(0); },
+    onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
+  };
   return html`
     <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}">
       <div class="meta">
@@ -1410,13 +1802,24 @@ function MessageItem({ node, isRoot, personaName, characterNames, streaming, gen
         ${node.edited && html`<span>(edited)</span>`}
         ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
         <span style=${{ flex: 1 }}></span>
-        ${m > 1 && html`
+        ${showNav && html`
           <span class="swipes">
             <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀</button>
-            ${n}/${m}
-            <button class="btn small ghost" disabled=${generating || n >= m} onClick=${() => onSwipe(node.id, 1)}>▶</button>
+            <span>${n}/${m}</span>
+            ${usedIdx != null && html`
+              <span class="used-dot ${atUsed ? '' : 'jump'}"
+                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
+                onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
+            ${n < m
+              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶</button>`
+              : isLeafAssistant
+                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
+                    onClick=${() => onRegenerate(node.id)}>▶⁺</button>`
+                : html`<button class="btn small ghost" disabled>▶</button>`}
           </span>`}
         <span class="actions ${streaming ? 'always' : ''}">
+          ${hasProbs && html`<button class="btn small ghost ${showProbs ? 'primary' : ''}" title="Token probabilities"
+            onClick=${() => setShowProbs(!showProbs)}>▦</button>`}
           <button class="btn small ghost" title="Edit" disabled=${generating}
             onClick=${() => { setDraft(swipe.text); setEditing(true); }}>✎</button>
           ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating}
@@ -1431,13 +1834,17 @@ function MessageItem({ node, isRoot, personaName, characterNames, streaming, gen
             onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
         </span>
       </div>
-      <div class="bubble">
+      <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
+        style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
+        ...${gestureHandlers}>
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
             <button class="btn small primary" onClick=${() => { onEdit(node.id, draft); setEditing(false); }}>Save</button>
             <button class="btn small" onClick=${() => setEditing(false)}>Cancel</button>
           </div>` :
+          showProbs && hasProbs
+            ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${text}</div>`
             : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${text} prose /></div>`}
@@ -1445,9 +1852,14 @@ function MessageItem({ node, isRoot, personaName, characterNames, streaming, gen
     </div>`;
 }
 
-function Composer({ generating, onSubmit, onStop }) {
+function Composer({ generating, busy, onSubmit, onStop, inject }) {
   const [text, setText] = useState('');
   const [hint, setHint] = useState(null);
+  useEffect(() => {
+    if (!inject) return;
+    if ('text' in inject) setText(inject.text ?? '');
+    if ('hint' in inject) setHint(inject.hint ?? null);
+  }, [inject]);
   const send = () => {
     const t = text.trim();
     if (!t) return;
@@ -1459,26 +1871,55 @@ function Composer({ generating, onSubmit, onStop }) {
     <div class="composer">
       <div class="row">
         <textarea value=${text} rows=${2}
-          placeholder="Write a message…  (/ooc <text>, /continue, Enter to send)"
+          placeholder="Write a message…  (Enter to send; commands: /ooc /continue /improve /recap N /memory N /model NAME)"
           onInput=${(e) => setText(e.target.value)}
           onKeyDown=${(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!generating) send(); }
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!generating && !busy) send(); }
           }} />
         ${generating
           ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`
-          : html`<button class="btn primary" onClick=${send}>Send</button>`}
+          : html`<button class="btn primary" disabled=${!!busy} onClick=${send}>${busy ? 'Working…' : 'Send'}</button>`}
       </div>
       ${hint && html`<div class="hint warn">${hint}</div>`}
     </div>`;
 }
 
-function ChatPane({ chat, persona, characterNames, generating, onSubmitInput, onStop, ...actions }) {
+function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
+                  onSubmitInput, onStop, composerInject, auxBusy, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
-  useEffect(() => {
+  // Stick-to-bottom: follow content growth only while the user is pinned to
+  // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
+  // unpin/re-pin themselves via the scroll listener.
+  const pinnedRef = useRef(true);
+  const programmaticRef = useRef(false);
+  const [pinned, setPinned] = useState(true);
+  const scrollToBottom = () => {
     const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chat, generating]);
+    if (!el) return;
+    programmaticRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    pinnedRef.current = true;
+    setPinned(true);
+  };
+  const onLogScroll = () => {
+    const el = logRef.current;
+    if (!el) return;
+    if (programmaticRef.current) { programmaticRef.current = false; return; }
+    const isPinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (isPinned !== pinnedRef.current) { pinnedRef.current = isPinned; setPinned(isPinned); }
+  };
+  useEffect(() => { // follow growth only when pinned
+    if (!pinnedRef.current) return;
+    const el = logRef.current;
+    if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+  }, [chat, generating, suggestions]);
+  useEffect(() => { // new chat → start pinned at the bottom
+    pinnedRef.current = true;
+    setPinned(true);
+    const el = logRef.current;
+    if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+  }, [chat?.id]);
   if (!chat) return html`
     <div class="main"><div class="chatlog"><div class="empty">
       <div style=${{ fontSize: '22px' }}>FictionPad</div>
@@ -1487,23 +1928,38 @@ function ChatPane({ chat, persona, characterNames, generating, onSubmitInput, on
     </div></div></div>`;
   const personaName = persona?.name?.trim() || 'User';
   const leaf = path[path.length - 1];
+  const showSugg = !generating && leaf?.role === 'assistant'
+    && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
   return html`
     <div class="main">
-      <div class="chatlog" ref=${logRef}>
+      <div class="chatlog" ref=${logRef} onScroll=${onLogScroll}>
         ${path.map(node => html`
-          <${MessageItem} key=${node.id} node=${node} isRoot=${!node.parentId}
+          <${MessageItem} key=${node.id} node=${node} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
+            onSwipeTo=${actions.onSwipeTo}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
-            onReply=${actions.onReply} />`)}
+            onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />`)}
+        ${showSugg && html`
+          <div class="sugg-row">
+            ${suggestions.loading
+              ? html`<span class="hint">Thinking of options…</span>`
+              : html`
+                  ${(suggestions.swipe === leaf.activeSwipe ? suggestions.items ?? [] : []).map((s, i) => html`
+                    <button key=${i} class="sugg-chip" onClick=${() => onPickSuggestion(s)}>${s}</button>`)}
+                  <button class="btn small ghost" title="Re-roll suggestions" onClick=${onRerollSuggestions}>⟳</button>
+                `}
+          </div>`}
       </div>
+      ${!pinned && html`
+        <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
       ${!generating && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn primary" onClick=${() => actions.onGenerateReply()}>✨ Generate response</button>
         </div>`}
-      <${Composer} generating=${!!generating} onSubmit=${onSubmitInput} onStop=${onStop} />
+      <${Composer} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
     </div>`;
 }
 
@@ -1594,6 +2050,26 @@ function NewChatModal({ scenario, personas, onCreate, onClose }) {
 }
 
 // ============================================================================
+// COMPONENTS: RECAP MODAL (/recap result — copy or save as memory)
+// ============================================================================
+function RecapModal({ text, onSaveMemory, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+  return html`
+    <${Modal} title="Recap" wide onClose=${onClose}
+      footer=${html`
+        <button class="btn" disabled=${copied}
+          onClick=${async () => { try { await navigator.clipboard.writeText(text); setCopied(true); } catch {} }}>
+          ${copied ? 'Copied ✓' : 'Copy'}</button>
+        <button class="btn primary" disabled=${saved}
+          onClick=${() => { onSaveMemory(); setSaved(true); }}>
+          ${saved ? 'Saved ✓' : 'Save as memory'}</button>
+      `}>
+      <div style=${{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>${text}</div>
+    <//>`;
+}
+
+// ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
 function newChat(scenario, personaId) {
@@ -1634,9 +2110,14 @@ function Main({ storage, storageFailed }) {
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
   useEffect(() => applyTheme(theme, accent), [theme, accent]);
   const [manifest, setManifest] = useState(null);
+  const [lastMessages, setLastMessages] = useState(null); // chat-completions array behind manifest
+  const [realCounts, setRealCounts] = useState(null); // /tokenize counts {static,lore,memory,total} | null
   const [modal, setModal] = useState(null);
   const [generating, setGenerating] = useState(null); // { chatId, nodeId }
   const [summarizing, setSummarizing] = useState(false);
+  const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
+  const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
+  const [auxBusy, setAuxBusy] = useState(null); // 'improve' | 'recap' | 'memory' | null
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
 
@@ -1650,7 +2131,45 @@ function Main({ storage, storageFailed }) {
     return () => clearTimeout(t);
   }, [error]);
 
+  // Real token counts for the inspector — debounced, async, silently absent
+  // when /tokenize is unavailable. Estimates remain the fallback.
+  useEffect(() => {
+    setRealCounts(null);
+    if (!manifest?.layers || !lastMessages?.length) return;
+    const st = ref.current.settings;
+    const model = ref.current.chats[ui.chatId]?.settings?.model || st.model;
+    if (!st.endpoint || !model) return;
+    let alive = true;
+    const t = setTimeout(async () => {
+      const count = (text) => text
+        ? getTokenCount({ endpoint: st.endpoint, apiKey: st.apiKey, model, text })
+        : Promise.resolve(null);
+      // Reconstruct the exact blocks as sent from the same message array.
+      const sysBlocks = lastMessages.filter(m => m.role === 'system');
+      const rest = lastMessages.slice(sysBlocks.length);
+      const hasGreeting = rest[0]?.role === 'assistant';
+      const [s, l, m2, g, h, tot] = await Promise.all([
+        count(sysBlocks[0]?.content),
+        count(sysBlocks.find(m => m.content.startsWith('[World Info]'))?.content),
+        count(sysBlocks.find(m => m.content.startsWith('[Memories]'))?.content),
+        count(hasGreeting ? rest[0].content : ''),
+        count((hasGreeting ? rest.slice(1) : rest).map(m => m.content).join('\n')),
+        count(lastMessages.map(m => m.content).join('\n')),
+      ]);
+      if (alive) setRealCounts({ static: s, lore: l, memory: m2, greeting: g, history: h, total: tot });
+    }, 500);
+    return () => { alive = false; clearTimeout(t); };
+  }, [manifest, lastMessages]);
+
   const chat = chats[ui.chatId] ?? null;
+  // On chat open/switch (incl. after branching), default to the swipes the
+  // conversation actually continued from. In-session browsing is unaffected.
+  useEffect(() => {
+    const c = ref.current.chats[ui.chatId];
+    if (!c) return;
+    const next = applyUsedSwipes(c);
+    if (next !== c) upsertChat(next.id, next);
+  }, [ui.chatId]);
   const persona = chat?.personaId ? personas[chat.personaId] : null;
   const personaName = persona?.name?.trim() || 'User';
   const characterNames = useMemo(
@@ -1701,31 +2220,35 @@ function Main({ storage, storageFailed }) {
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
 
   // ---- memory subsystem ----
-  async function summarizeNow(chatObj) {
+  // Shared memory-card generation (auto-summarize + /memory). Returns the
+  // ≤500-char note text, or null when there's nothing to summarize. Throws on
+  // endpoint/HTTP errors.
+  async function generateMemory(chatObj, messageCount = MEMORY_EVERY) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const recent = path.slice(-MEMORY_EVERY)
+    const recent = path.slice(-messageCount)
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
-    if (!recent.trim()) return;
+    if (!recent.trim()) return null;
+    const out = await auxCall({
+      endpoint: st.endpoint, apiKey: st.apiKey, model,
+      system: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.',
+      user: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):`,
+      maxTokens: 220, temperature: 0.3, stop: st.stopStrings,
+    });
+    return out.slice(0, 500) || null;
+  }
+  async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
-      let out = '';
-      const memMessages = [
-        { role: 'system', content: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.' },
-        { role: 'user', content: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):` },
-      ];
-      for await (const chunk of openaiChatStream({
-        endpoint: st.endpoint, apiKey: st.apiKey, model, messages: memMessages,
-        samplers: { temperature: 0.3 }, maxTokens: 220,
-      })) out += chunk.content;
-      out = out.trim().slice(0, 500);
-      if (out) {
-        const store = addMemory(chatObj.memoryStore, out);
-        saveChat({ ...chatObj, memoryStore: { ...store, cursor: path.length } });
+      const text = await generateMemory(chatObj, MEMORY_EVERY);
+      if (text) {
+        const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
+        const store = addMemory(chatObj.memoryStore, text);
+        saveChat({ ...chatObj, memoryStore: { ...store, cursor: pathLen } });
       }
     } catch (e) {
       setError(`Memory summarization failed: ${e.message ?? e}`);
@@ -1741,35 +2264,73 @@ function Main({ storage, storageFailed }) {
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false } = {}) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
-    if (!st.endpoint || !st.model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    const model = chatObj.settings?.model || st.model; // per-chat override wins
+    if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
+    // Semantic lore activation (async, outside the pure assembler): embed the
+    // recent conversation + smart pieces, threshold → preActivated id set.
+    // Any embeddings failure degrades to keyword-only with a manifest warning.
+    let preActivated = null;
+    let semanticWarning = null;
+    if (st.embeddingModel) {
+      const smartPieces = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
+      const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
+        .map(activeText).join('\n').slice(-1500);
+      if (smartPieces.length && queryText.trim()) {
+        try {
+          const [queryVec] = await embed({ endpoint: st.endpoint, apiKey: st.apiKey, model: st.embeddingModel, inputs: [queryText] });
+          const vecs = await Promise.all(smartPieces.map(p =>
+            embedCached({ endpoint: st.endpoint, apiKey: st.apiKey, model: st.embeddingModel,
+              text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}` })));
+          preActivated = new Set();
+          for (let i = 0; i < smartPieces.length; i++)
+            if (cosine(queryVec, vecs[i]) >= SEMANTIC_THRESHOLD) preActivated.add(smartPieces[i].id);
+        } catch (e) {
+          console.warn('Semantic lore activation failed:', e);
+          semanticWarning = 'Semantic lore activation failed (embeddings); keyword-only for this generation.';
+        }
+      }
+    }
     const { messages, manifest: man } = assemblePrompt({
-      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt,
+      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt, preActivated,
     });
+    if (semanticWarning) man.warnings.push(semanticWarning);
     setManifest(man);
+    setLastMessages(messages);
+    setSuggestions(null);
+    // Logit bias: OpenAI shape {token_id: bias}, first token of each entry.
+    const logitBias = {};
+    for (const e of Object.values(st.logitBias ?? {})) {
+      const id = e?.ids?.[0];
+      if (Number.isInteger(id)) logitBias[String(id)] = Math.max(-100, Math.min(100, e.power));
+    }
     const abort = new AbortController();
     genRef.current = { abort };
     setGenerating({ chatId: chatObj.id, nodeId });
     let work = chatObj;
     let acc = continuation ? activeText(node) : '';
+    let toks = continuation ? (node?.swipes?.[node.activeSwipe]?.tokens ?? null) : null;
     const applyText = (text) => {
       const n = work.messages[nodeId];
       if (!n) return;
       const swipes = n.swipes.slice();
-      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: st.model };
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(toks ? { tokens: toks } : {}) };
       work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } }, updatedAt: Date.now() };
       upsertChat(work.id, work);
     };
     try {
       for await (const chunk of openaiChatStream({
-        endpoint: st.endpoint, apiKey: st.apiKey, model: st.model, messages,
+        endpoint: st.endpoint, apiKey: st.apiKey, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
+        tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
       })) {
         acc += chunk.content;
+        if (chunk.logprob !== undefined) // absent entirely when the backend ignores logprobs
+          toks = [...(toks ?? []), { text: chunk.content, logprob: chunk.logprob, top: chunk.top ?? [] }];
         applyText(acc);
       }
     } catch (e) {
@@ -1804,8 +2365,45 @@ function Main({ storage, storageFailed }) {
           upsertChat(work.id, work);
         }
         maybeSummarize(work);
+        // Response suggestions: only after a full generation/regeneration —
+        // never mid-stream, never after /continue, never for OOC exchanges.
+        if (!continuation && st.suggestions !== false) {
+          const parent = work.messages[node?.parentId];
+          const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
+          if (!parentIsOOC) fetchSuggestions(work, nodeId);
+        }
       }
       storage.flush();
+    }
+  }
+
+  // ---- response suggestions (aux model; ephemeral, silent on failure) ----
+  async function fetchSuggestions(chatObj, nodeId) {
+    const { personas: pe, settings: st } = ref.current;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) return;
+    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const swipeIdx = chatObj.messages[nodeId]?.activeSwipe ?? 0;
+    const recent = getActivePath(chatObj.messages, nodeId).slice(-6)
+      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    const key = { chatId: chatObj.id, nodeId, swipe: swipeIdx };
+    setSuggestions({ ...key, loading: true, items: null });
+    try {
+      const out = await auxCall({
+        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        system: `You suggest what the user's character (${pName}) might say or do next in this roleplay. Reply with exactly 2 options as a numbered list, one per line, at most 20 words each, written in first person as ${pName}. In-character; do not narrate other characters' actions; no commentary.`,
+        user: `Recent scene:\n\n${recent}\n\nTwo options for ${pName}:`,
+        maxTokens: 120, temperature: 0.9, stop: st.stopStrings,
+      });
+      const items = out.split('\n')
+        .map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim())
+        .filter(l => l.length > 0 && l.split(/\s+/).length <= 30 && !/^\d+$/.test(l) && !/:$/.test(l))
+        .slice(0, 2);
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId)
+        ? (items.length ? { ...key, loading: false, items } : null) : s);
+    } catch {
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId) ? null : s);
     }
   }
 
@@ -1831,6 +2429,7 @@ function Main({ storage, storageFailed }) {
     const c = ref.current.chats[ui.chatId];
     if (!c) return 'Select or create a chat first.';
     if (genRef.current) return 'Already generating — press Stop first.';
+    if (auxBusy) return `Working… (${auxBusy})`;
     if (raw.startsWith('/')) {
       const sp = raw.indexOf(' ');
       const cmd = (sp === -1 ? raw : raw.slice(0, sp)).toLowerCase();
@@ -1841,10 +2440,103 @@ function Main({ storage, storageFailed }) {
         return null;
       }
       if (cmd === '/continue') { handleContinue(c); return null; }
-      return `Unknown command ${cmd}. Available: /ooc <text>, /continue`;
+      if (cmd === '/improve') {
+        if (!arg) return 'Usage: /improve <draft text>';
+        improveDraft(c, arg);
+        return null;
+      }
+      if (cmd === '/recap') {
+        const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
+        recapChat(c, n);
+        return null;
+      }
+      if (cmd === '/memory') {
+        const n = Math.max(10, Math.min(50, parseInt(arg, 10) || 30));
+        memoryCommand(c, n);
+        return null;
+      }
+      if (cmd === '/model') {
+        const global = ref.current.settings.model;
+        if (!arg)
+          return `Effective model: ${c.settings?.model || global || '(none)'}${c.settings?.model ? ' (chat override)' : ' (global)'}`;
+        saveChat({ ...c, settings: { ...(c.settings ?? {}), model: arg } });
+        return `Chat model set to "${arg}" (this chat only, persisted).`;
+      }
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /improve, /recap N, /memory N, /model NAME`;
     }
     sendUserMessage(c, raw);
     return null;
+  }
+
+  // ---- aux slash commands ----
+  async function improveDraft(c, draft) {
+    const { personas: pe, settings: st } = ref.current;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const pers = c.personaId ? pe[c.personaId] : null;
+    const pName = pers?.name?.trim() || 'User';
+    const personaDesc = pers?.description?.trim() ? ` (${subUser(pers.description, pName)})` : '';
+    const recent = getActivePath(c.messages, c.activeLeafId).slice(-4)
+      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    setAuxBusy('improve');
+    try {
+      const out = await auxCall({
+        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        system: `Rewrite the user's draft in first person as ${pName}${personaDesc}, matching the roleplay's tone. Output only the rewritten text.`,
+        user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
+        maxTokens: 400, temperature: 0.7, stop: st.stopStrings,
+      });
+      if (!out) throw new Error('empty response from the model');
+      setComposerInject({ text: out, nonce: Date.now() });
+    } catch (e) {
+      setError(`/improve failed: ${e.message ?? e}`);
+    } finally {
+      setAuxBusy(null);
+    }
+  }
+
+  async function recapChat(c, n) {
+    const { personas: pe, settings: st } = ref.current;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
+    const recent = getActivePath(c.messages, c.activeLeafId).slice(-n)
+      .map(x => `${x.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(x), pName)}`)
+      .join('\n\n');
+    if (!recent.trim()) { setComposerInject({ hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
+    setAuxBusy('recap');
+    try {
+      const out = await auxCall({
+        endpoint: st.endpoint, apiKey: st.apiKey, model,
+        system: 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.',
+        user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
+        maxTokens: 700, temperature: 0.4, stop: st.stopStrings,
+      });
+      if (!out) throw new Error('empty response from the model');
+      setModal({ kind: 'recap', text: out });
+    } catch (e) {
+      setError(`/recap failed: ${e.message ?? e}`);
+    } finally {
+      setAuxBusy(null);
+    }
+  }
+
+  async function memoryCommand(c, n) {
+    setAuxBusy('memory');
+    setComposerInject({ hint: 'Generating memory…', nonce: Date.now() });
+    try {
+      const text = await generateMemory(c, n);
+      if (!text) { setComposerInject({ hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
+      const store = addMemory(c.memoryStore, text); // manual: cursor untouched
+      saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
+      setComposerInject({ hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
+    } catch (e) {
+      setComposerInject({ hint: null, nonce: Date.now() });
+      setError(`/memory failed: ${e.message ?? e}`);
+    } finally {
+      setAuxBusy(null);
+    }
   }
 
   // ---- per-message actions ----
@@ -1863,11 +2555,33 @@ function Main({ storage, storageFailed }) {
     upsertChat(c1.id, c1);
     runGeneration(c1, nodeId);
   };
+  // Regenerate from a token: new swipe whose text starts with tokens[0..i]
+  // (+ chosen alternative), then continue generation from that prefix via the
+  // existing continuation machinery (trailing assistant message = prefill).
+  const onRegenFromToken = (nodeId, tokIdx, alt) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n || genRef.current) return;
+    const src = n.swipes[n.activeSwipe];
+    const toks = src?.tokens;
+    if (!toks?.length) return;
+    const keep = toks.slice(0, alt == null ? tokIdx + 1 : tokIdx);
+    const prefix = keep.map(t => t.text).join('') + (alt ?? '');
+    const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
+    const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    upsertChat(c1.id, c1);
+    runGeneration(c1, nodeId, { continuation: true });
+  };
   const onSwipe = (nodeId, dir) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n) return;
     const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
     saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } });
+  };
+  const onSwipeTo = (nodeId, idx) => {
+    const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
+    if (!n || idx < 0 || idx >= n.swipes.length) return;
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } });
   };
   const onBranch = (nodeId) => {
     const c = ref.current.chats[ui.chatId];
@@ -1954,12 +2668,13 @@ function Main({ storage, storageFailed }) {
   const onPreview = () => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
-    const { manifest: man } = assemblePrompt({
+    const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
       chat: c, settings: ref.current.settings, platformPrompt: ref.current.settings.platformPrompt,
     });
     setManifest(man);
+    setLastMessages(messages);
   };
 
   return html`
@@ -1998,10 +2713,17 @@ function Main({ storage, storageFailed }) {
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
               generating=${generating?.chatId === chat?.id ? generating : null}
+              suggestions=${suggestions}
+              onPickSuggestion=${(s) => setComposerInject({ text: s, nonce: Date.now() })}
+              onRerollSuggestions=${() => {
+                const c = ref.current.chats[ui.chatId];
+                if (c && !auxBusy) fetchSuggestions(c, c.activeLeafId);
+              }}
+              composerInject=${composerInject} auxBusy=${auxBusy}
               onSubmitInput=${handleInput} onStop=${() => genRef.current?.abort.abort()}
-              onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe}
+              onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
-              onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} />
+              onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
           ${drawerOpen && html`
             <div class="drawer" style=${{ width: dwW, minWidth: dwW }}>
@@ -2015,7 +2737,7 @@ function Main({ storage, storageFailed }) {
               </div>
               <div class="body">
                 <${ErrorBoundary} name="panel">
-                  ${ui.drawer === 'inspector' && html`<${ContextInspector} manifest=${manifest} hasChat=${!!chat} onPreview=${onPreview} />`}
+                  ${ui.drawer === 'inspector' && html`<${ContextInspector} manifest=${manifest} hasChat=${!!chat} onPreview=${onPreview} realCounts=${realCounts} />`}
                   ${ui.drawer === 'memory' && html`<${MemoryPanel} chat=${chat} onUpdateChat=${saveChat} onSummarize=${() => summarizeNow(chat)} summarizing=${summarizing} />`}
                   ${ui.drawer === 'chat' && html`<${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${saveChat}
                     onExport=${() => onExportChat(chat)} onDelete=${() => confirm(`Delete chat "${chat.name}"?`) && onDeleteChat(chat.id)} />`}
@@ -2032,11 +2754,28 @@ function Main({ storage, storageFailed }) {
     ${modal?.kind === 'settings' && html`
       <${ErrorBoundary} name="settings"><${SettingsModal} settings=${settings} theme=${theme} onThemeChange=${setTheme}
         accent=${accent} onAccentChange=${setAccent}
-        onSave=${(s) => { setSettings(s); setModal(null); }} onClose=${() => setModal(null)} /><//>`}
+        onOpenLogitBias=${() => setModal({ kind: 'logitBias' })}
+        onSave=${(s) => { setSettings(prev => ({ ...s, logitBias: prev?.logitBias ?? s.logitBias ?? {} })); setModal(null); }}
+        onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'logitBias' && html`
+      <${ErrorBoundary} name="logit bias"><${LogitBiasModal}
+        logitBias=${settings.logitBias ?? {}}
+        onChange=${(map) => setSettings(s => ({ ...(s ?? {}), logitBias: map }))}
+        onTokenize=${(prompt) => tokenize({ endpoint: settings.endpoint, apiKey: settings.apiKey, model: settings.model, prompt })}
+        onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
       <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}
         onCreate=${(pid, newName) => createChat(modal.scenarioId, pid, newName)}
         onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'recap' && html`
+      <${ErrorBoundary} name="recap"><${RecapModal} text=${modal.text} onClose=${() => setModal(null)}
+        onSaveMemory=${() => {
+          const c = ref.current.chats[ui.chatId];
+          if (c) {
+            const store = addMemory(c.memoryStore, modal.text);
+            saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
+          }
+        }} /><//>`}
   `;
 }
 

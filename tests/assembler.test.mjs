@@ -14,13 +14,13 @@ if (!match) throw new Error('PURE CORE markers not found in fictionpad.html');
 const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
-  activeText, getActivePath, appendMessage, deleteSubtree, rewindChat, branchChat,
+  activeText, getActivePath, appendMessage, applyUsedSwipes, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, addMemory, assemblePrompt };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
-  MEMORY_CAP, estimateTokens, subUser,
-  activeText, getActivePath, appendMessage, deleteSubtree, rewindChat, branchChat,
+  MEMORY_CAP, LINK_BOOST, estimateTokens, subUser,
+  activeText, getActivePath, appendMessage, applyUsedSwipes, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, addMemory, assemblePrompt,
 } = core;
 
@@ -286,6 +286,83 @@ section('manifest observability fields');
   const mem = withMem.manifest.layers.memory.memories[0];
   ok(mem?.text?.includes('\n') && mem?.preview === 'A thing happened. Details.',
     'manifest memory carries full text + collapsed preview');
+}
+
+// ---- semantic (preActivated) lore activation ----
+section('semantic (preActivated) lore');
+{
+  const pieces = [
+    lore({ id: 'sem1', title: 'Semantic', keys: ['zzz-nope'], weight: 5, content: 'semantic content' }),
+    lore({ id: 'kw1', title: 'Keyword', keys: ['cloud'], weight: 1, content: 'keyword content' }),
+  ];
+  // omitting the arg keeps old behavior: sem1 inactive, kw1 triggered
+  const plain = scanLore(pieces, 'clouds everywhere');
+  ok(!plain.has('sem1') && plain.get('kw1')?.reason === 'triggered', 'no preActivated → keyword-only behavior');
+  // preActivated activates with reason 'semantic' despite no keyword match
+  const sem = scanLore(pieces, 'clouds everywhere', new Set(['sem1']));
+  ok(sem.get('sem1')?.reason === 'semantic', 'preActivated id activates with reason semantic');
+  // semantic pieces compete on weight/budget like triggered ones
+  const sel = selectLore(pieces, 'clouds everywhere', estimateTokens('x'.repeat(33)), new Set(['sem1']));
+  ok(sel.length === 1 && sel[0].id === 'sem1' && sel[0].reason === 'semantic',
+    'semantic piece wins budget contention on weight');
+  const selKw = selectLore(pieces, 'clouds everywhere', estimateTokens('x'.repeat(33)));
+  ok(selKw.length === 1 && selKw[0].id === 'kw1', 'without preActivated the keyword piece wins instead');
+  // semantic pieces boost their links like any active piece
+  const linked = scanLore([
+    lore({ id: 'sem2', keys: [], weight: 1, links: ['tgt'], content: 'x' }),
+    lore({ id: 'tgt', keys: [], weight: 0, content: 'y' }),
+  ], 'no keywords here', new Set(['sem2']));
+  ok(linked.get('tgt')?.reason === 'link-boosted' && linked.get('tgt')?.boost === LINK_BOOST,
+    'semantic piece link-boosts its links');
+  // assemblePrompt: manifest carries reason 'semantic'; smart piece below
+  // threshold (not in preActivated) lands in inactive as 'not-triggered'
+  const scenario = {
+    ...baseScenario,
+    lorePieces: [
+      lore({ id: 's1', title: 'Sem', keys: [], weight: 0, content: 'semantic lore content' }),
+      lore({ id: 's2', title: 'Below', keys: [], weight: 0, content: 'below threshold' }),
+    ],
+  };
+  const { manifest } = assemblePrompt({
+    scenario, persona, chat: baseChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '',
+    preActivated: new Set(['s1']),
+  });
+  ok(manifest.layers.lore.pieces[0]?.reason === 'semantic', 'manifest lists semantic piece with its reason');
+  const inact = Object.fromEntries(manifest.layers.lore.inactive.map(p => [p.id, p.reason]));
+  ok(inact.s2 === 'not-triggered', 'below-threshold smart piece is not-triggered in inactive list');
+}
+
+// ---- usedSwipe semantics ----
+section('usedSwipe semantics');
+{
+  // root greeting gains a second swipe; browse to swipe 1, then append a child
+  let chat = baseChat;
+  const rootBrowsed = {
+    ...chat.messages.root,
+    swipes: [...chat.messages.root.swipes, { text: 'alt greeting', createdAt: 2, modelId: null }],
+    activeSwipe: 1,
+  };
+  chat = { ...chat, messages: { ...chat.messages, root: rootBrowsed } };
+  const r1 = appendMessage(chat, 'root', 'user', 'hi');
+  chat = r1.chat;
+  ok(chat.messages.root.usedSwipe === 1, 'appending a child records parent activeSwipe as usedSwipe');
+  ok(chat.messages.root.activeSwipe === 1, 'parent swipe browsing is not disturbed by recording');
+  // browse back to swipe 0, append the next child → usedSwipe updates
+  chat = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, activeSwipe: 0 } } };
+  const r2 = appendMessage(chat, r1.id, 'assistant', 'hello');
+  chat = r2.chat;
+  ok(chat.messages[r1.id].usedSwipe === 0, 'next child updates usedSwipe to the then-active swipe');
+  // applyUsedSwipes resets activeSwipe → usedSwipe, leaves others alone
+  const browsed = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, activeSwipe: 0 } } };
+  const applied = applyUsedSwipes(browsed);
+  ok(applied.messages.root.activeSwipe === 1, 'applyUsedSwipes resets activeSwipe to usedSwipe');
+  ok(applied.messages[r2.id].activeSwipe === 0 && applied.messages[r2.id].usedSwipe === undefined,
+    'nodes without usedSwipe are untouched');
+  ok(applyUsedSwipes(applied) === applied, 'applyUsedSwipes is a no-op (same object) when nothing to reset');
+  // out-of-range usedSwipe is ignored safely
+  const corrupt = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, usedSwipe: 99, activeSwipe: 0 } } };
+  ok(applyUsedSwipes(corrupt).messages.root.activeSwipe === 0, 'out-of-range usedSwipe ignored');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);
