@@ -127,3 +127,16 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 - SSE parsing no longer relies on `ReadableStream.pipeThrough`/`TextDecoderStream`, which some mobile WebKit builds lack
 - Server now serves the HTML with `Cache-Control: no-cache` so updates aren't masked by a stale cached page
 
+
+## v2.6 - Mobile swipe and composer fixes
+
+**Changed**
+
+- Bubble swipe direction flipped: swipe left goes to the next swipe variant (or regenerates at the last one), swipe right goes back
+- On touch devices, Enter in the message composer always inserts a newline - you send with the Send button; desktop keeps Enter-to-send with Shift+Enter for newline, and the composer placeholder reflects the device
+
+**Fixed**
+
+- Pane gestures no longer hijack bubble swipes: touches on message bubbles are now always swipe-navigation territory, so opening or closing the sidebar/Inspector drawer can't steal them (previously this read as "the swipe directions are backwards")
+- Swiping an open sidebar/drawer shut now only starts from the pane or scrim itself (tapping the scrim still closes it)
+

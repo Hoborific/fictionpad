@@ -1646,7 +1646,7 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
   const atUsed = usedIdx === node.activeSwipe;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
-  // right = next swipe / ▶⁺ on the leaf, left = previous swipe.
+  // left = next swipe / ▶⁺ on the leaf, right = previous swipe.
   const [dragX, setDragX] = useState(0);
   const gestureRef = useRef(null);
   const gestureHandlers = (isUser || generating) ? {} : {
@@ -1663,10 +1663,10 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
       if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
         g.consumed = true;
         setDragX(0);
-        if (dx > 0) { // forward: next swipe, or generate on the leaf's last
+        if (dx < 0) { // swipe left: next swipe, or generate on the leaf's last
           if (n < m) onSwipe(node.id, 1);
           else if (isLeafAssistant) onRegenerate(node.id);
-        } else if (n > 1) { // back
+        } else if (n > 1) { // swipe right: back
           onSwipe(node.id, -1);
         }
         return;
@@ -1750,14 +1750,20 @@ function Composer({ generating, busy, onSubmit, onStop, inject }) {
     if (res) setHint(res);
     else { setText(''); setHint(null); }
   };
+  // Touch devices (coarse pointer) have no Shift on the soft keyboard, so
+  // Enter is always a newline there — sending is the Send button's job.
+  // Desktop keeps Enter-to-send, Shift+Enter for newline.
+  const coarseEnter = window.matchMedia?.('(pointer: coarse)').matches;
   return html`
     <div class="composer">
       <div class="row">
         <textarea value=${text} rows=${2}
-          placeholder="Write a message…  (Enter to send; commands: /ooc /continue /improve /recap N /memory N /model NAME)"
+          placeholder=${coarseEnter
+            ? 'Write a message…  (commands: /ooc /continue /improve /recap N /memory N /model NAME)'
+            : 'Write a message…  (Enter to send; commands: /ooc /continue /improve /recap N /memory N /model NAME)'}
           onInput=${(e) => setText(e.target.value)}
           onKeyDown=${(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!generating && !busy) send(); }
+            if (e.key === 'Enter' && !e.shiftKey && !coarseEnter) { e.preventDefault(); if (!generating && !busy) send(); }
           }} />
         ${generating
           ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`
@@ -2264,10 +2270,11 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- mobile edge swipes: open/close the two overlay panes ----
   // Left edge → swipe right opens the sidebar; right edge → swipe left opens
-  // the Inspector/Memory drawer. An open pane is swiped shut from anywhere
-  // (left for the sidebar, right for the drawer; scrim tap also closes).
-  // Touches starting on a message bubble never trigger pane gestures —
-  // bubble swipe navigation keeps priority there.
+  // the Inspector/Memory drawer. Message rows (.msg) are ALWAYS bubble swipe
+  // territory — pane gestures never start there, and with a pane open only
+  // touches on the pane/scrim itself swipe it shut (scrim tap also closes).
+  // Otherwise pane gestures steal bubble swipes near the edges, which reads
+  // as "the swipe directions are backwards".
   const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer });
   navStateRef.current = { isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
   useEffect(() => {
@@ -2276,12 +2283,13 @@ function Main({ storage, storageKind, storageFailed }) {
       if (e.pointerType === 'mouse') return;
       const st = navStateRef.current;
       if (!st.isMobile) return;
+      if (e.target.closest?.('.msg')) return; // message rows: bubble navigation only
       if (st.collapsed && !st.drawer) {
         // Both panes closed: an open gesture must start on a screen edge.
         const edge = e.clientX <= 24 ? 'left' : e.clientX >= window.innerWidth - 24 ? 'right' : null;
-        if (edge && !e.target.closest?.('.bubble'))
-          g = { id: e.pointerId, x: e.clientX, y: e.clientY, edge };
-      } else {
+        if (edge) g = { id: e.pointerId, x: e.clientX, y: e.clientY, edge };
+      } else if (e.target.closest?.('.sidebar, .drawer, .scrim')) {
+        // A pane is open: swiping it shut starts on the pane/scrim itself.
         g = { id: e.pointerId, x: e.clientX, y: e.clientY };
       }
     };
