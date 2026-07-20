@@ -1506,7 +1506,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
       ${row('Memory', html`<span>${estReal(L.memory.tokens, realCounts?.memory)} <span class="hint">(cap ${L.memory.cap})</span></span>`)}
       ${row('Greeting', estReal(L.greeting?.tokens ?? 0, realCounts?.greeting))}
       ${row('History', html`<span>${estReal(L.history.tokens, realCounts?.history)} <span class="hint">(cap ${L.history.cap}; ${L.history.kept} kept, ${L.history.dropped} dropped)</span></span>`)}
-      ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠ ${w}</div>`)}
+      ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
       <h4>Lore injected (${L.lore.pieces.length})</h4>
       ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
       ${L.lore.pieces.map(p => html`
@@ -1687,18 +1687,18 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
         <span style=${{ flex: 1 }}></span>
         ${showNav && html`
           <span class="swipes">
-            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀</button>
+            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
             <span>${n}/${m}</span>
             ${usedIdx != null && html`
               <span class="used-dot ${atUsed ? '' : 'jump'}"
                 title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
                 onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
             ${n < m
-              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶</button>`
+              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
               : isLeafAssistant
                 ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
-                    onClick=${() => onRegenerate(node.id)}>▶⁺</button>`
-                : html`<button class="btn small ghost" disabled>▶</button>`}
+                    onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
+                : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
           </span>`}
         <span class="actions ${streaming ? 'always' : ''}">
           ${hasProbs && html`<button class="btn small ghost ${showProbs ? 'primary' : ''}" title="Token probabilities"
@@ -1712,7 +1712,7 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
           <button class="btn small ghost" title="Branch from here" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
           ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
-            onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮</button>`}
+            onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮\uFE0E</button>`}
           ${!isRoot && html`<button class="btn small ghost" title="Delete message (and its branch)" disabled=${generating}
             onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
         </span>
@@ -1754,10 +1754,19 @@ function Composer({ generating, busy, onSubmit, onStop, inject }) {
   // Enter is always a newline there — sending is the Send button's job.
   // Desktop keeps Enter-to-send, Shift+Enter for newline.
   const coarseEnter = window.matchMedia?.('(pointer: coarse)').matches;
+  // Auto-grow the textarea with the draft, capped (CSS max-height) so long
+  // messages scroll internally instead of eating the screen.
+  const taRef = useRef(null);
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  }, [text]);
   return html`
     <div class="composer">
       <div class="row">
-        <textarea value=${text} rows=${2}
+        <textarea ref=${taRef} value=${text} rows=${2}
           placeholder=${coarseEnter
             ? 'Write a message…  (commands: /ooc /continue /improve /recap N /memory N /model NAME)'
             : 'Write a message…  (Enter to send; commands: /ooc /continue /improve /recap N /memory N /model NAME)'}
@@ -1783,6 +1792,19 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   const pinnedRef = useRef(true);
   const programmaticRef = useRef(false);
   const [pinned, setPinned] = useState(true);
+  // "Jump to latest" is deliberately shy: it only appears once the latest
+  // message (e.g. the one being generated) is entirely scrolled out of view —
+  // not merely when the user nudges up a few px from the bottom.
+  const [showJump, setShowJump] = useState(false);
+  const computeJump = () => {
+    const el = logRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const msgs = el.querySelectorAll(':scope > .msg');
+    const lastH = msgs.length ? msgs[msgs.length - 1].offsetHeight : 0;
+    const show = dist > lastH + 40;
+    setShowJump(prev => prev === show ? prev : show);
+  };
   const scrollToBottom = () => {
     const el = logRef.current;
     if (!el) return;
@@ -1790,6 +1812,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
     el.scrollTop = el.scrollHeight;
     pinnedRef.current = true;
     setPinned(true);
+    setShowJump(false);
   };
   const onLogScroll = () => {
     const el = logRef.current;
@@ -1797,15 +1820,18 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
     if (programmaticRef.current) { programmaticRef.current = false; return; }
     const isPinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     if (isPinned !== pinnedRef.current) { pinnedRef.current = isPinned; setPinned(isPinned); }
+    computeJump();
   };
   useEffect(() => { // follow growth only when pinned
-    if (!pinnedRef.current) return;
     const el = logRef.current;
-    if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+    if (pinnedRef.current) {
+      if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+    } else computeJump(); // content grew while unpinned — jump may newly apply
   }, [chat, generating, suggestions]);
   useEffect(() => { // new chat → start pinned at the bottom
     pinnedRef.current = true;
     setPinned(true);
+    setShowJump(false);
     const el = logRef.current;
     if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
   }, [chat?.id]);
@@ -1842,11 +1868,11 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
                 `}
           </div>`}
       </div>
-      ${!pinned && html`
+      ${showJump && html`
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
       ${!generating && leaf?.role === 'user' && html`
         <div class="gen-reply">
-          <button class="btn primary" onClick=${() => actions.onGenerateReply()}>✨ Generate response</button>
+          <button class="btn primary" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
       <${Composer} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
     </div>`;
@@ -1885,7 +1911,7 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
       <div class="head">
         <h1>FictionPad</h1>
         <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
-        <button class="btn small ghost" title="Settings" onClick=${onOpenSettings}>⚙</button>
+        <button class="btn small ghost" title="Settings" onClick=${onOpenSettings}>⚙\uFE0E</button>
         <button class="btn small ghost" title="Collapse sidebar" onClick=${onToggleCollapse}>«</button>
       </div>
       <div class="scroll">
@@ -1900,7 +1926,7 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
               <span class="name">${s.name}</span>
               <span class="tools">
                 <button class="btn small ghost" title="New chat from this scenario"
-                  onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>💬</button>
+                  onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✉\uFE0E</button>
                 <button class="btn small ghost" title="Edit"
                   onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
                 <button class="btn small ghost" title="Export JSON"
@@ -1912,7 +1938,7 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
         </div>
         <div class="side-section">
           <div class="title">Chats${selectedScenarioId ? '' : ' (all)'}</div>
-          ${chatList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use 💬 on a scenario.</div>`}
+          ${chatList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario.</div>`}
           ${chatList.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => onSelectChat(c.id)}
@@ -1941,7 +1967,7 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
             : storageKind === 'server'
               ? 'Scenarios, personas and chats are stored on this server (shared).'
               : 'Data is stored locally in this browser.'}>
-          ${saveRetrying ? '⚠ saving…' : storageKind === 'server' ? 'server storage' : 'local storage'}</span>
+          ${saveRetrying ? '⚠\uFE0E saving…' : storageKind === 'server' ? 'server storage' : 'local storage'}</span>
       </div>
       ${!collapsed && html`<div class="pane-handle right" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}

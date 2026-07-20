@@ -140,3 +140,18 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 - Pane gestures no longer hijack bubble swipes: touches on message bubbles are now always swipe-navigation territory, so opening or closing the sidebar/Inspector drawer can't steal them (previously this read as "the swipe directions are backwards")
 - Swiping an open sidebar/drawer shut now only starts from the pane or scrim itself (tapping the scrim still closes it)
 
+
+## v2.7 - Text Glyphs, Auto-Growing Composer
+
+**Changed**
+
+- Swapped UI emojis for text-style glyphs: the scenario "new chat" button is now ✉ instead of 💬, "Generate response" shows ✦ instead of ✨, and the warning, swipe-arrow, rewind and settings icons are forced to text presentation (via the \uFE0E variation selector) so they render consistently across platforms instead of as colorful emoji.
+
+**Added**
+
+- The composer textarea now grows automatically as you type, up to a 200px cap - longer drafts scroll inside the box instead of it staying tiny or eating the screen.
+
+**Fixed**
+
+- The "↓ Jump to latest" button is now deliberately shy: it only appears once the latest message (e.g. the one being generated) is entirely scrolled out of view, rather than popping up whenever you nudge a few pixels up from the bottom.
+
