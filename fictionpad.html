@@ -240,10 +240,26 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .streaming-cursor::after { content: "▌"; color: var(--c-accent); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-.composer { border-top: 1px solid var(--c-border); padding: 10px 14px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); background: var(--c-chrome); }
+.composer { position: relative; border-top: 1px solid var(--c-border); padding: 8px 14px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--c-chrome); }
+.cmd-hints {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  width: min(var(--chat-w), calc(100% - 28px)); box-sizing: border-box;
+  margin-bottom: 4px; z-index: 45; /* above the side panes */
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 4px; box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+  display: flex; flex-direction: column;
+}
+.cmd-hint {
+  display: flex; gap: 10px; align-items: baseline; padding: 5px 8px;
+  background: transparent; border: none; border-radius: 5px; cursor: pointer; text-align: left;
+  color: var(--c-text); font-size: 13px;
+}
+.cmd-hint:hover { background: var(--c-bg-3); }
+.cmd-hint .cmd { font-family: monospace; color: var(--c-accent); flex: none; }
+.cmd-hint .desc { color: var(--c-dim); font-size: 12px; }
 .composer .row { display: flex; gap: 8px; max-width: var(--chat-w); margin: 0 auto; align-items: flex-start; }
 .composer .row .btn { align-self: stretch; } /* send/stop spans the full composer row height */
-.composer textarea { flex: 1; min-height: 44px; max-height: 200px; }
+.composer textarea { flex: 1; min-height: 32px; max-height: 200px; }
 .composer .hint { max-width: var(--chat-w); margin: 4px auto 0; }
 .gen-reply {
   display: flex; justify-content: center; padding: 8px 14px; width: 100%;
@@ -2171,6 +2187,15 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
     </div>`;
 }
 
+const COMPOSER_COMMANDS = [
+  ['/ooc', 'speak out of character'],
+  ['/continue', 'continue the last reply'],
+  ['/improve', 'rewrite your draft in persona voice'],
+  ['/recap N', 'summarize the last N messages'],
+  ['/memory N', 'save a memory from the last N messages'],
+  ['/model NAME', 'set this chat’s model'],
+];
+
 function Composer({ generating, busy, onSubmit, onStop, inject }) {
   const [text, setText] = useState('');
   const [hint, setHint] = useState(null);
@@ -2190,22 +2215,35 @@ function Composer({ generating, busy, onSubmit, onStop, inject }) {
   // Enter is always a newline there — sending is the Send button's job.
   // Desktop keeps Enter-to-send, Shift+Enter for newline.
   const coarseEnter = window.matchMedia?.('(pointer: coarse)').matches;
+  // Slash-command hints: while the first token is a / prefix, offer matching
+  // commands (click/tap completes the command word into the draft).
+  const cmdHints = text.startsWith('/') && !/[\s]/.test(text)
+    ? COMPOSER_COMMANDS.filter(([c]) => c.split(' ')[0].startsWith(text) && c.split(' ')[0] !== text)
+    : [];
   // Auto-grow the textarea with the draft, capped (CSS max-height) so long
-  // messages scroll internally instead of eating the screen.
+  // messages scroll internally instead of eating the screen. Resting state
+  // (empty draft) is a single line regardless of focus.
   const taRef = useRef(null);
   useEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
+    if (!text) { ta.style.height = ''; return; }
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
   }, [text]);
   return html`
     <div class="composer">
+      ${cmdHints.length > 0 && html`
+        <div class="cmd-hints">
+          ${cmdHints.map(([c, d]) => html`
+            <button key=${c} class="cmd-hint"
+              onMouseDown=${(e) => { e.preventDefault(); setText(c.split(' ')[0] + (c.includes(' ') ? ' ' : '')); taRef.current?.focus(); }}>
+              <span class="cmd">${c}</span><span class="desc">${d}</span>
+            </button>`)}
+        </div>`}
       <div class="row">
-        <textarea ref=${taRef} value=${text} rows=${2}
-          placeholder=${coarseEnter
-            ? 'Write a message…  (commands: /ooc /continue /improve /recap N /memory N /model NAME)'
-            : 'Write a message…  (Enter to send; commands: /ooc /continue /improve /recap N /memory N /model NAME)'}
+        <textarea ref=${taRef} value=${text} rows=${1}
+          placeholder="Type a message or /"
           onInput=${(e) => setText(e.target.value)}
           onKeyDown=${(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !coarseEnter) { e.preventDefault(); if (!generating && !busy) send(); }

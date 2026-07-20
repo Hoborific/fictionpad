@@ -164,3 +164,14 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Added**
 - On narrow/mobile screens, the Inspector and Memory buttons collapse into a single « toggle in the ribbon (mirroring the » sidebar toggle), which opens the last-used panel or closes the open one.
 
+
+## v2.9 - Slimmer Composer & Slash-Command Hints
+
+**Added**
+- Slash-command hints: while you type a `/` prefix, a popup above the composer lists matching commands (`/ooc`, `/continue`, `/improve`, `/recap N`, `/memory N`, `/model NAME`) with short descriptions; clicking or tapping one completes the command into your draft.
+
+**Changed**
+- The composer textarea now rests at a single line and grows as you type (up to the same cap as before), instead of always taking up two lines.
+- Placeholder text simplified to "Type a message or /" - the full command list no longer clutters the input, since the hints surface it on demand.
+- Minor size trims: smaller minimum textarea height and tighter composer padding.
+
