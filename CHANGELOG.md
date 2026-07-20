@@ -211,3 +211,17 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Changed**
 - Character messages no longer show the redundant `Name:` / `**Name:**` / `*Name*` prefix inside the bubble - the speaker is already labeled in the message meta row, so the prefix is stripped for display.
 
+
+## v3.3 - Date Formats, Editable Length Directive
+
+**Added**
+- Date format setting (dd/mm/yyyy, mm/dd/yyyy, yyyy-mm-dd) controlling message timestamps, memory panel dates, and auto-generated chat names.
+- Editable length directive in Settings: the instruction appended to the prompt for response length can now be customized, left blank to send nothing, or left alone to follow the active preset's default text (existing installs keep their current behavior).
+
+**Changed**
+- Switching the response length preset now also updates the length directive text to that preset's default.
+- Date formatting is no longer locale-dependent - one formatter (`fmtDate`) handles all timestamps consistently.
+
+**Fixed**
+- Scrolling up during generation now immediately releases stick-to-bottom instead of snapping back; scrolling deliberately to the bottom re-pins it.
+

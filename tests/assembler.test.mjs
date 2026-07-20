@@ -248,6 +248,21 @@ section('assembler budgeting & manifest');
   });
   ok(withCustom.messages[0].content.includes('Avoid purple prose.'), 'per-chat custom instructions appended to system layer');
   ok(withCustom.messages[0].content.includes('moderate length'), 'response-length directive appended to system layer');
+
+  // user-editable length directive overrides the preset default; '' = none
+  const withDirective = assemblePrompt({
+    scenario, persona, chat,
+    settings: { contextLength: 8192, maxTokens: 400, lengthDirective: 'Answer in exactly two sentences.' },
+    platformPrompt: '',
+  });
+  ok(withDirective.messages[0].content.includes('exactly two sentences'), 'custom length directive used');
+  ok(!withDirective.messages[0].content.includes('moderate length'), 'preset directive replaced by custom one');
+  const noDirective = assemblePrompt({
+    scenario, persona, chat,
+    settings: { contextLength: 8192, maxTokens: 400, lengthDirective: '' },
+    platformPrompt: '',
+  });
+  ok(!noDirective.messages[0].content.includes('moderate length'), 'blank length directive injects nothing');
 }
 
 // ---- manifest observability fields (preview / content / inactive) ----

@@ -374,7 +374,9 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     tailParts.push(`${personaName} is ${subUser(persona.description, personaName).trim()}`);
   const customInstr = subUser(chat?.customInstructions ?? '', personaName).trim();
   if (customInstr) tailParts.push(customInstr);
-  const directive = LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive;
+  // Length directive: user-editable in settings; falls back to the preset's
+  // default text when unset (existing installs keep current behavior).
+  const directive = (settings.lengthDirective ?? LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive)?.trim();
   if (directive) tailParts.push(directive);
   let backstory = subUser(scenario?.backstory ?? '', personaName).trim();
 
@@ -1021,7 +1023,18 @@ function pickJSONFile() {
   });
 }
 
-const fmtDate = (ts) => ts ? new Date(ts).toLocaleString() : '';
+// Date order is a user setting (settings.dateFormat), not locale-dependent.
+const DATE_FORMATS = {
+  'dd/mm/yyyy': (d, p) => `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`,
+  'mm/dd/yyyy': (d, p) => `${p(d.getMonth() + 1)}/${p(d.getDate())}/${d.getFullYear()}`,
+  'yyyy-mm-dd': (d, p) => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+};
+const fmtDate = (ts, fmt = 'dd/mm/yyyy') => {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${(DATE_FORMATS[fmt] ?? DATE_FORMATS['dd/mm/yyyy'])(d, p)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 // ============================================================================
 // ERROR BOUNDARY — a pane/dialog crash shows an inline box instead of React
@@ -1255,9 +1268,13 @@ const DEFAULT_SETTINGS = {
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
+  dateFormat: 'dd/mm/yyyy', // date order for stamps and chat names
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
   responseLength: 'medium',
+  // Editable length instruction appended to the prompt tail; '' = no directive.
+  // Follows the preset's default text until the user edits it.
+  lengthDirective: LENGTH_PRESETS.medium.directive,
   samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
@@ -1270,7 +1287,13 @@ const DEFAULT_SETTINGS = {
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload }) {
-  const [draft, setDraft] = useState(() => deepClone(settings));
+  const [draft, setDraft] = useState(() => {
+    const d = deepClone(settings);
+    // Pre-fill from the active preset so saving an untouched form keeps the
+    // current directive instead of blanking it.
+    d.lengthDirective ??= LENGTH_PRESETS[d.responseLength ?? 'medium']?.directive ?? '';
+    return d;
+  });
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
   const [migBusy, setMigBusy] = useState(null);
@@ -1313,6 +1336,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
             </select>
           </div></label>`}
+      <label class="field"><span>Date format — message stamps, memories, chat names</span>
+        <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
+          ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
+        </select></label>
       <div class="grid2">
         <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
           <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
@@ -1352,7 +1379,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <input type="number" value=${draft.contextLength} onInput=${(e) => set({ contextLength: Number(e.target.value) })} /></label>
         <label class="field"><span>Response length preset</span>
           <select value=${draft.responseLength}
-            onChange=${(e) => set({ responseLength: e.target.value, maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens })}>
+            onChange=${(e) => set({
+              responseLength: e.target.value,
+              maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
+              lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
+            })}>
             <option value="short">Short (~150 tokens)</option>
             <option value="medium">Medium (~400 tokens)</option>
             <option value="long">Long (~800 tokens)</option>
@@ -1360,6 +1391,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Max tokens (response reserve)</span>
           <input type="number" value=${draft.maxTokens} onInput=${(e) => set({ maxTokens: Number(e.target.value) })} /></label>
       </div>
+      <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
+        <textarea rows=${2} value=${draft.lengthDirective ?? ''}
+          onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
       <div class="grid3">
         <label class="field"><span>Temperature</span>
           <input type="number" step="0.05" value=${draft.samplers.temperature} onInput=${(e) => setSampler('temperature', Number(e.target.value))} /></label>
@@ -1560,7 +1594,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
 // ============================================================================
 // COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
 // ============================================================================
-function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing }) {
+function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat }) {
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } });
@@ -1578,7 +1612,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing }) {
         <div class="mem-item" key=${m.id}>
           <div class="row">
             ${m.pinned && html`<span class="pill pinned">pinned</span>`}
-            <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt)}</span>
+            <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt, dateFormat)}</span>
             <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
               ${m.pinned ? 'unpin' : 'pin'}</button>
             <button class="btn small danger" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
@@ -1624,11 +1658,6 @@ function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
 // ============================================================================
 const visibleTok = (t) => String(t ?? '').replace(/ /g, '␣').replace(/\t/g, '⇥').replace(/\n/g, '↵\n');
 const probPct = (lp) => lp == null ? null : Math.exp(lp) * 100;
-const fmtDateTime = (ts) => {
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-};
 
 function ProbsView({ tokens, onPick }) {
   return html`
@@ -1655,7 +1684,7 @@ function ProbsView({ tokens, onPick }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -1731,7 +1760,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         <span class="who ${isCharacter ? 'speaker' : ''}"
           style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
         ${index != null && html`<span>#${index}</span>`}
-        ${swipe.createdAt && html`<span>${fmtDateTime(swipe.createdAt)}</span>`}
+        ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
         ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${(node.edited || swipe.modelId) && html`
           <button class="btn small ghost meta-toggle" title="Message info"
@@ -1880,7 +1909,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject }) {
 }
 
 function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
@@ -1888,6 +1917,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   // unpin/re-pin themselves via the scroll listener.
   const pinnedRef = useRef(true);
   const programmaticRef = useRef(false);
+  const lastTopRef = useRef(0); // for detecting user-initiated upward scrolls
   const [pinned, setPinned] = useState(true);
   // "Jump to latest" is deliberately shy: it only appears once the latest
   // message (e.g. the one being generated) is entirely scrolled out of view —
@@ -1914,9 +1944,16 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   const onLogScroll = () => {
     const el = logRef.current;
     if (!el) return;
-    if (programmaticRef.current) { programmaticRef.current = false; return; }
-    const isPinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (isPinned !== pinnedRef.current) { pinnedRef.current = isPinned; setPinned(isPinned); }
+    const top = el.scrollTop;
+    if (programmaticRef.current) { programmaticRef.current = false; lastTopRef.current = top; return; }
+    const dist = el.scrollHeight - top - el.clientHeight;
+    let p = pinnedRef.current;
+    // Any user-initiated upward scroll unpins immediately — during streaming,
+    // an 80px threshold just snaps you back before you can escape it.
+    if (top < lastTopRef.current - 1) p = false;
+    else if (dist < 40) p = true; // deliberately scrolling to the bottom re-pins
+    lastTopRef.current = top;
+    if (p !== pinnedRef.current) { pinnedRef.current = p; setPinned(p); }
     computeJump();
   };
   useEffect(() => { // follow growth only when pinned
@@ -1950,6 +1987,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
+            dateFormat=${dateFormat}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
@@ -2149,7 +2187,7 @@ function ContextMenu({ x, y, items, onClose }) {
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas,
-                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose }) {
+                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -2160,7 +2198,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
         ${tab === 'inspector' && html`
           <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
         ${tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
         ${tab === 'chat' && html`
           <${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
@@ -2178,7 +2216,7 @@ const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
 
 function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
                       onUpdateChat, onSummarize, summarizing,
-                      width, onDragStart, onResetWidth, onClose }) {
+                      width, onDragStart, onResetWidth, onClose, dateFormat }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
@@ -2194,7 +2232,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
         ${chat && tab === 'inspector' && html`
           <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
         ${chat && tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
       </div>
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
@@ -2205,11 +2243,11 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
 // ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
-function newChat(scenario, personaId) {
+function newChat(scenario, personaId, dateFormat) {
   const rootId = uid();
   return {
     id: uid(), scenarioId: scenario.id, personaId: personaId ?? null,
-    name: `${scenario.name} — ${fmtDate(Date.now())}`,
+    name: `${scenario.name} — ${fmtDate(Date.now(), dateFormat)}`,
     customInstructions: '',
     rootMessageId: rootId, activeLeafId: rootId,
     messages: {
@@ -2905,7 +2943,7 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     const scen = ref.current.scenarios[scenarioId];
     if (!scen) return;
-    const c = newChat(scen, pid);
+    const c = newChat(scen, pid, settings?.dateFormat);
     upsertChat(c.id, c);
     setUi(u => ({ ...u, chatId: c.id, scenarioId }));
     setModal(null);
@@ -3013,6 +3051,7 @@ function Main({ storage, storageKind, storageFailed }) {
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
+              dateFormat=${settings.dateFormat}
               generating=${generating?.chatId === chat?.id ? generating : null}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ text: s, nonce: Date.now() })}
@@ -3031,6 +3070,7 @@ function Main({ storage, storageKind, storageFailed }) {
       <${RightDrawer}
         chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
         manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
+        dateFormat=${settings.dateFormat}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
@@ -3073,6 +3113,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
         manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
         personas=${personas} onUpdateChat=${saveChat}
+        dateFormat=${settings.dateFormat}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
