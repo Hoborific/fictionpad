@@ -1,0 +1,4 @@
+vendor/
+fictionpad.db
+fictionpad.compiled.html
+.DS_Store

@@ -112,6 +112,43 @@ trial('message list render incl. prose markdown', () => {
       onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
 });
 
+// RP prose formatting: quote pairing must survive inch marks, contractions,
+// unterminated quotes, and emphasis inside speech (regression: the old
+// naive /"[^"\n]+"/ regex paired a 5ft8" inch mark with the next real quote
+// and mangled the HTML around it).
+const proseHtml = (text) => renderToStaticMarkup(html`<${Markdown} text=${text} prose=${true} />`);
+
+trial('prose: inch mark inside action does not eat dialogue', () => {
+  const out = proseHtml('*she is 5ft8" and smirks* "Hello there."');
+  if (!out.includes('<em>she is 5ft8&quot; and smirks</em>'))
+    throw new Error('action em broken: ' + out);
+  if (!out.includes('<span class="dialogue">&quot;Hello there.&quot;</span>'))
+    throw new Error('dialogue not wrapped: ' + out);
+});
+
+trial('prose: emphasis inside speech stays nested in the dialogue span', () => {
+  const out = proseHtml('"I *am* listening."');
+  if (!out.includes('<span class="dialogue">&quot;I <em>am</em> listening.&quot;</span>'))
+    throw new Error('em inside dialogue broken: ' + out);
+});
+
+trial('prose: unterminated quote is left raw', () => {
+  const out = proseHtml('She says "hi and walks off');
+  if (out.includes('class="dialogue"')) throw new Error('unterminated quote wrapped: ' + out);
+});
+
+trial('prose: two quotes on one line each get their own span', () => {
+  const out = proseHtml('"hi" she said, "bye"');
+  if ((out.match(/class="dialogue"/g) ?? []).length !== 2)
+    throw new Error('expected 2 dialogue spans: ' + out);
+});
+
+trial('prose: curly quotes wrap; apostrophes do not interfere', () => {
+  const out = proseHtml('“I don’t know,” she said.');
+  if (!out.includes('<span class="dialogue">“I don’t know,”</span>'))
+    throw new Error('curly dialogue broken: ' + out);
+});
+
 // ProbsView renders per-token spans with popovers (no client JS needed for SSR).
 trial('ProbsView renders tokens + alternatives', () => {
   const out = renderToStaticMarkup(html`

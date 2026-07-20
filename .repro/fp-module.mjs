@@ -135,12 +135,28 @@ function applyTheme(id, accentId = DEFAULT_ACCENT) {
 // Wrap quoted dialogue in <span class="dialogue"> before markdown parsing
 // (marked passes inline HTML through). Skips fenced code blocks; quotes inside
 // inline `code` spans still get wrapped (accepted limitation).
+// A straight quote only OPENS dialogue when it looks like one: not after a
+// letter/digit (5ft8", rock"in') and not before whitespace/end — otherwise a
+// stray inch-mark would pair with the next real quote and eat the text in
+// between. Unterminated quotes are left raw. Curly “…” pairs unambiguously.
 function wrapDialogue(md) {
   let inFence = false;
   return String(md ?? '').split('\n').map(line => {
     if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
     if (inFence) return line;
-    return line.replace(/"[^"\n]+"|“[^”\n]+”/g, m => `<span class="dialogue">${m}</span>`);
+    let out = '', i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      const opens = ch === '“' || (ch === '"'
+        && !/[\p{L}\p{N}]/u.test(line[i - 1] ?? '')
+        && !/[\s"“]/.test(line[i + 1] ?? ' '));
+      if (!opens) { out += ch; i++; continue; }
+      const end = line.indexOf(ch === '“' ? '”' : '"', i + 1);
+      if (end === -1) { out += ch; i++; continue; }
+      out += `<span class="dialogue">${line.slice(i, end + 1)}</span>`;
+      i = end + 1;
+    }
+    return out;
   }).join('\n');
 }
 
@@ -619,8 +635,20 @@ class ServerDBAdapter extends AbstractStorage {
       ...(this.serverToken ? { 'Authorization': `Bearer ${this.serverToken}` } : {}),
     };
   }
+  // A Bearer token the server doesn't actually require (e.g. a stale token on
+  // a Basic-auth deployment) earns a 401; retry bare once so the browser's
+  // cached Basic creds take over before we give up.
+  async #fetch(route, opts = {}) {
+    const headers = this.#headers();
+    let res = await fetch(route, { ...opts, headers });
+    if (res.status === 401 && headers.Authorization) {
+      const { Authorization, ...bare } = headers;
+      res = await fetch(route, { ...opts, headers: bare });
+    }
+    return res;
+  }
   async #post(route, body) {
-    const res = await fetch(route, { method: 'POST', headers: this.#headers(), body: JSON.stringify(body ?? {}) });
+    const res = await this.#fetch(route, { method: 'POST', body: JSON.stringify(body ?? {}) });
     if (!res.ok) {
       let msg = `HTTP ${res.status}`;
       try { msg = (await res.json())?.error ?? msg; } catch {}
@@ -629,7 +657,7 @@ class ServerDBAdapter extends AbstractStorage {
     return res.json();
   }
   async init() {
-    const res = await fetch('/version', { headers: this.#headers() });
+    const res = await this.#fetch('/version');
     if (!res.ok) {
       const err = new Error(`HTTP ${res.status}`);
       err.status = res.status; // 401 → wrong/missing FICTIONPAD_TOKEN (boot gate shows a token field)
@@ -684,15 +712,33 @@ function effectiveEndpoint(settings, serverStorageActive) {
 // browser already attaches the server's Basic creds to same-origin fetches —
 // so the LLM key travels as X-Real-Authorization, which the proxy maps to the
 // upstream Authorization header (and never leaks the Basic creds upstream).
-const authHeaders = (apiKey, endpoint) => {
-  if (!apiKey) return {};
-  return isServerProxy(endpoint)
-    ? { 'X-Real-Authorization': `Bearer ${apiKey}` }
-    : { 'Authorization': `Bearer ${apiKey}` };
+// When the server instead gates with FICTIONPAD_TOKEN (Bearer, no Basic), the
+// proxy requires that token too — send serverToken as Authorization, exactly
+// like the storage routes do.
+const authHeaders = (apiKey, endpoint, serverToken = '') => {
+  if (!isServerProxy(endpoint)) return apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
+  return {
+    ...(apiKey ? { 'X-Real-Authorization': `Bearer ${apiKey}` } : {}),
+    ...(serverToken ? { 'Authorization': `Bearer ${serverToken}` } : {}),
+  };
 };
 
-async function listModels({ endpoint, apiKey, signal } = {}) {
-  const res = await fetch(modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint) }, signal });
+// Same-origin /proxy requests carry the serverToken as Bearer; on a
+// Basic-auth deployment (or with a stale token) that Bearer 401s — retry
+// once without it so the browser's cached Basic creds take over. Direct
+// (non-proxy) endpoints never retry: their Authorization is the LLM key.
+async function fetchAPI(endpoint, url, opts = {}) {
+  let res = await fetch(url, opts);
+  if (res.status === 401 && isServerProxy(endpoint) && opts.headers?.Authorization) {
+    const headers = { ...opts.headers };
+    delete headers.Authorization;
+    res = await fetch(url, { ...opts, headers });
+  }
+  return res;
+}
+
+async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
+  const res = await fetchAPI(endpoint, modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint, serverToken) }, signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
@@ -736,11 +782,11 @@ async function* parseEventStream(body) {
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
-  const res = await fetch(chatCompletionsURL(endpoint), {
+  const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
       model, messages, stream: true, max_tokens: maxTokens, ...samplers,
       ...(tokenProbs ? { logprobs: true, top_logprobs: 10 } : {}),
@@ -843,15 +889,15 @@ function alignTokensToSpans(text, lpTape) {
 // Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text.
 const tokenizeCache = new Map();
-async function tokenize({ endpoint, apiKey, model, prompt }) {
+async function tokenize({ endpoint, apiKey, serverToken, model, prompt }) {
   const key = `${endpoint}|${model}|${prompt}`;
   if (tokenizeCache.has(key)) return tokenizeCache.get(key);
   if (tokenizeCache.size > 500) tokenizeCache.clear();
   let out = null;
   try {
-    const res = await fetch(`${normalizeEndpoint(endpoint)}/tokenize`, {
+    const res = await fetchAPI(endpoint, `${normalizeEndpoint(endpoint)}/tokenize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
       body: JSON.stringify({ model, prompt }),
     });
     if (res.ok) {
@@ -871,8 +917,8 @@ async function tokenize({ endpoint, apiKey, model, prompt }) {
   return out;
 }
 
-async function getTokenCount({ endpoint, apiKey, model, text }) {
-  const r = await tokenize({ endpoint, apiKey, model, prompt: text });
+async function getTokenCount({ endpoint, apiKey, serverToken, model, text }) {
+  const r = await tokenize({ endpoint, apiKey, serverToken, model, prompt: text });
   return r?.count ?? null;
 }
 
@@ -887,10 +933,10 @@ const textHash = (s) => {
   return h.toString(36);
 };
 
-async function embed({ endpoint, apiKey, model, inputs }) {
-  const res = await fetch(`${normalizeEndpoint(endpoint)}/v1/embeddings`, {
+async function embed({ endpoint, apiKey, serverToken, model, inputs }) {
+  const res = await fetchAPI(endpoint, `${normalizeEndpoint(endpoint)}/v1/embeddings`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({ model, input: inputs }),
   });
   if (!res.ok) {
@@ -907,11 +953,11 @@ async function embed({ endpoint, apiKey, model, inputs }) {
 }
 
 // Cached single-text embedding (piece match texts change rarely).
-async function embedCached({ endpoint, apiKey, model, text }) {
+async function embedCached({ endpoint, apiKey, serverToken, model, text }) {
   const key = `${model}|${textHash(text)}`;
   if (embedCache.has(key)) return embedCache.get(key);
   if (embedCache.size > 500) embedCache.clear();
-  const [vec] = await embed({ endpoint, apiKey, model, inputs: [text] });
+  const [vec] = await embed({ endpoint, apiKey, serverToken, model, inputs: [text] });
   embedCache.set(key, vec);
   return vec;
 }
@@ -925,10 +971,10 @@ const cosine = (a, b) => {
 
 // Single NON-streaming chat completion for auxiliary tasks (memory, recap,
 // suggestions, /improve). Returns trimmed text; throws on HTTP/API errors.
-async function auxCall({ endpoint, apiKey, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
-  const res = await fetch(chatCompletionsURL(endpoint), {
+async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
+  const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
       model,
       messages: [
@@ -959,6 +1005,8 @@ async function auxCall({ endpoint, apiKey, model, system, user, maxTokens = 300,
 // ============================================================================
 function usePersistentState(name, initialState) {
   const [value, setValue] = useState(() => {
+    if (typeof localStorage === 'undefined')
+      return typeof initialState === 'function' ? initialState() : initialState;
     try {
       const raw = localStorage.getItem(name);
       if (raw != null) return JSON.parse(raw);
@@ -968,7 +1016,8 @@ function usePersistentState(name, initialState) {
   const update = useCallback((next) => {
     setValue(prev => {
       const v = typeof next === 'function' ? next(prev) : next;
-      try { localStorage.setItem(name, JSON.stringify(v)); } catch (e) { console.error(e); }
+      if (typeof localStorage !== 'undefined')
+        try { localStorage.setItem(name, JSON.stringify(v)); } catch (e) { console.error(e); }
       return v;
     });
   }, [name]);
@@ -1258,6 +1307,9 @@ const DEFAULT_PLATFORM_PROMPT =
   'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
+  'Format the reply as prose: wrap spoken dialogue in double quotation marks ' +
+  '("like this") and actions or non-verbal beats in single asterisks (*like ' +
+  'this*). ' +
   'When a specific character speaks or acts, begin the reply with that character\'s name ' +
   'followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the ' +
   'prefix from the reader. Narration without a speaker needs no prefix.';
@@ -1315,7 +1367,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   const fetchModels = async () => {
     setModelsError(null);
-    try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey })); }
+    try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken })); }
     catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
   };
 
@@ -1371,7 +1423,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
           <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
             onInput=${(e) => set({ embeddingModel: e.target.value })} />
-          <span class="hint">Often a separate model name on vLLM; Fetch above populates the list.</span>
+          <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
         </label>
       </div>
       <div class="grid3">
@@ -1539,6 +1591,40 @@ function InspectorRow({ pills = [], title, meta, preview, content, dimmed = fals
     </div>`;
 }
 
+// Collapsible section header (Context / Lore / Memories) — open by default,
+// collapse state persisted per section. `meta` renders dim after the title.
+function InspectorSection({ title, count, meta, children }) {
+  const [open, setOpen] = usePersistentState(`fictionpad.inspector.section.${title}`, true);
+  return html`
+    <div>
+      <h4 class="ir-toggle" onClick=${() => setOpen(o => !o)}>
+        ${open ? '▾' : '▸'} ${title}${count != null ? ` (${count})` : ''}${meta && html` <span class="hint">${meta}</span>`}</h4>
+      ${open && children}
+    </div>`;
+}
+
+// One budget layer as a lore-row-style card: name + tokens/cap, a usage meter
+// (warning-colored past 90%), a one-line note collapsed, context on expand.
+// Expanded by default; open state persisted per card.
+function LayerCard({ name, tokens, cap, note, about }) {
+  const [open, setOpen] = usePersistentState(`fictionpad.inspector.layer.${name}`, true);
+  const pct = cap > 0 ? Math.min(100, Math.round((tokens / cap) * 100)) : 0;
+  return html`
+    <div class="lore-item-row">
+      <div class="row" style=${{ cursor: 'pointer' }} onClick=${() => setOpen(o => !o)}>
+        <span class="hint">${open ? '▾' : '▸'}</span>
+        <span style=${{ flex: 1 }}>${name} <span class="hint">(${pct}%)</span></span>
+        <span class="hint" style=${{ fontVariantNumeric: 'tabular-nums' }}>${tokens} / ${cap}t</span>
+      </div>
+      <div class="lt-meter">
+        <div class="lt-fill ${pct > 90 ? 'lt-hot' : ''}"
+          style=${{ width: (tokens > 0 ? Math.max(pct, 1) : 0) + '%' }} />
+      </div>
+      ${!open && note && html`<div class="ir-preview">${note}</div>`}
+      ${open && about && html`<div class="ir-content">${about}</div>`}
+    </div>`;
+}
+
 function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
   const [showInactive, setShowInactive] = useState(false);
   if (!manifest?.layers) return html`
@@ -1547,46 +1633,76 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Preview current context</button>`}
     </div>`;
   const L = manifest.layers;
-  const row = (k, v) => html`<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`;
-  // Real count leads when available; estimate is the dim parenthetical.
-  const estReal = (est, real) => real != null
-    ? html`<span>${real} tok <span class="hint">(est ${est})</span></span>`
-    : html`<span>${est} tok <span class="hint">(est)</span></span>`;
+  // One number per card, one source per panel: when /tokenize gave us a real
+  // total, every card shows its real count (est fallback for empty blocks);
+  // otherwise all cards are estimates. The greeting is the first chat message,
+  // so it counts toward History here; budgeting still treats it as pinned.
+  const exact = realCounts?.total != null;
+  const tok = (est, real) => (exact ? (real ?? est) : est);
+  const total = tok(manifest.totalTokens, realCounts?.total);
+  const src = exact ? 'exact' : 'estimated';
+  const hasGreeting = (L.greeting?.tokens ?? 0) > 0;
+  const histTok = tok(L.history.tokens + (L.greeting?.tokens ?? 0),
+    exact ? (realCounts?.history ?? 0) + (realCounts?.greeting ?? 0) : null);
+  const keptNote = L.history.dropped
+    ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
+    : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
+  const memPinned = L.memory.memories.filter(m => m.pinned).length;
   return html`
     <div>
-      ${row('Context budget', `${manifest.budget} tok (ctx ${manifest.contextLength} − reserve ${manifest.reserve})`)}
-      ${row('Total', estReal(manifest.totalTokens, realCounts?.total))}
-      <h4>Layers</h4>
-      ${row('Static', html`<span>${estReal(L.static.tokens, realCounts?.static)} <span class="hint">(cap ${L.static.cap})</span></span>`)}
-      ${row('Lore', html`<span>${estReal(L.lore.tokens, realCounts?.lore)} <span class="hint">(cap ${L.lore.cap})</span></span>`)}
-      ${row('Memory', html`<span>${estReal(L.memory.tokens, realCounts?.memory)} <span class="hint">(cap ${L.memory.cap})</span></span>`)}
-      ${row('Greeting', estReal(L.greeting?.tokens ?? 0, realCounts?.greeting))}
-      ${row('History', html`<span>${estReal(L.history.tokens, realCounts?.history)} <span class="hint">(cap ${L.history.cap}; ${L.history.kept} kept, ${L.history.dropped} dropped)</span></span>`)}
-      ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
-      <h4>Lore injected (${L.lore.pieces.length})</h4>
-      ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
-      ${L.lore.pieces.map(p => html`
-        <${InspectorRow} key=${p.id}
-          pills=${[{ text: p.reason, cls: p.reason },
-            ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : [])]}
-          title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
-          preview=${p.preview} content=${p.content} />`)}
-      ${(L.lore.inactive ?? []).length > 0 && html`
-        <div class="hint ir-toggle" onClick=${() => setShowInactive(!showInactive)}>
-          Not injected (${L.lore.inactive.length}) ${showInactive ? '▾' : '▸'}
+      <${InspectorSection} title="Context"
+        meta=${`(${manifest.budget > 0 ? Math.round((total / manifest.budget) * 100) : 0}%)`}>
+        <${LayerCard} name="Static"
+          tokens=${tok(L.static.tokens, realCounts?.static)} cap=${L.static.cap}
+          note="platform prompt · scenario · persona"
+          about="Platform system prompt, scenario instructions and backstory, and the persona — always sent in full." />
+        <${LayerCard} name="Lore"
+          tokens=${tok(L.lore.tokens, realCounts?.lore)} cap=${L.lore.cap}
+          note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} not` : ''}`}
+          about="Lore pieces pinned or triggered by recent messages, ordered by weight and trimmed to budget." />
+        <${LayerCard} name="Memory"
+          tokens=${tok(L.memory.tokens, realCounts?.memory)} cap=${L.memory.cap}
+          note=${L.memory.memories.length
+            ? `${L.memory.memories.length} injected · ${memPinned} pinned` : 'no memories yet'}
+          about="Pinned memories first, then recent ones, trimmed to budget; new summaries are written as the chat grows." />
+        <${LayerCard} name="History"
+          tokens=${histTok} cap=${L.history.cap}
+          note=${hasGreeting ? `greeting + ${keptNote}` : keptNote}
+          about="Chat messages, oldest dropped first under pressure; the greeting is pinned and always sent." />
+        <${LayerCard} name="Total"
+          tokens=${total} cap=${manifest.budget}
+          about="Everything sent to the model. Budget = context length minus the response reserve." />
+        <div class="hint" style=${{ margin: '2px 0 8px' }}>
+          ${src} counts · ctx ${manifest.contextLength} − ${manifest.reserve} reserve
         </div>
-        ${showInactive && L.lore.inactive.map((p, i) => html`
-          <${InspectorRow} key=${p.id ?? i} dimmed
-            pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' }]}
-            title=${p.title} meta=${`${p.tokens}t`}
-            preview=${p.preview} content=${p.content} />`)}`}
-      <h4>Memories injected (${L.memory.memories.length})</h4>
-      ${L.memory.memories.length === 0 && html`<div class="hint">No memories injected.</div>`}
-      ${L.memory.memories.map((m, i) => html`
-        <${InspectorRow} key=${m.id ?? i}
-          pills=${m.pinned ? [{ text: 'pinned', cls: 'pinned' }] : []}
-          title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
-          preview=${m.preview} content=${m.text} />`)}
+        ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
+      <//>
+      <${InspectorSection} title="Lore injected" count=${L.lore.pieces.length}>
+        ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
+        ${L.lore.pieces.map(p => html`
+          <${InspectorRow} key=${p.id}
+            pills=${[{ text: p.reason, cls: p.reason },
+              ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : [])]}
+            title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
+            preview=${p.preview} content=${p.content} />`)}
+        ${(L.lore.inactive ?? []).length > 0 && html`
+          <div class="hint ir-toggle" onClick=${() => setShowInactive(!showInactive)}>
+            Not injected (${L.lore.inactive.length}) ${showInactive ? '▾' : '▸'}
+          </div>
+          ${showInactive && L.lore.inactive.map((p, i) => html`
+            <${InspectorRow} key=${p.id ?? i} dimmed
+              pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' }]}
+              title=${p.title} meta=${`${p.tokens}t`}
+              preview=${p.preview} content=${p.content} />`)}`}
+      <//>
+      <${InspectorSection} title="Memories injected" count=${L.memory.memories.length}>
+        ${L.memory.memories.length === 0 && html`<div class="hint">No memories injected.</div>`}
+        ${L.memory.memories.map((m, i) => html`
+          <${InspectorRow} key=${m.id ?? i}
+            pills=${m.pinned ? [{ text: 'pinned', cls: 'pinned' }] : []}
+            title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
+            preview=${m.preview} content=${m.text} />`)}
+      <//>
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Re-run assembler on current chat</button>`}
     </div>`;
 }
@@ -2337,7 +2453,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let alive = true;
     const t = setTimeout(async () => {
       const count = (text) => text
-        ? getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, model, text })
+        ? getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, text })
         : Promise.resolve(null);
       // Reconstruct the exact blocks as sent from the same message array.
       const sysBlocks = lastMessages.filter(m => m.role === 'system');
@@ -2541,7 +2657,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     if (!recent.trim()) return null;
     const out = await auxCall({
-      endpoint: effEp(st), apiKey: st.apiKey, model,
+      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
       system: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.',
       user: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):`,
       maxTokens: 220, temperature: 0.3, stop: st.stopStrings,
@@ -2589,9 +2705,9 @@ function Main({ storage, storageKind, storageFailed }) {
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
         try {
-          const [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, model: st.embeddingModel, inputs: [queryText] });
+          const [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText] });
           const vecs = await Promise.all(smartPieces.map(p =>
-            embedCached({ endpoint: effEp(st), apiKey: st.apiKey, model: st.embeddingModel,
+            embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
               text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}` })));
           preActivated = new Set();
           for (let i = 0; i < smartPieces.length; i++)
@@ -2650,7 +2766,7 @@ function Main({ storage, storageKind, storageFailed }) {
     };
     try {
       for await (const chunk of openaiChatStream({
-        endpoint: effEp(st), apiKey: st.apiKey, model, messages,
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
         tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
       })) {
@@ -2718,7 +2834,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setSuggestions({ ...key, loading: true, items: null });
     try {
       const out = await auxCall({
-        endpoint: effEp(st), apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
         system: `You suggest what the user's character (${pName}) might say or do next in this roleplay. Reply with exactly 2 options as a numbered list, one per line, at most 20 words each, written in first person as ${pName}. In-character; do not narrate other characters' actions; no commentary.`,
         user: `Recent scene:\n\n${recent}\n\nTwo options for ${pName}:`,
         maxTokens: 120, temperature: 0.9, stop: st.stopStrings,
@@ -2809,7 +2925,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setAuxBusy('improve');
     try {
       const out = await auxCall({
-        endpoint: effEp(st), apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
         system: `Rewrite the user's draft in first person as ${pName}${personaDesc}, matching the roleplay's tone. Output only the rewritten text.`,
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
         maxTokens: 400, temperature: 0.7, stop: st.stopStrings,
@@ -2835,7 +2951,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setAuxBusy('recap');
     try {
       const out = await auxCall({
-        endpoint: effEp(st), apiKey: st.apiKey, model,
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
         system: 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.',
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: 700, temperature: 0.4, stop: st.stopStrings,
@@ -3092,7 +3208,7 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="logit bias"><${LogitBiasModal}
         logitBias=${settings.logitBias ?? {}}
         onChange=${(map) => setSettings(s => ({ ...(s ?? {}), logitBias: map }))}
-        onTokenize=${(prompt) => tokenize({ endpoint: effectiveEndpoint(settings, storageKind === 'server'), apiKey: settings.apiKey, model: settings.model, prompt })}
+        onTokenize=${(prompt) => tokenize({ endpoint: effectiveEndpoint(settings, storageKind === 'server'), apiKey: settings.apiKey, serverToken: settings.serverToken, model: settings.model, prompt })}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
       <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}

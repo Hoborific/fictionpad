@@ -46,8 +46,8 @@ const stopServer = (child) => child && new Promise(r => { child.on('exit', r); c
 
 const tmp = mkdtempSync(join(tmpdir(), 'fp-server-test-'));
 const dbPath = join(tmp, 'test.db');
-const portA = 18931, portB = 18932, portC = 18933, portU = 18934;
-let a = null, b = null, c = null, upstream = null;
+const portA = 18931, portB = 18932, portC = 18933, portU = 18934, portD = 18935;
+let a = null, b = null, c = null, d = null, upstream = null;
 
 try {
   a = startServer(portA, { FICTIONPAD_DB: dbPath });
@@ -113,12 +113,21 @@ try {
   ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basicWrong })).status === 401, 'basic: wrong creds → 401');
   ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basic })).ok, 'basic: correct creds → 200 on /');
   ok((await fetch(`http://127.0.0.1:${portC}/health`)).ok, 'basic: /health stays open');
-  // both set → Basic is checked first and suffices (one Authorization header
-  // per request); Bearer alone can't pass the whole-server Basic gate.
+  // both set → either credential suffices (one Authorization header per
+  // request; app subrequests use Bearer, the browser uses Basic).
   ok((await fetch(`http://127.0.0.1:${portC}/version`, { headers: basic })).ok,
-    'basic+bearer: storage route with Basic → 200 (Basic suffices)');
-  ok((await fetch(`http://127.0.0.1:${portC}/version`, { headers: auth })).status === 401,
-    'basic+bearer: Bearer-only → 401 (whole-server Basic checked first)');
+    'basic+bearer: storage route with Basic → 200');
+  ok((await fetch(`http://127.0.0.1:${portC}/version`, { headers: auth })).ok,
+    'basic+bearer: storage route with Bearer → 200');
+  ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: auth })).ok,
+    'basic+bearer: app route with Bearer → 200');
+  // a failed Bearer gets a plain JSON 401 WITHOUT WWW-Authenticate, so app
+  // subrequests never trigger the browser's native password sheet.
+  const badBearer = await fetch(`http://127.0.0.1:${portC}/version`,
+    { headers: { Authorization: 'Bearer wrong' } });
+  ok(badBearer.status === 401, 'basic+bearer: wrong Bearer → 401');
+  ok(badBearer.headers.get('www-authenticate') === null,
+    'basic+bearer: Bearer 401 carries no WWW-Authenticate (no password-sheet loop)');
 
   // ---- proxy credential hygiene (mock upstream echoes headers) ----
   upstream = http.createServer((req, res) => {
@@ -135,8 +144,39 @@ try {
   const echoed2 = await (await viaProxy({ ...basic, 'X-Real-Authorization': 'Bearer llm-key-123' })).json();
   ok(echoed2.authorization === 'Bearer llm-key-123', 'proxy: X-Real-Authorization mapped to upstream Authorization');
   ok(!('x-real-authorization' in echoed2), 'proxy: X-Real-Authorization itself NOT forwarded upstream');
+
+  // ---- proxy access policy (P3) ----
+  const proxyTo = (port, target, headers = {}) =>
+    fetch(`http://127.0.0.1:${port}/proxy/${target}`, { headers });
+  const loop = `http://127.0.0.1:${portU}/echo`;
+
+  // No-auth server (A): loopback targets allowed, anything else refused so an
+  // exposed unauthenticated server is not an open relay.
+  ok((await proxyTo(portA, loop)).ok, 'proxy policy: no-auth server → loopback target allowed');
+  const denied = await proxyTo(portA, 'http://203.0.113.1:9/');
+  ok(denied.status === 403, 'proxy policy: no-auth server → non-loopback target refused (403)');
+
+  // Token-only server (B): the proxy requires the same Bearer as storage.
+  ok((await proxyTo(portB, loop)).status === 401, 'proxy policy: token server → /proxy without Bearer → 401');
+  ok((await proxyTo(portB, loop, auth)).ok, 'proxy policy: token server → /proxy with Bearer → 200');
+
+  // Basic server (C): Basic alone suffices (whole-server gate already ran).
+  ok((await proxyTo(portC, loop)).status === 401, 'proxy policy: basic server → /proxy without creds → 401');
+  ok((await proxyTo(portC, loop, basic)).ok, 'proxy policy: basic server → /proxy with Basic → 200');
+
+  // Allowlist server (D): FICTIONPAD_PROXY_ALLOW=127.0.0.1 — host must match,
+  // regardless of loopback status; Bearer auth still applies.
+  d = startServer(portD, {
+    FICTIONPAD_DB: join(tmp, 'allow.db'),
+    FICTIONPAD_TOKEN: 'secret-tok',
+    FICTIONPAD_PROXY_ALLOW: '127.0.0.1',
+  });
+  await waitReady(portD);
+  ok((await proxyTo(portD, loop, auth)).ok, 'proxy policy: allowlisted host → 200');
+  const offList = await proxyTo(portD, `http://localhost:${portU}/echo`, auth);
+  ok(offList.status === 403, 'proxy policy: non-allowlisted host (even loopback alias) → 403');
 } finally {
-  await Promise.all([stopServer(a), stopServer(b), stopServer(c)]);
+  await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d)]);
   upstream?.close();
 }
 
