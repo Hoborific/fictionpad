@@ -2871,6 +2871,22 @@ function Main({ storage, storageKind, storageFailed }) {
     <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
       ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
+      <div class="topbar">
+        <div class="topbar-inner">
+          ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
+          <span class="title">${chat ? chat.name : 'FictionPad'}</span>
+          ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
+          <span class="spacer"></span>
+          <button class="btn small ghost wide-only ${ui.drawer === 'inspector' ? 'active' : ''}"
+            title="Context inspector" onClick=${() => toggleDrawer('inspector')}>Inspector</button>
+          <button class="btn small ghost wide-only ${ui.drawer === 'memory' ? 'active' : ''}"
+            title="Memories" onClick=${() => toggleDrawer('memory')}>Memory</button>
+          <button class="btn small ghost narrow-only ${ui.drawer ? 'active' : ''}"
+            title="Inspector / Memory panel"
+            onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>«</button>
+        </div>
+      </div>
+      <div class="app-body">
       <${Sidebar}
         scenarios=${scenarios} chats=${chats}
         selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
@@ -2893,18 +2909,6 @@ function Main({ storage, storageKind, storageFailed }) {
       <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
-        <div class="topbar">
-          <div class="topbar-inner">
-            ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
-            <span class="title">${chat ? chat.name : 'FictionPad'}</span>
-            ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
-            <span class="spacer"></span>
-            <button class="btn small ghost ${ui.drawer === 'inspector' ? 'active' : ''}"
-              title="Context inspector" onClick=${() => toggleDrawer('inspector')}>Inspector</button>
-            <button class="btn small ghost ${ui.drawer === 'memory' ? 'active' : ''}"
-              title="Memories" onClick=${() => toggleDrawer('memory')}>Memory</button>
-          </div>
-        </div>
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
@@ -2930,6 +2934,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onClose=${closeDrawer} />
+      </div>
     </div>
     ${modal?.kind === 'scenario' && html`
       <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}

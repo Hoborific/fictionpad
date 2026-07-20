@@ -155,3 +155,12 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 
 - The "↓ Jump to latest" button is now deliberately shy: it only appears once the latest message (e.g. the one being generated) is entirely scrolled out of view, rather than popping up whenever you nudge a few pixels up from the bottom.
 
+
+## v2.8 - Ribbon and mobile UX
+
+**Changed**
+- The top bar is now a full-width ribbon across the top of the whole app, instead of sitting inside the chat column - it shows the chat title, scenario, and persona over the sidebar and side panels too.
+
+**Added**
+- On narrow/mobile screens, the Inspector and Memory buttons collapse into a single « toggle in the ribbon (mirroring the » sidebar toggle), which opens the last-used panel or closes the open one.
+
