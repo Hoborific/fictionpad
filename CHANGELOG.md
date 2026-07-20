@@ -348,3 +348,27 @@ source is unchanged from v3.5.
 - Race condition in generation: the Stop button, waiting indicator, and input guards are now active during the async prompt-preparation phase (semantic embeddings, exact token counting), which can take a while on slow backends. Previously the generation slot was only claimed after prep finished, so stopping during prep did nothing.
 - Stopping generation during that preparation phase now actually aborts - the app bails out before streaming begins instead of starting a stream you already cancelled.
 
+
+## v3.6 - Stream hardening & favicon
+
+### v3.6
+
+**Added**
+- Replies cut off by a dropped connection are kept but marked with an "⚠ interrupted" badge, with a hint to regenerate.
+- Cleanup of generation debris left behind by a page reload or close: empty assistant swipes are removed and never-filled placeholder messages are dropped when a chat is opened.
+
+**Changed**
+- The stream parser now reports the model's finish reason, so the app can tell a clean finish from a connection that just ended.
+- Blank assistant bubbles are cleaned up after every failed generation - errors, dropped connections, empty completions, and pressing Stop before the first token - not only on hard errors.
+
+**Fixed**
+- An empty model response or a connection that ended before any text arrived now shows a clear error message instead of failing silently.
+
+### v3.6.1
+
+**Added**
+- Favicon: an inline SVG of an open book in the app's paper-and-ink palette, embedded as a data URL so the single-file build stays self-contained.
+- `apple-touch-icon` variant (square, no rounded corners) for iOS home-screen bookmarks.
+
+No other changes - this is a cosmetic patch on top of v3.6.
+

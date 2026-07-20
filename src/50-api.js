@@ -134,9 +134,14 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (!choice) continue;
     // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
-    // Stop-token emission: a finish chunk with empty/missing delta carries
-    // the sampled EOS in logprobs — yield neither text nor tape for it.
-    if (choice.finish_reason && !deltaText) continue;
+    // Terminal chunk: report the finish reason so the caller can tell a clean
+    // finish from a dropped connection (stream that just ends). A finish
+    // chunk with empty/missing delta carries the sampled EOS in logprobs —
+    // yield neither text nor tape for it.
+    if (choice.finish_reason) {
+      yield { done: true, finishReason: choice.finish_reason };
+      if (!deltaText) continue;
+    }
     if (deltaText && !stopSet?.has(deltaText)) yield { content: deltaText };
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;

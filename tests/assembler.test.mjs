@@ -14,13 +14,13 @@ if (!match) throw new Error('PURE CORE markers not found in fictionpad.html');
 const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
-  activeText, getActivePath, appendMessage, applyUsedSwipes, deleteSubtree, rewindChat, branchChat,
+  activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, addMemory, assemblePrompt };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
   MEMORY_CAP, LINK_BOOST, estimateTokens, subUser,
-  activeText, getActivePath, appendMessage, applyUsedSwipes, deleteSubtree, rewindChat, branchChat,
+  activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, addMemory, assemblePrompt,
 } = core;
 
@@ -422,6 +422,36 @@ section('usedSwipe semantics');
   // out-of-range usedSwipe is ignored safely
   const corrupt = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, usedSwipe: 99, activeSwipe: 0 } } };
   ok(applyUsedSwipes(corrupt).messages.root.activeSwipe === 0, 'out-of-range usedSwipe ignored');
+}
+
+// ---- pruneInterrupted (reload debris) ----
+section('pruneInterrupted');
+{
+  // chat: root → user u1 → assistant a1 (2 swipes, second empty) → user u2 → assistant a2 (empty placeholder)
+  let chat = baseChat;
+  chat = appendMessage(chat, 'root', 'user', 'hi').chat;
+  const u1 = chat.activeLeafId;
+  chat = appendMessage(chat, u1, 'assistant', 'hello').chat;
+  const a1 = chat.activeLeafId;
+  // a1 gains an empty second swipe (interrupted regenerate)
+  const a1node = chat.messages[a1];
+  chat = { ...chat, messages: { ...chat.messages, [a1]: { ...a1node,
+    swipes: [...a1node.swipes, { text: '', createdAt: 9, modelId: null }], activeSwipe: 1, usedSwipe: 0 } } };
+  chat = appendMessage(chat, a1, 'user', 'again').chat;
+  const u2 = chat.activeLeafId;
+  chat = appendMessage(chat, u2, 'assistant', '').chat; // placeholder, never filled
+  const a2 = chat.activeLeafId;
+
+  const pruned = pruneInterrupted(chat);
+  ok(pruned.messages[a1].swipes.length === 1, 'empty swipe removed from a1');
+  ok(pruned.messages[a1].activeSwipe === 0, 'activeSwipe clamped after prune');
+  ok(pruned.messages[a1].usedSwipe === 0, 'usedSwipe remapped after prune');
+  ok(!pruned.messages[a2], 'all-empty placeholder node dropped');
+  ok(pruned.activeLeafId === u2, 'leaf walked up to the dropped node\'s parent');
+  ok(pruned.messages.root.swipes.length === 1 && pruned.messages.root.swipes[0].text !== '',
+    'root greeting untouched');
+  ok(pruneInterrupted(pruned) === pruned, 'prune is a no-op (same object) when clean');
+  ok(pruneInterrupted(baseChat) === baseChat, 'clean chat passes through unchanged');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

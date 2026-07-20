@@ -65,6 +65,43 @@ function applyUsedSwipes(chat) {
   return changed ? { ...chat, messages } : chat;
 }
 
+// Remove debris from generations killed by a page reload/close: assistant
+// swipes with empty text (the stream never delivered). A non-root node left
+// with no swipes at all was a generation placeholder — drop it and re-parent
+// its children. Root is never touched. No-op (same object) when clean.
+// Called on chat open, before applyUsedSwipes.
+function pruneInterrupted(chat) {
+  if (!chat?.messages) return chat;
+  let changed = false;
+  const out = {};
+  for (const [id, n] of Object.entries(chat.messages)) {
+    if (n.role !== 'assistant' || !n.parentId) { out[id] = n; continue; }
+    const swipes = n.swipes ?? [];
+    const kept = [];
+    const idxMap = new Map(); // old swipe index → new index
+    swipes.forEach((s, i) => {
+      if ((s?.text ?? '') === '') return;
+      idxMap.set(i, kept.length);
+      kept.push(s);
+    });
+    if (kept.length === swipes.length) { out[id] = n; continue; }
+    changed = true;
+    if (kept.length === 0) continue; // drop the placeholder node entirely
+    out[id] = {
+      ...n, swipes: kept,
+      activeSwipe: idxMap.get(n.activeSwipe) ?? kept.length - 1,
+      ...(n.usedSwipe != null ? { usedSwipe: idxMap.get(n.usedSwipe) ?? kept.length - 1 } : {}),
+    };
+  }
+  if (!changed) return chat;
+  // Re-parent children of dropped nodes to the dropped node's parent.
+  for (const n of Object.values(out))
+    while (n.parentId && !out[n.parentId]) n.parentId = chat.messages[n.parentId]?.parentId ?? null;
+  let activeLeafId = chat.activeLeafId;
+  while (activeLeafId && !out[activeLeafId]) activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  return { ...chat, messages: out, activeLeafId };
+}
+
 // Returns a new messages map with nodeId and all its descendants removed.
 function deleteSubtree(messages, nodeId) {
   const copy = { ...messages };

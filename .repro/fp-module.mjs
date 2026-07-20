@@ -263,6 +263,43 @@ function applyUsedSwipes(chat) {
   return changed ? { ...chat, messages } : chat;
 }
 
+// Remove debris from generations killed by a page reload/close: assistant
+// swipes with empty text (the stream never delivered). A non-root node left
+// with no swipes at all was a generation placeholder — drop it and re-parent
+// its children. Root is never touched. No-op (same object) when clean.
+// Called on chat open, before applyUsedSwipes.
+function pruneInterrupted(chat) {
+  if (!chat?.messages) return chat;
+  let changed = false;
+  const out = {};
+  for (const [id, n] of Object.entries(chat.messages)) {
+    if (n.role !== 'assistant' || !n.parentId) { out[id] = n; continue; }
+    const swipes = n.swipes ?? [];
+    const kept = [];
+    const idxMap = new Map(); // old swipe index → new index
+    swipes.forEach((s, i) => {
+      if ((s?.text ?? '') === '') return;
+      idxMap.set(i, kept.length);
+      kept.push(s);
+    });
+    if (kept.length === swipes.length) { out[id] = n; continue; }
+    changed = true;
+    if (kept.length === 0) continue; // drop the placeholder node entirely
+    out[id] = {
+      ...n, swipes: kept,
+      activeSwipe: idxMap.get(n.activeSwipe) ?? kept.length - 1,
+      ...(n.usedSwipe != null ? { usedSwipe: idxMap.get(n.usedSwipe) ?? kept.length - 1 } : {}),
+    };
+  }
+  if (!changed) return chat;
+  // Re-parent children of dropped nodes to the dropped node's parent.
+  for (const n of Object.values(out))
+    while (n.parentId && !out[n.parentId]) n.parentId = chat.messages[n.parentId]?.parentId ?? null;
+  let activeLeafId = chat.activeLeafId;
+  while (activeLeafId && !out[activeLeafId]) activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  return { ...chat, messages: out, activeLeafId };
+}
+
 // Returns a new messages map with nodeId and all its descendants removed.
 function deleteSubtree(messages, nodeId) {
   const copy = { ...messages };
@@ -836,9 +873,14 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (!choice) continue;
     // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
-    // Stop-token emission: a finish chunk with empty/missing delta carries
-    // the sampled EOS in logprobs — yield neither text nor tape for it.
-    if (choice.finish_reason && !deltaText) continue;
+    // Terminal chunk: report the finish reason so the caller can tell a clean
+    // finish from a dropped connection (stream that just ends). A finish
+    // chunk with empty/missing delta carries the sampled EOS in logprobs —
+    // yield neither text nor tape for it.
+    if (choice.finish_reason) {
+      yield { done: true, finishReason: choice.finish_reason };
+      if (!deltaText) continue;
+    }
     if (deltaText && !stopSet?.has(deltaText)) yield { content: deltaText };
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
@@ -1932,6 +1974,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         ${index != null && html`<span>#${index}</span>`}
         ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
         ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
+        ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(node.edited || swipe.modelId) && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
@@ -2533,12 +2576,13 @@ function Main({ storage, storageKind, storageFailed }) {
   }, [manifest, lastMessages]);
 
   const chat = chats[ui.chatId] ?? null;
-  // On chat open/switch (incl. after branching), default to the swipes the
-  // conversation actually continued from. In-session browsing is unaffected.
+  // On chat open/switch (incl. after branching): drop debris from generations
+  // killed by a reload, then default to the swipes the conversation actually
+  // continued from. In-session browsing is unaffected.
   useEffect(() => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
-    const next = applyUsedSwipes(c);
+    const next = applyUsedSwipes(pruneInterrupted(c));
     if (next !== c) upsertChat(next.id, next);
   }, [ui.chatId]);
   const persona = chat?.personaId ? personas[chat.personaId] : null;
@@ -2872,37 +2916,48 @@ function Main({ storage, storageKind, storageFailed }) {
         console.warn('FictionPad: logprobs were requested but the stream contained none — ' +
           'an intermediate proxy/middleware may not be forwarding "logprobs"/"top_logprobs" to the backend.');
     };
+    // Remove the empty generating swipe (or the fresh placeholder node) when
+    // nothing was ever written — applies to errors, dropped connections,
+    // empty completions, and Stop-before-first-token alike.
+    const discardEmptySwipe = () => {
+      const n = work.messages[nodeId];
+      if (!n) return;
+      if (n.swipes.length > 1) {
+        const swipes = n.swipes.slice(0, -1);
+        work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } } };
+        upsertChat(work.id, work);
+      } else if (fresh) {
+        const messages = { ...work.messages };
+        delete messages[nodeId];
+        work = { ...work, messages, activeLeafId: n.parentId };
+        upsertChat(work.id, work);
+      }
+    };
+    let sawDone = false; // a chunk with finish_reason arrived (clean finish)
     try {
       for await (const chunk of openaiChatStream({
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
         tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
       })) {
+        if (chunk.done) { sawDone = true; continue; }
         if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
         acc += chunk.content;
         applyText(acc);
       }
+      if (!acc && !abort.signal.aborted)
+        setError(sawDone ? 'The model returned an empty response.'
+                         : 'The connection ended before any text arrived.');
     } catch (e) {
-      if (e.name !== 'AbortError') {
+      if (e.name !== 'AbortError')
         setError(`Generation failed: ${e.message ?? e}`);
-        if (!acc) {
-          // Clean up the empty swipe / node so no blank bubble is left behind.
-          const n = work.messages[nodeId];
-          if (n && n.swipes.length > 1) {
-            const swipes = n.swipes.slice(0, -1);
-            work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } } };
-            upsertChat(work.id, work);
-          } else if (n && fresh) {
-            const messages = { ...work.messages };
-            delete messages[nodeId];
-            work = { ...work, messages, activeLeafId: n.parentId };
-            upsertChat(work.id, work);
-          }
-        }
-      }
     } finally {
       genRef.current = null;
       setGenerating(null);
+      if (!acc) discardEmptySwipe();
+      // Stream ended without a finish chunk and not by the user's Stop — the
+      // connection dropped mid-generation. Partial text is kept, but flagged.
+      const interrupted = !!acc && !sawDone && !abort.signal.aborted;
       if (acc) {
         attachProbs();
         // Attribute the finished swipe to a character (or "Narrator"), and
@@ -2911,7 +2966,8 @@ function Main({ storage, storageKind, storageFailed }) {
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
-          swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart };
+          swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart,
+            ...(interrupted ? { interrupted: true } : {}) };
           work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } } };
           upsertChat(work.id, work);
         }
