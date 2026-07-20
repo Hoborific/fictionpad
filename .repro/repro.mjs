@@ -11,7 +11,7 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 // Neutralize the browser boot line; export what we need instead.
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  openaiChatStream, alignTokensToSpans, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
@@ -127,7 +127,9 @@ trial('ProbsView renders tokens + alternatives', () => {
 // The streaming normalizer parses vLLM logprobs chunks and sends logit_bias.
 // Real vLLM shape: logprobs at CHOICE level (choices[0].logprobs.content),
 // first chunk has logprobs:null; delta-nested is tolerated as a fallback.
-trial('openaiChatStream: logprobs chunks + request body', async () => {
+// The parser yields independent streams: {content} text chunks and {lp}
+// tape records — stop/EOS filtering applies to both.
+trial('openaiChatStream: content/lp split + request body', async () => {
   const sse = [
     'data: {"choices":[{"delta":{"role":"assistant","content":""},"logprobs":null}]}',
     'data: {"choices":[{"delta":{"content":"Hel"},"logprobs":{"content":[{"token":"Hel","logprob":-0.2,"top_logprobs":[{"token":"Hel","logprob":-0.2},{"token":"Hi","logprob":-1.1}]}]}}]}',
@@ -151,45 +153,128 @@ trial('openaiChatStream: logprobs chunks + request body', async () => {
     const chunks = [];
     for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true, logitBias: { '123': -5 }, stop: ['<turn|>'] }))
       chunks.push(c);
-    const text = chunks.map(c => c.content).join('');
-    if (chunks.length !== 3) throw new Error('chunk count ' + chunks.length + ': ' + JSON.stringify(chunks));
+    const text = chunks.filter(c => c.content != null).map(c => c.content).join('');
     if (text !== 'Hello!') throw new Error('stop token leaked into text: ' + JSON.stringify(text));
-    if (chunks[0].content !== 'Hel' || chunks[0].logprob !== -0.2 || chunks[0].top.length !== 2)
-      throw new Error('bad logprob chunk: ' + JSON.stringify(chunks[0]));
-    if (chunks[1].logprob !== -3.0) throw new Error('delta-nested fallback broken: ' + JSON.stringify(chunks[1]));
-    if (chunks[2].logprob !== -0.9) throw new Error('choice-level logprobs broken: ' + JSON.stringify(chunks[2]));
+    const tape = chunks.filter(c => c.lp).flatMap(c => c.lp);
+    if (tape.length !== 3) throw new Error('tape length ' + tape.length + ': ' + JSON.stringify(tape));
+    if (tape[0].token !== 'Hel' || tape[0].logprob !== -0.2 || tape[0].top.length !== 2)
+      throw new Error('bad tape entry: ' + JSON.stringify(tape[0]));
+    if (tape[1].token !== 'lo' || tape[1].logprob !== -3.0) throw new Error('delta-nested fallback broken: ' + JSON.stringify(tape[1]));
+    if (tape[2].token !== '!' || tape[2].logprob !== -0.9) throw new Error('choice-level logprobs broken: ' + JSON.stringify(tape[2]));
+    if (tape.some(t => t.token === '<turn|>')) throw new Error('EOS/stop token leaked into tape');
     if (sentBody.logprobs !== true || sentBody.top_logprobs !== 10) throw new Error('logprobs not requested');
     if (sentBody.logit_bias?.['123'] !== -5) throw new Error('logit_bias not sent');
     if (!Array.isArray(sentBody.stop) || sentBody.stop[0] !== '<turn|>') throw new Error('stop not sent');
   } finally { globalThis.fetch = oldFetch; }
 });
 
-// delta.content is the text authority: misaligned logprobs must never drop
-// text; aligned logprobs tile the delta exactly for per-token probs.
-trial('openaiChatStream: delta/logprobs alignment', async () => {
+// Content and lp streams are independent: deltas may be arbitrary byte
+// windows with logprob entries attached off by one (observed through a
+// re-chunking middleware). Text must pass through untouched; the tape is
+// aligned ONCE, globally, by alignTokensToSpans.
+trial('openaiChatStream + alignTokensToSpans: off-by-one middleware shape', async () => {
   const sse = [
-    // misaligned: delta "*He" (detokenizer merge) but logprobs cover only "He"
-    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"He","logprob":-0.5,"top_logprobs":[]}]}}]}',
-    // aligned: two logprob tokens tile the delta exactly
-    'data: {"choices":[{"delta":{"content":"*She"},"logprobs":{"content":[{"token":"*","logprob":-0.1,"top_logprobs":[{"token":"*","logprob":-0.1}]},{"token":"She","logprob":-0.3,"top_logprobs":[]}]}}]}',
+    // deltas are byte windows; each chunk's lp token belongs to the NEXT
+    // window (globally: tape = text minus the leading "*W")
+    'data: {"choices":[{"delta":{"content":"*Wipin"},"logprobs":{"content":[{"token":"iping","logprob":-0.5,"top_logprobs":[{"token":"iping","logprob":-0.5}]}]}}]}',
+    'data: {"choices":[{"delta":{"content":"g down"},"logprobs":{"content":[{"token":" down","logprob":-0.3,"top_logprobs":[]}]}}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  try {
+    let text = '';
+    const tape = [];
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true })) {
+      if (c.lp) { tape.push(...c.lp); continue; }
+      text += c.content;
+    }
+    if (text !== '*Wiping down') throw new Error('text lost or reordered: ' + JSON.stringify(text));
+    const spans = fp.alignTokensToSpans(text, tape);
+    if (spans.map(s => s.text).join('') !== text) throw new Error('spans do not cover text: ' + JSON.stringify(spans));
+    if (spans.length !== 3) throw new Error('span count ' + spans.length + ': ' + JSON.stringify(spans));
+    if (spans[0].text !== '*W' || spans[0].logprob !== null)
+      throw new Error('leading offset span should be plain: ' + JSON.stringify(spans[0]));
+    if (spans[1].text !== 'iping' || spans[1].logprob !== -0.5 || spans[1].top.length !== 1)
+      throw new Error('token lost its probs: ' + JSON.stringify(spans[1]));
+    if (spans[2].text !== ' down' || spans[2].logprob !== -0.3)
+      throw new Error('token lost its probs: ' + JSON.stringify(spans[2]));
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+// Chunks with no choices (trailing usage-only chunk, middleware keep-alives)
+// must be skipped, not crash on choice.finish_reason.
+trial('openaiChatStream: choices-less chunks are skipped', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+    'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1}}',
+    'data: {"id":"x","object":"chat.completion.chunk"}',
+    'data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}',
+    'data: {"choices":[{"finish_reason":"stop","delta":{}}]}',
     'data: [DONE]', '',
   ].join('\n');
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   try {
     const chunks = [];
-    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true }))
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [] }))
       chunks.push(c);
     const text = chunks.map(c => c.content).join('');
-    if (text !== '*He*She') throw new Error('text lost or duplicated: ' + JSON.stringify(text));
-    if (chunks.length !== 3) throw new Error('chunk count ' + chunks.length + ': ' + JSON.stringify(chunks));
-    if (chunks[0].content !== '*He' || chunks[0].logprob !== undefined)
-      throw new Error('misaligned chunk should be one plain chunk: ' + JSON.stringify(chunks[0]));
-    if (chunks[1].content !== '*' || chunks[1].logprob !== -0.1 || chunks[2].content !== 'She' || chunks[2].logprob !== -0.3)
-      throw new Error('aligned chunk should yield per-token probs: ' + JSON.stringify(chunks.slice(1)));
+    if (text !== 'Hi!') throw new Error('bad text around choices-less chunks: ' + JSON.stringify(text));
   } finally { globalThis.fetch = oldFetch; }
 });
 
+// alignTokensToSpans: exact tiling, suffix/prefix anchoring (off-by-one and
+// partial tapes), greedy fallback with gaps, and degenerate inputs.
+trial('alignTokensToSpans: exact / suffix / prefix / greedy / degenerate', () => {
+  const A = fp.alignTokensToSpans;
+  const cover = (spans, text) => spans.map(s => s.text).join('') === text;
+
+  // exact: healthy per-token stream
+  let spans = A('Hello!', [
+    { token: 'Hel', logprob: -0.2, top: [{ token: 'Hel', logprob: -0.2 }] },
+    { token: 'lo', logprob: -3.0, top: [] },
+    { token: '!', logprob: -0.9, top: [] },
+  ]);
+  if (spans.length !== 3 || !cover(spans, 'Hello!') || spans.some(s => s.logprob == null))
+    throw new Error('exact: ' + JSON.stringify(spans));
+
+  // suffix: tape = text minus a leading span (the off-by-one middleware case);
+  // the trailing "a" must win over the identical leading text
+  spans = A('a banana is a', [{ token: 'a', logprob: -0.7, top: [] }]);
+  if (spans.length !== 2 || !cover(spans, 'a banana is a')
+    || spans[0].text !== 'a banana is ' || spans[0].logprob !== null
+    || spans[1].text !== 'a' || spans[1].logprob !== -0.7)
+    throw new Error('suffix: ' + JSON.stringify(spans));
+
+  // prefix: tape covers the head only
+  spans = A('Hi there friend', [
+    { token: 'Hi', logprob: -0.2, top: [] },
+    { token: ' there', logprob: -0.4, top: [] },
+  ]);
+  if (spans.length !== 3 || !cover(spans, 'Hi there friend')
+    || spans[2].text !== ' friend' || spans[2].logprob !== null)
+    throw new Error('prefix: ' + JSON.stringify(spans));
+
+  // greedy: tape tiles with a gap; unmatchable tape is dropped, text kept
+  spans = A('Hi thereok', [
+    { token: 'Hi', logprob: -0.1, top: [] },
+    { token: 'there', logprob: -0.6, top: [] },
+    { token: 'zzz', logprob: -9, top: [] },
+  ]);
+  if (!cover(spans, 'Hi thereok')
+    || spans[0].text !== 'Hi' || spans[0].logprob !== -0.1
+    || spans[1].text !== ' ' || spans[1].logprob !== null
+    || spans[2].text !== 'there' || spans[2].logprob !== -0.6
+    || spans[3].text !== 'ok' || spans[3].logprob !== null)
+    throw new Error('greedy: ' + JSON.stringify(spans));
+
+  // degenerate: no tape → one plain span; no text → nothing
+  spans = A('plain message', []);
+  if (spans.length !== 1 || spans[0].text !== 'plain message' || spans[0].logprob !== null)
+    throw new Error('no-tape: ' + JSON.stringify(spans));
+  if (A('', [{ token: 'x', logprob: -1, top: [] }]).length !== 0) throw new Error('empty text should yield no spans');
+});
 // /tokenize shape tolerance: {tokens:[ids]}, count-only, and 404 → null.
 trial('tokenize: ids / count-only / unavailable', async () => {
   const oldFetch = globalThis.fetch;
@@ -266,28 +351,6 @@ trial('effectiveEndpoint rewriting', () => {
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.
-trial('openaiChatStream: misaligned vs aligned delta/logprobs', async () => {
-  const sse = [
-    // misaligned: delta has "*He" but logprobs only cover "He" → one plain chunk, text intact
-    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"He","logprob":-0.5,"top_logprobs":[]}]}}]}',
-    // aligned: delta "*He" tiled exactly by lp entries ["*","He"] → two per-token chunks
-    'data: {"choices":[{"delta":{"content":"*He"},"logprobs":{"content":[{"token":"*","logprob":-0.1,"top_logprobs":[{"token":"*","logprob":-0.1}]},{"token":"He","logprob":-0.7,"top_logprobs":[]}]}}]}',
-    'data: [DONE]', '',
-  ].join('\n');
-  const oldFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(sse, { status: 200 });
-  try {
-    const chunks = [];
-    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [], tokenProbs: true })) chunks.push(c);
-    const text = chunks.map(c => c.content).join('');
-    if (text !== '*He*He') throw new Error('text lost or reordered: ' + JSON.stringify(text));
-    if (chunks.length !== 3) throw new Error('expected 1 plain + 2 token chunks, got ' + chunks.length);
-    if (chunks[0].content !== '*He' || chunks[0].logprob !== undefined) throw new Error('misaligned chunk should be a single plain chunk: ' + JSON.stringify(chunks[0]));
-    if (chunks[1].content !== '*' || chunks[1].logprob !== -0.1) throw new Error('aligned token 1: ' + JSON.stringify(chunks[1]));
-    if (chunks[2].content !== 'He' || chunks[2].logprob !== -0.7) throw new Error('aligned token 2: ' + JSON.stringify(chunks[2]));
-  } finally { globalThis.fetch = oldFetch; }
-});
-
 for (const [name, fn] of trials) {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) { failures++; console.error(`THROW ${name}: ${e.message}`); }

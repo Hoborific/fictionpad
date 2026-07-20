@@ -97,7 +97,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/' || url.pathname === '/fictionpad.html') {
     try {
       const html = await readFile(join(ROOT, 'fictionpad.html'));
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(html);
     } catch {
       res.writeHead(404, { 'Content-Type': 'text/plain' });

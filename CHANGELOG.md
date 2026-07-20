@@ -103,3 +103,27 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Fixed**
 - The token-probability view no longer chokes on streamed chunks that carry no logprob data - they render as plain text spans.
 
+
+## v2.5 - Reliable token probabilities and a docked Inspector drawer
+
+**Added**
+
+- Right-hand drawer docking the Inspector and Memory panels next to the chat: opened from new topbar buttons, drag-resizable on desktop, and a slide-in overlay on phones (swipe left from the right edge to open, swipe right or tap the scrim to close)
+- Boot gate when a browser that previously used server storage can't reach the server: blocks instead of silently booting empty local storage, with Retry, a token field on 401 (wrong/missing server token), and an explicit "Use browser storage instead" opt-out
+- Sidebar footer now shows the storage mode and a "⚠ saving…" warning while unsaved edits are queued for retry
+- Cancel button in the Settings modal
+
+**Changed**
+
+- Token probabilities (logprobs) are now collected as a raw tape during streaming and aligned against the finished message text in a single pass (exact, suffix, prefix, or greedy matching), instead of trusting each chunk's delta/logprob pairing - fixes lost or misattributed probs behind proxies that re-chunk deltas
+- Probabilities are attached when generation finishes *or* is aborted, so partial generations keep their probs; a console warning is logged when logprobs were requested but the stream contained none
+- Failed saves are no longer dropped: they are re-queued and retried every 5 seconds and immediately when connectivity returns
+- On phones, all modals open full-screen with a close button pinned inside the safe area, so the iOS URL bar or keyboard can't push it off-screen
+- The send/stop button now spans the full composer row height
+
+**Fixed**
+
+- Streaming no longer crashes on SSE chunks without choices (usage-only or keep-alive chunks)
+- SSE parsing no longer relies on `ReadableStream.pipeThrough`/`TextDecoderStream`, which some mobile WebKit builds lack
+- Server now serves the HTML with `Cache-Control: no-cache` so updates aren't masked by a stale cached page
+

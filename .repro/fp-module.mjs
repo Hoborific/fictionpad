@@ -482,6 +482,10 @@ class AbstractStorage extends EventTarget {
     this.cache = Object.fromEntries(STORES.map(s => [s, {}]));
     this.saveQueue = new Map();
     this.saveTimer = null;
+    this.retryTimer = null;
+    // Connectivity restored → flush any re-queued writes immediately.
+    if (typeof window !== 'undefined')
+      window.addEventListener('online', () => this.flush());
   }
   async init() {}
   getAll(store) { return this.cache[store] ?? {}; }
@@ -504,14 +508,29 @@ class AbstractStorage extends EventTarget {
   }
   async flush() {
     clearTimeout(this.saveTimer);
+    clearTimeout(this.retryTimer);
     const items = [...this.saveQueue.values()];
     this.saveQueue.clear();
+    let failed = false;
     for (const item of items) {
       try {
         if (item.op === 'put') await this.persistPut(item.store, item.key, item.value);
         else await this.persistDelete(item.store, item.key);
-      } catch (e) { console.error('FictionPad: persist failed', e); }
+      } catch (e) {
+        console.error('FictionPad: persist failed', e);
+        // Re-queue instead of dropping — edits made while the server is
+        // unreachable must survive. Keyed by store/key, so re-adding an item
+        // that was re-set while we were flushing never duplicates work.
+        if (!this.saveQueue.has(`${item.store}/${item.key}`))
+          this.saveQueue.set(`${item.store}/${item.key}`, item);
+        failed = true;
+      }
     }
+    if (failed !== (this._retrying ?? false)) {
+      this._retrying = failed;
+      this.dispatchEvent(new CustomEvent('savestate', { detail: { retrying: failed } }));
+    }
+    if (failed) this.retryTimer = setTimeout(() => this.flush(), 5000); // backoff retry (also retried on 'online')
   }
   async persistPut() {}
   async persistDelete() {}
@@ -574,7 +593,8 @@ class IndexedDBAdapter extends AbstractStorage {
 // IndexedDBAdapter — the debounced save queue and synchronous cache reads in
 // AbstractStorage are shared, so React never knows which backend is active.
 // init() throws when the server doesn't speak the storage protocol → boot
-// falls back to IndexedDB silently.
+// falls back to IndexedDB (fresh browsers) or shows the blocking server gate
+// (browsers that were previously on server storage — see App).
 class ServerDBAdapter extends AbstractStorage {
   constructor(serverToken = '') {
     super();
@@ -597,7 +617,11 @@ class ServerDBAdapter extends AbstractStorage {
   }
   async init() {
     const res = await fetch('/version', { headers: this.#headers() });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}`);
+      err.status = res.status; // 401 → wrong/missing FICTIONPAD_TOKEN (boot gate shows a token field)
+      throw err;
+    }
     const info = await res.json();
     if (info?.version !== 1 || info?.storage !== true) throw new Error('not a FictionPad storage server');
     for (const s of STORES) this.cache[s] = await this.remoteAll(s);
@@ -662,6 +686,8 @@ async function listModels({ endpoint, apiKey, signal } = {}) {
 }
 
 // Minimal SSE parser: line-based, only data: fields, JSON payloads.
+// getReader()+TextDecoder instead of pipeThrough(TextDecoderStream): some
+// mobile WebKit builds lack ReadableStream.pipeThrough / TextDecoderStream.
 async function* parseEventStream(body) {
   let buf = '';
   const take = function* (line) {
@@ -672,17 +698,31 @@ async function* parseEventStream(body) {
     if (json.error?.message) throw new Error(json.error.message);
     yield json;
   };
-  for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
-    const lines = (buf + chunk).split(/\r\n|\r|\n/);
-    buf = lines.pop();
-    for (const line of lines) yield* take(line);
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = (buf + decoder.decode(value, { stream: true })).split(/\r\n|\r|\n/);
+      buf = lines.pop();
+      for (const line of lines) yield* take(line);
+    }
+    buf += decoder.decode();
+    if (buf) yield* take(buf);
+  } finally {
+    reader.releaseLock();
   }
-  if (buf) yield* take(buf);
 }
 
-// Normalized async-generator chunk stream: yields { content } deltas; when the
-// backend returns logprobs (vLLM: logprobs:true + top_logprobs:N), yields
-// { content, logprob, top: [{token, logprob}] } per token instead.
+// Normalized async-generator chunk stream. Two separate streams, because a
+// chunk's delta text and its logprob tokens are NOT reliably related (a
+// middleware may re-chunk deltas into arbitrary byte windows and attach
+// logprob entries off by one position — observed in the wild):
+//   { content }  — display text; delta.content is the sole authority
+//   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
+// Consumers display/accumulate content and collect the lp tape separately;
+// alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetch(chatCompletionsURL(endpoint), {
@@ -706,36 +746,76 @@ async function* openaiChatStream({ endpoint, apiKey, model, messages, samplers =
   }
   for await (const json of parseEventStream(res.body)) {
     const choice = json.choices?.[0];
-    // delta.content is the text authority — logprobs only annotate it.
+    // Chunks with no choices (e.g. a trailing usage-only chunk with
+    // choices: []) carry nothing to yield — skip them.
+    if (!choice) continue;
+    // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
+    // Stop-token emission: a finish chunk with empty/missing delta carries
+    // the sampled EOS in logprobs — yield neither text nor tape for it.
+    if (choice.finish_reason && !deltaText) continue;
+    if (deltaText && !stopSet?.has(deltaText)) yield { content: deltaText };
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
-    const lp = Array.isArray(lpContent) ? lpContent.filter(t => t?.token && !stopSet?.has(t.token)) : [];
-    // Stop-token emission: a finish chunk with empty/missing delta carries
-    // the sampled EOS in logprobs — never yield it as content.
-    if (choice.finish_reason && !deltaText) continue;
-    if (lp.length && deltaText && lp.map(t => t.token).join('') === deltaText) {
-      // Aligned: logprob tokens exactly tile the delta — full per-token probs.
-      for (const t of lp) yield {
-        content: t.token,
+    if (Array.isArray(lpContent) && lpContent.length) {
+      const tape = lpContent.filter(t => t?.token && !stopSet?.has(t.token)).map(t => ({
+        token: t.token,
         logprob: t.logprob ?? null,
         top: (t.top_logprobs ?? []).slice(0, 10)
           .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-      };
-    } else if (deltaText && !stopSet?.has(deltaText)) {
-      // Misaligned or absent logprobs: yield the delta text intact (this
-      // chunk simply carries no prob data — text is never dropped).
-      yield { content: deltaText };
-    } else if (lp.length) {
-      // No delta text at all — fall back to the logprob tokens themselves.
-      for (const t of lp) yield {
-        content: t.token,
-        logprob: t.logprob ?? null,
-        top: (t.top_logprobs ?? []).slice(0, 10)
-          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-      };
+      }));
+      if (tape.length) yield { lp: tape };
     }
   }
+}
+
+// Global alignment of the raw lp tape against the finished message text.
+// Returns ProbsView spans [{ text, logprob, top }] covering `text` exactly,
+// in order; spans without prob data get logprob: null. Runs once per
+// generation (or abort), when both tapes are complete and alignment is
+// unambiguous for the anchored cases:
+//   exact  — tape tiles the text (healthy per-token streams)
+//   suffix — tape covers the tail (middleware dropped leading entries, or
+//            attached them off-by-one: tape = text minus a leading span)
+//   prefix — tape covers the head only
+//   greedy — anything else: match tokens in order, plain text in the gaps
+function alignTokensToSpans(text, lpTape) {
+  const toks = (lpTape ?? []).filter(t => t?.token);
+  if (!text) return [];
+  if (!toks.length) return [{ text, logprob: null, top: [] }];
+  const plain = (text) => ({ text, logprob: null, top: [] });
+  const span = (t) => ({ text: t.token, logprob: t.logprob ?? null, top: t.top ?? [] });
+  const joined = toks.map(t => t.token).join('');
+  if (joined === text) return toks.map(span);
+  if (text.endsWith(joined)) {
+    const pre = text.slice(0, text.length - joined.length);
+    return [...(pre ? [plain(pre)] : []), ...toks.map(span)];
+  }
+  if (text.startsWith(joined)) return [...toks.map(span), plain(text.slice(joined.length))];
+  const spans = [];
+  let pos = 0, i = 0, gap = '';
+  const flush = () => { if (gap) { spans.push(plain(gap)); gap = ''; } };
+  while (pos < text.length) {
+    if (i < toks.length && text.startsWith(toks[i].token, pos)) {
+      flush();
+      const t = toks[i++];
+      spans.push(span(t));
+      pos += t.token.length;
+    } else {
+      // Resync at the nearest occurrence of any remaining token in the text.
+      let best = -1;
+      for (let j = i; j < toks.length; j++) {
+        const k = text.indexOf(toks[j].token, pos + 1);
+        if (k !== -1 && (best === -1 || k < best)) { best = k; i = j; }
+      }
+      const end = best === -1 ? text.length : best;
+      gap += text.slice(pos, end);
+      pos = end;
+      if (best === -1) break;
+    }
+  }
+  flush();
+  return spans;
 }
 
 // ---- /tokenize (vLLM; degrade to null when unavailable) ----
@@ -1196,7 +1276,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   return html`
     <${Modal} title="Settings" wide onClose=${onClose}
-      footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
+      footer=${html`<button class="btn ghost" onClick=${onClose}>Cancel</button>
+        <button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
       <label class="field"><span>Theme — applies immediately, saved automatically</span>
         <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
           ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
@@ -1771,6 +1852,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
 function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelectScenario, onSelectChat,
                   onNewScenario, onEditScenario, onDeleteScenario, onNewChat, onExportScenario, onImport,
                   onOpenPersonas, onOpenSettings, collapsed, onToggleCollapse, onDeleteChat,
+                  storageKind, saveRetrying,
                   width, onDragStart, onResetWidth, onChatAction, onChatContextMenu }) {
   const chatList = Object.values(chats)
     .filter(c => !selectedScenarioId || c.scenarioId === selectedScenarioId)
@@ -1847,6 +1929,13 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
       </div>
       <div class="foot">
         <button class="btn small" onClick=${onImport}>Import JSON</button>
+        <span class="hint ${saveRetrying ? 'warn' : ''}" style=${{ marginLeft: 'auto', alignSelf: 'center' }}
+          title=${saveRetrying
+            ? 'Some edits could not be saved (server unreachable) — they are queued and retried automatically.'
+            : storageKind === 'server'
+              ? 'Scenarios, personas and chats are stored on this server (shared).'
+              : 'Data is stored locally in this browser.'}>
+          ${saveRetrying ? '⚠ saving…' : storageKind === 'server' ? 'server storage' : 'local storage'}</span>
       </div>
       ${!collapsed && html`<div class="pane-handle right" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
@@ -1948,6 +2037,40 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
             onExport=${onExport} onDelete=${onDelete} />`}
       </div>
     <//>`;
+}
+
+// ============================================================================
+// COMPONENTS: RIGHT DRAWER — docked Inspector/Memory pane (the per-chat modal
+// above remains for chat-row/context-menu entry; Chat settings stays
+// modal-only). Fixed overlay on the right like the left sidebar, drag-resizable
+// on desktop, slide-in overlay on phones.
+// ============================================================================
+const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
+
+function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
+                      onUpdateChat, onSummarize, summarizing,
+                      width, onDragStart, onResetWidth, onClose }) {
+  return html`
+    <div class="drawer ${tab ? '' : 'collapsed'}"
+      style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
+      <div class="head">
+        <div class="ptabs">
+          ${Object.entries(DRAWER_TABS).map(([t, label]) => html`
+            <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+        </div>
+        <button class="btn small ghost" title="Close panel" onClick=${onClose}>✕</button>
+      </div>
+      <div class="pbody">
+        ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
+        ${chat && tab === 'inspector' && html`
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+        ${chat && tab === 'memory' && html`
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} />`}
+      </div>
+      ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
+        onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
+        onDoubleClick=${onResetWidth} />`}
+    </div>`;
 }
 
 // ============================================================================
@@ -2082,7 +2205,20 @@ function Main({ storage, storageKind, storageFailed }) {
     [chat, scenarios]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
+  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory') or null.
+  const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
+  const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
+  const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
+  if (ui.drawer) lastDrawerTabRef.current = ui.drawer;
   const saveChat = useCallback((c) => upsertChat(c.id, { ...c, updatedAt: Date.now() }), [upsertChat]);
+
+  // Writes that failed to persist and are queued for retry (Task: never drop).
+  const [saveRetrying, setSaveRetrying] = useState(false);
+  useEffect(() => {
+    const on = (e) => setSaveRetrying(!!e.detail?.retrying);
+    storage.addEventListener('savestate', on);
+    return () => storage.removeEventListener('savestate', on);
+  }, [storage]);
 
   // ---- side-pane sizing (auto slack-fill + drag-to-resize) ----
   const [viewportW, setViewportW] = useState(() => window.innerWidth);
@@ -2098,12 +2234,14 @@ function Main({ storage, storageKind, storageFailed }) {
   const clampPane = (w) => Math.round(Math.max(PANE_MIN, Math.min(w, viewportW * PANE_MAX_VW)));
   const autoPaneW = clampPane(Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
   const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
-  // Narrow-viewport fallback: pad the center column with the sidebar's actual
+  const dwW = ui.drawer ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
+  // Narrow-viewport fallback: pad the center column with a pane's actual
   // width only when the slack margin can't contain it — chat never hides.
-  // At the phone breakpoint the sidebar is a full overlay (scrim), no sharing.
+  // At the phone breakpoint both panes are full overlays (scrim), no sharing.
   const MOBILE_BP = 700;
   const isMobile = viewportW <= MOBILE_BP;
   const padL = !isMobile && viewportW < chatW + 2 * sbW ? sbW : 0;
+  const padR = !isMobile && viewportW < chatW + 2 * dwW ? dwW : 0;
   const [dragging, setDragging] = useState(false);
   const paneDragStart = (side) => (startX) => {
     const key = side === 'left' ? 'sbWidth' : 'dwWidth';
@@ -2124,20 +2262,25 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
 
-  // ---- mobile edge swipe: open/close the sidebar overlay drawer ----
-  // Open: touch starts within 24px of the left edge and swipes right (never on
-  // a message bubble — bubble swipe navigation keeps priority there).
-  // Close: swipe left anywhere while the drawer is open (scrim tap also closes).
-  const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed });
-  navStateRef.current = { isMobile, collapsed: sidebarCollapsed };
+  // ---- mobile edge swipes: open/close the two overlay panes ----
+  // Left edge → swipe right opens the sidebar; right edge → swipe left opens
+  // the Inspector/Memory drawer. An open pane is swiped shut from anywhere
+  // (left for the sidebar, right for the drawer; scrim tap also closes).
+  // Touches starting on a message bubble never trigger pane gestures —
+  // bubble swipe navigation keeps priority there.
+  const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer });
+  navStateRef.current = { isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
   useEffect(() => {
     let g = null;
     const down = (e) => {
       if (e.pointerType === 'mouse') return;
       const st = navStateRef.current;
       if (!st.isMobile) return;
-      if (st.collapsed) {
-        if (e.clientX <= 24 && !e.target.closest?.('.bubble')) g = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      if (st.collapsed && !st.drawer) {
+        // Both panes closed: an open gesture must start on a screen edge.
+        const edge = e.clientX <= 24 ? 'left' : e.clientX >= window.innerWidth - 24 ? 'right' : null;
+        if (edge && !e.target.closest?.('.bubble'))
+          g = { id: e.pointerId, x: e.clientX, y: e.clientY, edge };
       } else {
         g = { id: e.pointerId, x: e.clientX, y: e.clientY };
       }
@@ -2146,7 +2289,13 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!g || e.pointerId !== g.id) return;
       const dx = e.clientX - g.x, dy = e.clientY - g.y;
       if (Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) {
-        if (navStateRef.current.collapsed ? dx > 0 : dx < 0) toggleSidebar();
+        const st = navStateRef.current;
+        if (g.edge === 'left') { if (dx > 0 && st.collapsed) toggleSidebar(); }
+        else if (g.edge === 'right') { if (dx < 0 && !st.drawer) toggleDrawer(st.lastDrawerTab ?? 'inspector'); }
+        else {
+          if (dx < 0 && !st.collapsed) toggleSidebar();
+          else if (dx > 0 && st.drawer) closeDrawer();
+        }
         g = null;
       }
     };
@@ -2301,19 +2450,33 @@ function Main({ storage, storageKind, storageFailed }) {
     genRef.current = { abort };
     setGenerating({ chatId: chatObj.id, nodeId });
     let work = chatObj;
-    let acc = continuation ? activeText(node) : '';
-    // Token coverage: every content chunk is recorded so the probs view never
-    // drops text; chunks without prob data get logprob: null. The tokens array
-    // is only attached to the swipe once real prob data actually arrives.
-    let toks = continuation ? [...(node?.swipes?.[node.activeSwipe]?.tokens ?? [])] : [];
-    let sawLogprob = continuation && toks.some(t => t.logprob != null);
-    const applyText = (text) => {
+    // Display text streams in plain (delta is the text authority). Logprobs
+    // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
+    // entries are not reliably related (middleware re-chunking can attach
+    // them off by one), so alignment happens once, globally, at the end.
+    const baseText = continuation ? activeText(node) : '';
+    const baseSpans = continuation
+      ? (node?.swipes?.[node.activeSwipe]?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
+      : [];
+    let acc = baseText;
+    const lpTape = [];
+    const applyText = (text, tokens) => {
       const n = work.messages[nodeId];
       if (!n) return;
       const swipes = n.swipes.slice();
-      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(sawLogprob ? { tokens: toks } : {}) };
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(tokens ? { tokens } : {}) };
       work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } }, updatedAt: Date.now() };
       upsertChat(work.id, work);
+    };
+    // One global alignment pass over the finished text + raw lp tape; attaches
+    // swipe.tokens when at least one span carries real prob data. Runs on
+    // completion AND abort, so partial generations keep their probs.
+    const attachProbs = () => {
+      const spans = [...baseSpans, ...alignTokensToSpans(acc.slice(baseText.length), lpTape)];
+      if (spans.some(s => s.logprob != null)) applyText(acc, spans);
+      else if (st.tokenProbs !== false && acc)
+        console.warn('FictionPad: logprobs were requested but the stream contained none — ' +
+          'an intermediate proxy/middleware may not be forwarding "logprobs"/"top_logprobs" to the backend.');
     };
     try {
       for await (const chunk of openaiChatStream({
@@ -2321,9 +2484,8 @@ function Main({ storage, storageKind, storageFailed }) {
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
         tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
       })) {
+        if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
         acc += chunk.content;
-        if (chunk.logprob !== undefined) sawLogprob = true; // absent entirely when the backend ignores logprobs
-        toks.push({ text: chunk.content, logprob: chunk.logprob ?? null, top: chunk.top ?? [] });
         applyText(acc);
       }
     } catch (e) {
@@ -2348,6 +2510,7 @@ function Main({ storage, storageKind, storageFailed }) {
       genRef.current = null;
       setGenerating(null);
       if (acc) {
+        attachProbs();
         // Attribute the finished swipe to a character (or "Narrator").
         const names = characterNamesOf(scen);
         const n = work.messages[nodeId];
@@ -2672,7 +2835,8 @@ function Main({ storage, storageKind, storageFailed }) {
 
   return html`
     <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
-      ${isMobile && !sidebarCollapsed && html`<div class="scrim" onClick=${toggleSidebar} />`}
+      ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
+        <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <${Sidebar}
         scenarios=${scenarios} chats=${chats}
         selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
@@ -2690,8 +2854,9 @@ function Main({ storage, storageKind, storageFailed }) {
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
+        storageKind=${storageKind} saveRetrying=${saveRetrying}
         width=${sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
-      <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL }}>
+      <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div class="topbar">
@@ -2700,9 +2865,10 @@ function Main({ storage, storageKind, storageFailed }) {
             <span class="title">${chat ? chat.name : 'FictionPad'}</span>
             ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
             <span class="spacer"></span>
-            <span class="hint" title=${storageKind === 'server'
-              ? 'Scenarios, personas and chats are stored on this server (shared).'
-              : 'Data is stored locally in this browser.'}>${storageKind === 'server' ? 'server storage' : 'local storage'}</span>
+            <button class="btn small ghost ${ui.drawer === 'inspector' ? 'active' : ''}"
+              title="Context inspector" onClick=${() => toggleDrawer('inspector')}>Inspector</button>
+            <button class="btn small ghost ${ui.drawer === 'memory' ? 'active' : ''}"
+              title="Memories" onClick=${() => toggleDrawer('memory')}>Memory</button>
           </div>
         </div>
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
@@ -2723,6 +2889,13 @@ function Main({ storage, storageKind, storageFailed }) {
           <//>
         </div>
       </div>
+      <${RightDrawer}
+        chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
+        onUpdateChat=${saveChat}
+        onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
+        width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
+        onClose=${closeDrawer} />
     </div>
     ${modal?.kind === 'scenario' && html`
       <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
@@ -2778,16 +2951,55 @@ function Main({ storage, storageKind, storageFailed }) {
   `;
 }
 
+// Remember that this browser's data lives on the server. Used at boot to
+// distinguish "never used server storage" (silent IndexedDB fallback is fine)
+// from "server temporarily unreachable" (IndexedDB would look like total data
+// loss — block with a gate instead).
+const SERVER_FLAG_KEY = 'fictionpad.serverStorage';
+
+// Blocking boot screen when a browser that previously used server storage
+// can't reach the server. Never falls back to IndexedDB on its own.
+function ServerGate({ error, onRetry, onUseLocal }) {
+  const unauthorized = error?.status === 401;
+  const [token, setToken] = useState('');
+  return html`
+    <div class="server-gate">
+      <div class="gate-card">
+        <h2>Cannot reach the FictionPad server</h2>
+        <p>This browser's scenarios, personas and chats live in server storage,
+          but the server handshake failed${unauthorized ? ' — unauthorized' : ''}.</p>
+        <pre class="gate-err">${error?.message ?? String(error)}</pre>
+        ${unauthorized && html`
+          <p>Unauthorized — check your server token (the server's FICTIONPAD_TOKEN):</p>
+          <label class="field"><span>Server token</span>
+            <input type="password" value=${token} placeholder="server token"
+              onInput=${(e) => setToken(e.target.value)}
+              onKeyDown=${(e) => { if (e.key === 'Enter') onRetry(token); }} /></label>`}
+        <div class="gate-actions">
+          <button class="btn primary" onClick=${() => onRetry(unauthorized ? token : null)}>
+            ${unauthorized ? 'Save token & retry' : 'Retry'}</button>
+          <button class="btn ghost" onClick=${onUseLocal}>Use browser storage instead</button>
+        </div>
+        ${!unauthorized && html`<p class="hint">The server may still be restarting — retry in a few seconds.
+          Nothing is written anywhere while this screen is up; your server data is safe.</p>`}
+      </div>
+    </div>`;
+}
+
 function App() {
   const [storage, setStorage] = useState(null);
   const [storageKind, setStorageKind] = useState(null); // 'server' | 'local'
   const [storageFailed, setStorageFailed] = useState(false);
+  const [gate, setGate] = useState(null); // { error } — server storage expected but unreachable
+  const [bootNonce, setBootNonce] = useState(0);
   useEffect(() => {
     let alive = true;
     (async () => {
       let adapter = null, kind = 'local';
-      // Server storage when served over http(s) and the handshake succeeds;
-      // any error or wrong shape → silent IndexedDB fallback.
+      // Server storage when served over http(s) and the handshake succeeds.
+      // Fresh browser (no server flag): any failure → silent IndexedDB
+      // fallback. Server-flagged browser: block with the gate instead of
+      // booting an empty IndexedDB that looks like total data loss.
       if (location.protocol === 'http:' || location.protocol === 'https:') {
         try {
           const saved = JSON.parse(localStorage.getItem('fictionpad.settings') ?? '{}');
@@ -2795,7 +3007,11 @@ function App() {
           await server.init();
           adapter = server;
           kind = 'server';
+          try { localStorage.setItem(SERVER_FLAG_KEY, '1'); } catch {}
         } catch (e) {
+          let hadServer = false;
+          try { hadServer = localStorage.getItem(SERVER_FLAG_KEY) === '1'; } catch {}
+          if (hadServer) { if (alive) setGate({ error: e }); return; }
           console.warn('FictionPad: server storage unavailable, using browser storage.', e);
         }
       }
@@ -2806,7 +3022,7 @@ function App() {
       }
       if (alive) { setStorage(adapter); setStorageKind(kind); }
     })();
-  }, []);
+  }, [bootNonce]);
   useEffect(() => {
     if (!storage) return;
     const flush = () => storage.flush();
@@ -2817,11 +3033,27 @@ function App() {
       document.removeEventListener('visibilitychange', flush);
     };
   }, [storage]);
-  if (!storage) return html`<div class="empty">Loading FictionPad…</div>`;
-  return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;
+  if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;
+  if (gate) return html`<${ServerGate} error=${gate.error}
+    onRetry=${(token) => {
+      if (token != null) try {
+        const s = JSON.parse(localStorage.getItem('fictionpad.settings') ?? '{}');
+        s.serverToken = token;
+        localStorage.setItem('fictionpad.settings', JSON.stringify(s));
+      } catch {}
+      setGate(null);
+      setBootNonce(n => n + 1);
+    }}
+    onUseLocal=${() => {
+      // Explicit opt-out: forget the server flag and boot browser storage.
+      try { localStorage.removeItem(SERVER_FLAG_KEY); } catch {}
+      setGate(null);
+      setBootNonce(n => n + 1);
+    }} />`;
+  return html`<div class="empty">Loading FictionPad…</div>`;
 }
 
 
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  openaiChatStream, alignTokensToSpans, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html };
