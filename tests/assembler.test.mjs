@@ -105,11 +105,24 @@ section('lore engine');
   ok(!active.has('off'), 'disabled piece never active');
   ok(keyMatches('veyra', '') === false, 'empty scan text never matches');
 
+  // key matching options: wholeWord, caseSensitive, min length
+  ok(keyMatches('cat', 'the cathedral bells') === true, 'substring match by default');
+  ok(keyMatches('cat', 'the cathedral bells', { wholeWord: true }) === false, 'wholeWord blocks substring hits');
+  ok(keyMatches('cat', 'the cat sat', { wholeWord: true }) === true, 'wholeWord still matches whole words');
+  ok(keyMatches('Veyra', 'welcome to veyra') === true, 'case-insensitive by default');
+  ok(keyMatches('Veyra', 'welcome to veyra', { caseSensitive: true }) === false, 'caseSensitive requires exact case');
+  ok(keyMatches('Veyra', 'welcome to Veyra', { caseSensitive: true }) === true, 'caseSensitive matches exact case');
+  ok(keyMatches('a', 'a cat') === false, 'single-char key never fires (min length 2)');
+  ok(keyMatches('\\d', '5') === true, 'two-char regex escape still fires');
+  // piece-level options flow through scanLore
+  const optScan = scanLore([lore({ id: 'ww', keys: ['cat'], wholeWord: true })], 'the cathedral bells');
+  ok(!optScan.has('ww'), 'piece wholeWord flag respected by scanLore');
+
   // weight ordering under budget pressure: budget fits exactly one piece
   const sel = selectLore([
     lore({ id: 'low', pinned: true, weight: 1, content: 'x'.repeat(30) }),
-    lore({ id: 'high', keys: ['a'], weight: 9, content: 'x'.repeat(30) }),
-  ], 'a', estimateTokens('x'.repeat(33)));
+    lore({ id: 'high', keys: ['aa'], weight: 9, content: 'x'.repeat(30) }),
+  ], 'aa', estimateTokens('x'.repeat(33)));
   ok(sel.length === 1 && sel[0].id === 'high', 'higher weight wins under budget pressure');
 
   // link boost: T (w5, triggered, links L) boosts L (w4) past U (w7, triggered)? no —
@@ -346,6 +359,37 @@ section('semantic (preActivated) lore');
   ok(manifest.layers.lore.pieces[0]?.reason === 'semantic', 'manifest lists semantic piece with its reason');
   const inact = Object.fromEntries(manifest.layers.lore.inactive.map(p => [p.id, p.reason]));
   ok(inact.s2 === 'not-triggered', 'below-threshold smart piece is not-triggered in inactive list');
+}
+
+// ---- /pov reframe ----
+section('/pov reframe');
+{
+  const scenario = {
+    ...baseScenario,
+    lorePieces: [
+      lore({ id: 'c1', title: 'Veyra', type: 'character', keys: [], weight: 0, content: 'Veyra is a scout.' }),
+    ],
+  };
+  // pov forces the character piece in with reason 'pov' (no keyword match needed)
+  const { messages, manifest } = assemblePrompt({
+    scenario, persona, chat: baseChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '',
+    pov: { name: 'Veyra', pieceId: 'c1' },
+  });
+  ok(manifest.layers.lore.pieces[0]?.reason === 'pov', 'pov piece injected with reason pov');
+  ok(messages[0].content.includes("from Veyra's perspective") && messages[0].content.includes('"Veyra:"'),
+    'pov directive appended to the static layer');
+  // pov without a matching piece still emits the directive
+  const noPiece = assemblePrompt({
+    scenario: baseScenario, persona, chat: baseChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '',
+    pov: { name: 'Nobody', pieceId: null },
+  });
+  ok(noPiece.messages[0].content.includes("from Nobody's perspective"), 'piece-less pov still reframes');
+  ok(noPiece.manifest.layers.lore.pieces.length === 0, 'piece-less pov injects no lore');
+  // Map-based preActivated carries custom reasons; semantic Set still works alongside
+  const scan = scanLore(scenario.lorePieces, 'nothing', new Map([['c1', 'pov']]));
+  ok(scan.get('c1')?.reason === 'pov', 'Map preActivated activates with its custom reason');
 }
 
 // ---- usedSwipe semantics ----

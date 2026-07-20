@@ -297,26 +297,39 @@ function branchChat(chat, nodeId) {
 // ---- lore engine --------------------------------------------------------
 // Semantic ("smart") activation: pieces may set `smart: true` and the app
 // (settings.embeddingModel) then embeds them + the recent conversation at
-// generation time; ids above SEMANTIC_THRESHOLD arrive here via the
+// generation time; ids above the semantic threshold arrive here via the
 // `preActivated` set and activate with reason 'semantic' — otherwise they
 // behave exactly like keyword-triggered pieces (weight, budget, link boost).
-function keyMatches(key, text) {
-  if (!key || !text) return false;
-  try { return new RegExp(key, 'i').test(text); } catch { return false; }
+// `preActivated` may also be a Map(id → reason) for other forced injections
+// (e.g. /pov forcing a character piece in with reason 'pov').
+// Keyword triggers. Keys are regexes; per-piece options: `caseSensitive`
+// (default off → 'i' flag) and `wholeWord` (default off → wraps the key in
+// \b…\b so "cat" doesn't match "cathedral"). Keys shorter than
+// MIN_KEY_LENGTH never match (single-char triggers fire on everything —
+// FictionLab arrived at the same floor).
+const MIN_KEY_LENGTH = 2;
+function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}) {
+  if (!key || !text || String(key).length < MIN_KEY_LENGTH) return false;
+  const pattern = wholeWord ? `\\b(?:${key})\\b` : key;
+  try { return new RegExp(pattern, caseSensitive ? '' : 'i').test(text); } catch { return false; }
 }
 
 // Determine which pieces are active this turn.
-// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'link-boosted', boost }).
+// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'pov'|'link-boosted', boost }).
 function scanLore(lorePieces, conversationText, preActivated = null) {
   const pieces = Array.isArray(lorePieces) ? lorePieces : [];
   const active = new Map();
   for (const piece of pieces) {
     if (!piece || piece.enabled === false) continue;
     if (piece.pinned) { active.set(piece.id, { piece, reason: 'pinned', boost: 0 }); continue; }
-    if (preActivated?.has(piece.id)) { active.set(piece.id, { piece, reason: 'semantic', boost: 0 }); continue; }
+    if (preActivated?.has(piece.id)) {
+      const reason = preActivated instanceof Map ? (preActivated.get(piece.id) ?? 'semantic') : 'semantic';
+      active.set(piece.id, { piece, reason, boost: 0 }); continue;
+    }
     const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : DEFAULT_SEARCH_DEPTH;
     const scanText = conversationText.slice(-Math.round(depth * TOKEN_CHARS));
-    if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText)))
+    const opts = { wholeWord: !!piece.wholeWord, caseSensitive: !!piece.caseSensitive };
+    if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText, opts)))
       active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
   }
   // One hop of link boosting: an active piece lends weight to its linked pieces.
@@ -371,7 +384,7 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
-function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null }) {
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null }) {
   const personaName = persona?.name?.trim() || 'User';
   const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
   const contextLength = Number(settings.contextLength) || 8192;
@@ -394,6 +407,10 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // default text when unset (existing installs keep current behavior).
   const directive = (settings.lengthDirective ?? LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive)?.trim();
   if (directive) tailParts.push(directive);
+  // /pov reframe: one generation written from another character's perspective.
+  const povName = String(pov?.name ?? '').trim();
+  if (povName)
+    tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
   let backstory = subUser(scenario?.backstory ?? '', personaName).trim();
 
   const staticCap = Math.floor(budget * LAYER_CAPS.static);
@@ -424,8 +441,17 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // 3. lore layer
   const loreCap = Math.floor(budget * LAYER_CAPS.lore);
   const lorePieces = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
-  const loreScanned = scanLore(lorePieces, conversationText, preActivated);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preActivated);
+  // /pov forces the named character's piece in (reason 'pov') alongside any
+  // semantic pre-activations.
+  let preAct = preActivated;
+  if (pov?.pieceId) {
+    preAct = new Map();
+    if (preActivated instanceof Map) for (const [id, r] of preActivated) preAct.set(id, r);
+    else if (preActivated) for (const id of preActivated) preAct.set(id, 'semantic');
+    preAct.set(pov.pieceId, 'pov');
+  }
+  const loreScanned = scanLore(lorePieces, conversationText, preAct);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct);
   const loreText = loreSel.map(s => `[${s.title}]\n${subUser(s.content, personaName)}`).join('\n\n');
   const loreTokens = loreText ? estimateTokens(loreText) : 0;
   // Enabled pieces that were NOT injected — observability for "did it even scan?"
@@ -1132,6 +1158,7 @@ function newLorePiece() {
   return {
     id: uid(), type: 'lore', title: '', content: '', keys: [],
     pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
+    wholeWord: false, caseSensitive: false, // trigger key matching options
     smart: false, // semantic (embedding) activation — needs settings.embeddingModel
     hidden: false, playable: false,
   };
@@ -1184,9 +1211,15 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
           </div>
           <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
             <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
-          <label class="field"><span>Trigger keys — one per line, case-insensitive regex</span>
+          <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
             <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
               onChange=${(keys) => set({ keys })} /></label>
+          <div class="field"><span>Key matching</span>
+            <label class="check" title="Keys only match at word boundaries — 'cat' won't match 'cathedral'">
+              <input type="checkbox" checked=${!!piece.wholeWord} onChange=${(e) => set({ wholeWord: e.target.checked })} /> whole word</label>
+            <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
+              <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
+          </div>
           <label class="check" title="Embed this piece + the recent conversation each generation; activates on similarity even without keyword overlap">
             <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
             Smart activation (semantic) — requires an embeddings model in Settings
@@ -1320,6 +1353,7 @@ const DEFAULT_SETTINGS = {
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
+  semanticThreshold: 0.55, // cosine similarity needed for a smart piece to inject
   dateFormat: 'dd/mm/yyyy', // date order for stamps and chat names
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
@@ -1424,6 +1458,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
             onInput=${(e) => set({ embeddingModel: e.target.value })} />
           <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
+        </label>
+        <label class="field"><span>Semantic threshold (0–1)</span>
+          <input type="number" min="0" max="1" step="0.05" value=${draft.semanticThreshold ?? 0.55}
+            onInput=${(e) => set({ semanticThreshold: Number(e.target.value) })} />
+          <span class="hint">Cosine similarity a smart lore piece needs to inject. Near-misses show in the Inspector.</span>
         </label>
       </div>
       <div class="grid3">
@@ -1648,6 +1687,19 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
     ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
     : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
   const memPinned = L.memory.memories.filter(m => m.pinned).length;
+  // Semantic activation observability: per-piece cosine scores from the last
+  // generation (only present when an embedding model ran). Injected smart
+  // pieces show their score; inactive ones show score vs threshold so
+  // near-misses answer "why didn't this trigger?".
+  const sem = manifest.semantic ?? null;
+  const semScore = new Map((sem?.scores ?? []).map(s => [s.id, s.score]));
+  const semPill = (id, injected) => {
+    if (!semScore.has(id)) return [];
+    const score = semScore.get(id);
+    if (injected) return [{ text: `sim ${score.toFixed(2)}`, cls: 'semantic' }];
+    const near = score >= (sem.threshold - 0.10);
+    return [{ text: `sim ${score.toFixed(2)} < ${sem.threshold.toFixed(2)}`, cls: near ? 'link-boosted' : '' }];
+  };
   return html`
     <div>
       <${InspectorSection} title="Context"
@@ -1682,7 +1734,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
         ${L.lore.pieces.map(p => html`
           <${InspectorRow} key=${p.id}
             pills=${[{ text: p.reason, cls: p.reason },
-              ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : [])]}
+              ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : []),
+              ...semPill(p.id, true)]}
             title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
             preview=${p.preview} content=${p.content} />`)}
         ${(L.lore.inactive ?? []).length > 0 && html`
@@ -1691,7 +1744,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
           </div>
           ${showInactive && L.lore.inactive.map((p, i) => html`
             <${InspectorRow} key=${p.id ?? i} dimmed
-              pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' }]}
+              pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' },
+                ...semPill(p.id, false)]}
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}
       <//>
@@ -1931,6 +1985,10 @@ ${showNav && html`
             <button class="btn small primary" onClick=${() => { onEdit(node.id, draft); setEditing(false); }}>Save</button>
             <button class="btn small" onClick=${() => setEditing(false)}>Cancel</button>
           </div>` :
+          streaming && !displayText
+            // Generating but no first token yet (slow backend waking up, model
+            // loading, middleware holding the connection) — don't look dead.
+            ? html`<div class="waiting" title="Waiting for the first token…"><span>●\uFE0E</span><span>●\uFE0E</span><span>●\uFE0E</span></div>` :
           showProbs && hasProbs
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
@@ -1958,10 +2016,12 @@ ${showNav && html`
 const COMPOSER_COMMANDS = [
   ['/ooc', 'speak out of character'],
   ['/continue', 'continue the last reply'],
+  ['/pov', 'reply from another character’s view'],
   ['/improve', 'rewrite your draft in persona voice'],
   ['/recap N', 'summarize the last N messages'],
   ['/memory N', 'save a memory from the last N messages'],
   ['/model NAME', 'set this chat’s model'],
+  ['/theme NAME', 'switch the UI theme'],
 ];
 
 function Composer({ generating, busy, onSubmit, onStop, inject }) {
@@ -2685,10 +2745,17 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- generation ----
-  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false } = {}) {
+  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
     const model = chatObj.settings?.model || st.model; // per-chat override wins
     if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    // Claim the generation slot immediately — the async prep below (semantic
+    // embeddings, exact token count) can take a long time on a slow backend,
+    // and the UI (waiting dots, Stop button, input guards) keys off this.
+    const abort = new AbortController();
+    genRef.current = { abort };
+    setGenerating({ chatId: chatObj.id, nodeId });
+    const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
@@ -2696,9 +2763,13 @@ function Main({ storage, storageKind, storageFailed }) {
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
     // recent conversation + smart pieces, threshold → preActivated id set.
-    // Any embeddings failure degrades to keyword-only with a manifest warning.
+    // Scores for every scored piece go on the manifest so the Inspector can
+    // show near-misses. Any embeddings failure degrades to keyword-only with
+    // a manifest warning.
     let preActivated = null;
     let semanticWarning = null;
+    let semanticReport = null;
+    const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     if (st.embeddingModel) {
       const smartPieces = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
@@ -2710,18 +2781,59 @@ function Main({ storage, storageKind, storageFailed }) {
             embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
               text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}` })));
           preActivated = new Set();
-          for (let i = 0; i < smartPieces.length; i++)
-            if (cosine(queryVec, vecs[i]) >= SEMANTIC_THRESHOLD) preActivated.add(smartPieces[i].id);
+          semanticReport = { threshold: semThreshold, scores: [] };
+          for (let i = 0; i < smartPieces.length; i++) {
+            const score = cosine(queryVec, vecs[i]);
+            if (score >= semThreshold) preActivated.add(smartPieces[i].id);
+            semanticReport.scores.push({ id: smartPieces[i].id, title: smartPieces[i].title ?? '', score });
+          }
         } catch (e) {
           console.warn('Semantic lore activation failed:', e);
           semanticWarning = 'Semantic lore activation failed (embeddings); keyword-only for this generation.';
         }
       }
     }
-    const { messages, manifest: man } = assemblePrompt({
-      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt, preActivated,
+    let { messages, manifest: man } = assemblePrompt({
+      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt, preActivated, pov,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
+    if (semanticReport) man.semantic = semanticReport;
+    // Exact-count overflow guard: the assembler budgets on char estimates,
+    // which can undercount. When /tokenize is available, count the fixed head
+    // (static + lore + memory + greeting) exactly and drop oldest history
+    // messages until the estimated remainder fits the real headroom.
+    // Silently skipped (estimates stand) when tokenize is unavailable.
+    {
+      const nSys = messages.filter(m => m.role === 'system').length;
+      const hasGreeting = (man.layers.greeting?.tokens ?? 0) > 0;
+      const head = messages.slice(0, nSys + (hasGreeting ? 1 : 0));
+      const hist = messages.slice(head.length);
+      const headTok = hist.length
+        ? await getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+            text: head.map(m => m.content).join('\n') })
+        : null;
+      if (headTok != null) {
+        const headroom = man.budget - headTok;
+        let estHist = hist.reduce((t, m) => t + estimateTokens(m.content), 0);
+        let extraDrops = 0;
+        while (estHist > headroom && hist.length > 1) {
+          estHist -= estimateTokens(hist.shift().content);
+          extraDrops++;
+        }
+        if (extraDrops > 0) {
+          messages = [...head, ...hist];
+          man.layers.history.kept -= extraDrops;
+          man.layers.history.dropped += extraDrops;
+          man.layers.history.tokens = estHist;
+          man.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+          man.warnings.push(`Exact token count left less room than the estimate — dropped ${extraDrops} more oldest message(s).`);
+        }
+        if (headTok > man.budget)
+          man.warnings.push(`Fixed layers alone use ~${headTok} exact tokens, over the ${man.budget}-token prompt budget — shrink backstory/lore/memory or raise the context length.`);
+      }
+    }
+    // Stopped during the async prep (embeddings/tokenize)? Bail before streaming.
+    if (abort.signal.aborted) { genRef.current = null; setGenerating(null); return; }
     setManifest(man);
     setLastMessages(messages);
     setSuggestions(null);
@@ -2731,10 +2843,6 @@ function Main({ storage, storageKind, storageFailed }) {
       const id = e?.ids?.[0];
       if (Number.isInteger(id)) logitBias[String(id)] = Math.max(-100, Math.min(100, e.power));
     }
-    const abort = new AbortController();
-    genRef.current = { abort };
-    setGenerating({ chatId: chatObj.id, nodeId });
-    const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     let work = chatObj;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
@@ -2883,6 +2991,21 @@ function Main({ storage, storageKind, storageFailed }) {
         return null;
       }
       if (cmd === '/continue') { handleContinue(c); return null; }
+      if (cmd === '/pov') {
+        if (!arg) return 'Usage: /pov <character name>';
+        // Reframe one generation around another character. If a character-type
+        // lore piece matches the name, it's force-injected (reason 'pov') so
+        // the model sees that definition; otherwise the directive alone stands.
+        const scen = ref.current.scenarios[c.scenarioId];
+        const q = arg.toLowerCase();
+        const chars = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
+          ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
+        const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
+        upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+        runGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
+        return null;
+      }
       if (cmd === '/improve') {
         if (!arg) return 'Usage: /improve <draft text>';
         improveDraft(c, arg);
@@ -2905,7 +3028,17 @@ function Main({ storage, storageKind, storageFailed }) {
         saveChat({ ...c, settings: { ...(c.settings ?? {}), model: arg } });
         return `Chat model set to "${arg}" (this chat only, persisted).`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /improve, /recap N, /memory N, /model NAME`;
+      if (cmd === '/theme') {
+        const names = Object.values(THEMES).map(t => t.name).join(', ');
+        if (!arg) return `Theme: ${THEMES[theme]?.name ?? theme}. Available: ${names}`;
+        const q = arg.toLowerCase();
+        const id = Object.keys(THEMES).find(k => k === q || THEMES[k].name.toLowerCase() === q)
+          ?? Object.keys(THEMES).find(k => k.includes(q) || THEMES[k].name.toLowerCase().includes(q));
+        if (!id) return `No theme matching "${arg}". Available: ${names}`;
+        setTheme(id);
+        return `Theme set to ${THEMES[id].name}.`;
+      }
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov NAME, /improve, /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
