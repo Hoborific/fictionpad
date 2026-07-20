@@ -639,6 +639,17 @@ const characterNamesOf = (scenario) =>
     .map(p => p.title?.trim())
     .filter(Boolean);
 
+// Remove the leading `Name:` / `**Name:**` / `*Name*` speaker prefix for
+// display — the meta row already labels who is speaking, so showing the
+// prefix in the bubble too breaks immersion.
+function stripSpeakerPrefix(text, name) {
+  if (!text || !name) return text;
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`^\\s*\\*{0,2}\\s*${esc}\\s*\\*{0,2}\\s*:\\s*`, 'i').exec(text)
+        ?? new RegExp(`^\\s*\\*{1,2}\\s*${esc}\\s*\\*{1,2}\\s*`, 'i').exec(text);
+  return m ? text.slice(m[0].length) : text;
+}
+
 const hueForName = (name) => {
   let h = 0;
   for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 360;
@@ -1709,7 +1720,10 @@ const DEFAULT_PLATFORM_PROMPT =
   'You are an AI collaborator in an immersive roleplay. Stay in character, write vivid, ' +
   'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
-  'characters; leave the actions, words, and thoughts of {{user}} to the user.';
+  'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
+  'When a specific character speaks or acts, begin the reply with that character\'s name ' +
+  'followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the ' +
+  'prefix from the reader. Narration without a speaker needs no prefix.';
 
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:8080',
@@ -2141,6 +2155,8 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const hasProbs = !isUser && Array.isArray(swipe.tokens) && swipe.tokens.length > 0;
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
+  // The speaker is already labeled in the meta row — hide the `Name:` prefix.
+  const displayText = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
   const n = node.activeSwipe + 1, m = node.swipes.length;
   const isLeafAssistant = isLeaf && !isUser;
   const showNav = m > 1 || isLeafAssistant;
@@ -2249,8 +2265,8 @@ ${showNav && html`
           showProbs && hasProbs
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
-            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${text}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${text} prose /></div>`}
+            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
+            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose /></div>`}
       </div>
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
@@ -3434,6 +3450,8 @@ function Main({ storage, storageKind, storageFailed }) {
         <div class="topbar-inner">
           ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
           <span class="title">${chat ? chat.name : 'FictionPad'}</span>
+          ${chat && html`<button class="btn small ghost" title="Close chat"
+            onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>`}
           ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
           <span class="spacer"></span>
           <button class="btn small ghost wide-only ${ui.drawer === 'inspector' ? 'active' : ''}"

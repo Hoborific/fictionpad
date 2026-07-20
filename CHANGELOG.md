@@ -201,3 +201,13 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Fixed**
 - Token-probability highlighting could misalign after a missing logprob entry: a distant repeated token (e.g. an "I" much later in the message) was yanked forward to match, throwing off every annotation after it. Resync now scores candidate matches by text gap plus a cost per skipped entry, keeping the tape aligned.
 
+
+## v3.2 - Character name labels & closing chats
+
+**Added**
+- The default system prompt now tells the model to start each reply with the speaking character's name followed by a colon (e.g. `Veyra:`), so the app can reliably label who is speaking. Narration without a speaker needs no prefix.
+- A ✕ close-chat button in the top bar deselects the current chat (and closes any open drawer), returning you to the chat list.
+
+**Changed**
+- Character messages no longer show the redundant `Name:` / `**Name:**` / `*Name*` prefix inside the bubble - the speaker is already labeled in the message meta row, so the prefix is stripped for display.
+
