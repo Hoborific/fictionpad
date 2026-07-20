@@ -175,3 +175,14 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 - Placeholder text simplified to "Type a message or /" - the full command list no longer clutters the input, since the hints surface it on demand.
 - Minor size trims: smaller minimum textarea height and tighter composer padding.
 
+
+## v3.0 - Message metadata and floating composer
+
+**Added**
+- Sequential message numbers (`#1`, `#2`, …) shown in each message's meta line
+- Creation timestamp (YYYY-MM-DD HH:MM) displayed per message swipe
+- Generation time per swipe: measured from prompt to completion and shown as seconds (e.g. `4.2s`) in the meta line, with a tooltip explaining it
+
+**Changed**
+- Composer restyled as a floating rounded card - the input row now carries the background, border and 10px corner radius, and the old full-width top divider/chrome background is gone
+

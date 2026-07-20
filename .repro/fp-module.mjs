@@ -1602,6 +1602,11 @@ function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
 // ============================================================================
 const visibleTok = (t) => String(t ?? '').replace(/ /g, '␣').replace(/\t/g, '⇥').replace(/\n/g, '↵\n');
 const probPct = (lp) => lp == null ? null : Math.exp(lp) * 100;
+const fmtDateTime = (ts) => {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 function ProbsView({ tokens, onPick }) {
   return html`
@@ -1628,7 +1633,7 @@ function ProbsView({ tokens, onPick }) {
     </div>`;
 }
 
-function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -1682,6 +1687,9 @@ function MessageItem({ node, isRoot, isLeaf, personaName, characterNames, stream
       <div class="meta">
         <span class="who ${isCharacter ? 'speaker' : ''}"
           style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
+        ${index != null && html`<span>#${index}</span>`}
+        ${swipe.createdAt && html`<span>${fmtDateTime(swipe.createdAt)}</span>`}
+        ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${node.edited && html`<span>(edited)</span>`}
         ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
         <span style=${{ flex: 1 }}></span>
@@ -1870,8 +1878,8 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   return html`
     <div class="main">
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll}>
-        ${path.map(node => html`
-          <${MessageItem} key=${node.id} node=${node} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+        ${path.map((node, i) => html`
+          <${MessageItem} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
@@ -2505,6 +2513,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const abort = new AbortController();
     genRef.current = { abort };
     setGenerating({ chatId: chatObj.id, nodeId });
+    const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     let work = chatObj;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
@@ -2567,12 +2576,13 @@ function Main({ storage, storageKind, storageFailed }) {
       setGenerating(null);
       if (acc) {
         attachProbs();
-        // Attribute the finished swipe to a character (or "Narrator").
+        // Attribute the finished swipe to a character (or "Narrator"), and
+        // record how long the generation took.
         const names = characterNamesOf(scen);
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
-          swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator' };
+          swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart };
           work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } } };
           upsertChat(work.id, work);
         }
