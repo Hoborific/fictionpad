@@ -186,3 +186,18 @@ FictionPad is a self-contained, single-HTML-file frontend for immersive LLM role
 **Changed**
 - Composer restyled as a floating rounded card - the input row now carries the background, border and 10px corner radius, and the old full-width top divider/chrome background is gone
 
+
+## v3.1 - Mobile message UX & logprob alignment fix
+
+**Added**
+- Right-click context menu on messages: token probabilities, edit, reply/regenerate, branch from here, rewind to here, delete branch. The native menu is preserved when text is selected, so copy still works.
+
+**Changed**
+- On mobile, message action buttons (probabilities, edit, reply, branch, rewind, delete) collapse behind a › toggle and open as a popover below the meta row, so the row never wraps on narrow screens.
+- On mobile, message details ((edited), model name) collapse behind a › toggle into their own popover, so long model names can't crowd the row.
+- Swipe navigation (◀ n/m ▶) moved to the rightmost spot in the meta row and stays always visible.
+- Popovers auto-close when tapping anywhere else.
+
+**Fixed**
+- Token-probability highlighting could misalign after a missing logprob entry: a distant repeated token (e.g. an "I" much later in the message) was yanked forward to match, throwing off every annotation after it. Resync now scores candidate matches by text gap plus a cost per skipped entry, keeping the tape aligned.
+

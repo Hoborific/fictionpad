@@ -274,6 +274,25 @@ trial('alignTokensToSpans: exact / suffix / prefix / greedy / degenerate', () =>
   if (spans.length !== 1 || spans[0].text !== 'plain message' || spans[0].logprob !== null)
     throw new Error('no-tape: ' + JSON.stringify(spans));
   if (A('', [{ token: 'x', logprob: -1, top: [] }]).length !== 0) throw new Error('empty text should yield no spans');
+
+  // distant-token trap: with lp entries missing at the start AND mid-stream,
+  // the tape's later " I" token must not be yanked forward to match the "I"
+  // at position 1 — the skip cost keeps alignment (plain "*I" and " the" gaps)
+  spans = A('*I lean back against the wall I said', [
+    { token: ' lean', logprob: -0.1, top: [] },
+    { token: ' back', logprob: -0.2, top: [] },
+    { token: ' against', logprob: -0.3, top: [] },
+    { token: ' wall', logprob: -0.5, top: [] },
+    { token: ' I', logprob: -0.6, top: [] },
+    { token: ' said', logprob: -0.7, top: [] },
+  ]);
+  if (!cover(spans, '*I lean back against the wall I said'))
+    throw new Error('distant-token: coverage ' + JSON.stringify(spans));
+  if (spans[0].text !== '*I' || spans[0].logprob !== null || spans[4].text !== ' the' || spans[4].logprob !== null)
+    throw new Error('distant-token: gaps wrong: ' + JSON.stringify(spans));
+  const annotated = spans.filter(s => s.logprob != null);
+  if (annotated.length !== 6 || annotated.some((s, i) => s.text !== [' lean',' back',' against',' wall',' I',' said'][i]))
+    throw new Error('distant-token: tokens misattributed: ' + JSON.stringify(spans));
 });
 // /tokenize shape tolerance: {tokens:[ids]}, count-only, and 404 → null.
 trial('tokenize: ids / count-only / unavailable', async () => {

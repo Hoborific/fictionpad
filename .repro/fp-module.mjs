@@ -802,16 +802,24 @@ function alignTokensToSpans(text, lpTape) {
       spans.push(span(t));
       pos += t.token.length;
     } else {
-      // Resync at the nearest occurrence of any remaining token in the text.
-      let best = -1;
-      for (let j = i; j < toks.length; j++) {
-        const k = text.indexOf(toks[j].token, pos + 1);
-        if (k !== -1 && (best === -1 || k < best)) { best = k; i = j; }
+      // Resync: find the best next match over a small lookahead, scored by
+      // text gap + a cost per skipped tape entry. Without the skip cost a
+      // dropped lp entry lets a DISTANT token (e.g. an "I" 100 tokens later)
+      // match the current position and misaligns the rest of the message.
+      let bestK = -1, bestJ = -1, bestScore = Infinity;
+      for (let j = i; j < Math.min(toks.length, i + 5); j++) {
+        let k = -1;
+        if (j > i && text.startsWith(toks[j].token, pos)) k = pos; // drop tape entr(ies)
+        else k = text.indexOf(toks[j].token, pos + 1);             // text gap, then match
+        if (k === -1) continue;
+        const score = (k - pos) + 4 * (j - i);
+        if (score < bestScore) { bestScore = score; bestK = k; bestJ = j; }
       }
-      const end = best === -1 ? text.length : best;
+      const end = bestK === -1 ? text.length : bestK;
       gap += text.slice(pos, end);
       pos = end;
-      if (best === -1) break;
+      if (bestK === -1) break;
+      i = bestJ;
     }
   }
   flush();
@@ -1637,6 +1645,19 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
+  const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
+  // Auto-hide the actions/meta popovers when tapping anywhere else.
+  useEffect(() => {
+    if (!actionsOpen && !metaOpen) return;
+    const onDown = (e) => {
+      if (!e.target.closest?.('.actions, .actions-toggle')) setActionsOpen(false);
+      if (!e.target.closest?.('.meta-details, .meta-toggle')) setMetaOpen(false);
+    };
+    window.addEventListener('pointerdown', onDown);
+    return () => window.removeEventListener('pointerdown', onDown);
+  }, [actionsOpen, metaOpen]);
+  const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
@@ -1683,32 +1704,29 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
   return html`
-    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}">
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
+      onContextMenu=${(e) => {
+        // Keep the native menu when the user has text selected (copy etc.).
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        setCtxMenu({ x: e.clientX, y: e.clientY });
+      }}>
       <div class="meta">
         <span class="who ${isCharacter ? 'speaker' : ''}"
           style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
         ${index != null && html`<span>#${index}</span>`}
         ${swipe.createdAt && html`<span>${fmtDateTime(swipe.createdAt)}</span>`}
         ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
-        ${node.edited && html`<span>(edited)</span>`}
-        ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
+        ${(node.edited || swipe.modelId) && html`
+          <button class="btn small ghost meta-toggle" title="Message info"
+            onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
+        <span class="meta-details ${metaOpen ? 'open' : ''}" onClick=${() => setMetaOpen(false)}>
+          ${node.edited && html`<span>(edited)</span>`}
+          ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
+        </span>
         <span style=${{ flex: 1 }}></span>
-        ${showNav && html`
-          <span class="swipes">
-            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
-            <span>${n}/${m}</span>
-            ${usedIdx != null && html`
-              <span class="used-dot ${atUsed ? '' : 'jump'}"
-                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
-                onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
-            ${n < m
-              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
-              : isLeafAssistant
-                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
-                    onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
-                : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
-          </span>`}
-        <span class="actions ${streaming ? 'always' : ''}">
+        <span class="actions ${streaming ? 'always' : ''} ${actionsOpen ? 'open' : ''}"
+          onClick=${() => setActionsOpen(false)}>
           ${hasProbs && html`<button class="btn small ghost ${showProbs ? 'primary' : ''}" title="Token probabilities"
             onClick=${() => setShowProbs(!showProbs)}>▦</button>`}
           <button class="btn small ghost" title="Edit" disabled=${generating}
@@ -1724,6 +1742,24 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
           ${!isRoot && html`<button class="btn small ghost" title="Delete message (and its branch)" disabled=${generating}
             onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
         </span>
+        <button class="btn small ghost actions-toggle" title="Message actions"
+          onClick=${() => setActionsOpen(!actionsOpen)}>${actionsOpen ? '‹' : '›'}</button>
+${showNav && html`
+          <span class="swipes">
+            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
+            <span>${n}/${m}</span>
+            ${usedIdx != null && html`
+              <span class="used-dot ${atUsed ? '' : 'jump'}"
+                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
+                onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
+            ${n < m
+              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
+              : isLeafAssistant
+                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
+                    onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
+                : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
+          </span>`}
+        
       </div>
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
@@ -1740,6 +1776,21 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${text}</div>`
             : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${text} prose /></div>`}
       </div>
+      ${ctxMenu && html`
+        <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
+          items=${[
+            ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
+            { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); } },
+            isUser
+              ? { label: 'Reply from here', fn: () => onReply(node.id) }
+              : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id) },
+            { label: 'Branch from here', fn: () => onBranch(node.id) },
+            ...(!isRoot ? [
+              '-',
+              { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id) },
+              { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true },
+            ] : []),
+          ]} />`}
     </div>`;
 }
 
