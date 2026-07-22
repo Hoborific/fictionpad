@@ -460,3 +460,46 @@ No other changes - this is a cosmetic patch on top of v3.6.
 
 - New tests covering the mapped tool-block stripping and the logprob projection, including tokens straddling a strip boundary and mismatch fallback.
 
+
+## v3.8 - Settings refactor
+
+### v3.8
+
+**Changed**
+- The Settings modal is now organized into six tabs - Appearance, Connection, Models, Generation, Features, Prompts - with a sticky tab bar, instead of one long scrolling page.
+
+**Added**
+- Context budget split: the percentage of the context window reserved for the static, lore, and memory layers is now adjustable (Generation tab); chat history keeps whatever remains.
+- Top logprobs count (1-20): how many alternative tokens are requested and stored per position when token probabilities are on.
+- Response suggestions can be tuned: number of suggestion chips (1-5) and max words per suggestion.
+- Auto-summary interval: how many messages pass between automatic memory summaries (5-200); this cadence also drives emergent lore extraction, and the Memory panel shows the configured value.
+- A new Prompts tab collects every editable prompt - platform, suggestions, memory summary, lore extraction, /improve, /recap, tool protocol, and multi-speaker - each with a reset-to-default button. The suggestions prompt supports `{{user}}`, `{{count}}`, and `{{words}}` placeholders.
+
+### v3.8.1
+
+**Added**
+- Aux-model knobs in Settings → Features: temperature and max tokens for memory summaries, lore extraction, `/improve`, and `/recap`; temperature and context depth (recent messages sent) for response suggestions.
+- Memory limits: max characters per stored note and memory cards kept per chat (pinned cards exempt), both configurable.
+- Lore extraction "max pieces per pass" setting (previously hardcoded to 3).
+- "Max tool calls per generation" setting for tool calling.
+- Generation-tab "Estimates & lore scanning" group: chars-per-token estimate fallback, default lore search depth, and lore link boost - all now flow through the prompt assembler so budgets, inspector "(est)" numbers, and the lore scan window stay consistent.
+
+**Changed**
+- Features tab reorganized: token probabilities, suggestions, tool calling, and multi-speaker toggles consolidated into a single "Enable features" checklist, with each feature's options in its own section.
+- Number inputs across Settings now let you type freely and clamp the value on blur/Enter, instead of snapping to min/max mid-keystroke.
+
+### v3.8.2
+
+**Added**
+- Inspector "Aux calls" section: a session log of the last 12 side requests (memory summaries, lore extraction, suggestions, /improve, /recap) showing what was sent, the response, and ok/failed status.
+- Inspector context preview now warns when semantic lore activation was not run (smart lore pieces show keyword-trigger results only).
+
+**Changed**
+- Core generation settings - context length, max tokens, temperature, top_p, top_k, min_p, repetition penalty, and semantic threshold - now commit on blur/Enter instead of on every keystroke, clamp to their ranges, and reset to the default when left blank.
+- Inspector context preview composes the same platform prompt as a real generation, including multi-speaker and tool-calling instructions plus user-defined tools, so the previewed Static layer matches what is actually sent.
+
+**Fixed**
+- Typing into generation-setting number fields no longer writes invalid intermediate values (e.g. empty fields becoming 0) into settings.
+- Lore layer token estimate now includes the literal `[World Info]` header, matching the exact /tokenize count and history headroom.
+- Inspector History card now counts the pinned greeting toward both tokens and cap, so its percentage is accurate.
+

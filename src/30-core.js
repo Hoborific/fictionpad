@@ -14,7 +14,10 @@ const LENGTH_PRESETS = {
   long:   { maxTokens: 800, directive: 'Write a long, detailed response with rich description.' },
 };
 
-const estimateTokens = (text) => Math.ceil(String(text ?? '').length / TOKEN_CHARS);
+// charsPerToken is user-tunable (Settings → Generation); callers that budget
+// against settings pass it through so estimates and caps stay consistent.
+const estimateTokens = (text, charsPerToken = TOKEN_CHARS) =>
+  Math.ceil(String(text ?? '').length / (Number(charsPerToken) > 0 ? Number(charsPerToken) : TOKEN_CHARS));
 // Single-line, whitespace-collapsed excerpt (for manifest previews/tooltips).
 const toPreview = (text, max = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
@@ -167,7 +170,10 @@ function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}
 
 // Determine which pieces are active this turn.
 // Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'pov'|'link-boosted', boost }).
-function scanLore(lorePieces, conversationText, preActivated = null) {
+// opts: user-tunable lore defaults (Settings → Generation) — per-piece
+// searchDepth still wins over the global default.
+function scanLore(lorePieces, conversationText, preActivated = null,
+                  { searchDepth = DEFAULT_SEARCH_DEPTH, linkBoost = LINK_BOOST, chars = TOKEN_CHARS } = {}) {
   const pieces = Array.isArray(lorePieces) ? lorePieces : [];
   const active = new Map();
   for (const piece of pieces) {
@@ -177,8 +183,8 @@ function scanLore(lorePieces, conversationText, preActivated = null) {
       const reason = preActivated instanceof Map ? (preActivated.get(piece.id) ?? 'semantic') : 'semantic';
       active.set(piece.id, { piece, reason, boost: 0 }); continue;
     }
-    const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : DEFAULT_SEARCH_DEPTH;
-    const scanText = conversationText.slice(-Math.round(depth * TOKEN_CHARS));
+    const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : searchDepth;
+    const scanText = conversationText.slice(-Math.round(depth * chars));
     const opts = { wholeWord: !!piece.wholeWord, caseSensitive: !!piece.caseSensitive };
     if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText, opts)))
       active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
@@ -189,16 +195,16 @@ function scanLore(lorePieces, conversationText, preActivated = null) {
       const target = pieces.find(p => p.id === linkId);
       if (!target || target.enabled === false || target.pinned) continue;
       const entry = active.get(linkId);
-      if (entry) entry.boost += LINK_BOOST;
-      else active.set(linkId, { piece: target, reason: 'link-boosted', boost: LINK_BOOST });
+      if (entry) entry.boost += linkBoost;
+      else active.set(linkId, { piece: target, reason: 'link-boosted', boost: linkBoost });
     }
   }
   return active;
 }
 
 // Sort candidates by effective weight desc and fill the lore budget.
-function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null) {
-  const candidates = [...scanLore(lorePieces, conversationText, preActivated).values()].map(a => ({
+function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
+  const candidates = [...scanLore(lorePieces, conversationText, preActivated, opts).values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
     content: a.piece.content ?? '',
@@ -206,7 +212,7 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
     reason: a.reason,
     boost: a.boost,
     effWeight: (Number(a.piece.weight) || 0) + a.boost,
-    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`),
+    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`, opts.chars),
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
@@ -258,6 +264,18 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const contextLength = Number(settings.contextLength) || 8192;
   const budget = Math.max(0, contextLength - reserve);
   const manifest = { contextLength, reserve, budget, layers: {}, warnings: [] };
+  // Layer budget fractions: user-overridable in Settings → Generation;
+  // history always gets whatever the three layers leave behind.
+  const caps = { ...LAYER_CAPS, ...(settings.layerCaps ?? {}) };
+  // User-tunable estimate/scan knobs (Settings → Generation). `est` is the
+  // estimator for everything below so budgets and inspector numbers agree.
+  const chars = Number(settings.tokenChars) > 0 ? Number(settings.tokenChars) : TOKEN_CHARS;
+  const est = (t) => estimateTokens(t, chars);
+  const loreOpts = {
+    searchDepth: Number(settings.loreSearchDepth) > 0 ? Number(settings.loreSearchDepth) : DEFAULT_SEARCH_DEPTH,
+    linkBoost: settings.loreLinkBoost ?? LINK_BOOST,
+    chars,
+  };
 
   // 1. static layer: platform prompt + scenario instructions + backstory +
   //    persona block + per-chat custom instructions + length directive
@@ -287,16 +305,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
   let backstory = sub(scenario?.backstory ?? '').trim();
 
-  const staticCap = Math.floor(budget * LAYER_CAPS.static);
+  const staticCap = Math.floor(budget * caps.static);
   const buildStatic = (bs) => [...leadParts, ...(bs ? [bs] : []), ...tailParts].join('\n\n');
   let staticText = buildStatic(backstory);
-  if (backstory && estimateTokens(staticText) > staticCap) {
-    const allowedChars = Math.max(0, Math.floor((staticCap - estimateTokens(buildStatic(''))) * TOKEN_CHARS));
+  if (backstory && est(staticText) > staticCap) {
+    const allowedChars = Math.max(0, Math.floor((staticCap - est(buildStatic(''))) * chars));
     backstory = backstory.slice(0, allowedChars);
     staticText = buildStatic(backstory);
     manifest.warnings.push('Backstory truncated to fit the static-layer budget.');
   }
-  const staticTokens = estimateTokens(staticText);
+  const staticTokens = est(staticText);
   manifest.layers.static = { tokens: staticTokens, cap: staticCap };
 
   // 2. conversation: root assistant node doubles as the scenario greeting.
@@ -308,12 +326,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     greetingNode = path[0];
     historyNodes = path.slice(1);
   }
-  const greetingTokens = greetingNode ? estimateTokens(sub(activeText(greetingNode))) : 0;
+  const greetingTokens = greetingNode ? est(sub(activeText(greetingNode))) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
   // 3. lore layer (scenario pieces + per-chat overlay, chat wins on id)
-  const loreCap = Math.floor(budget * LAYER_CAPS.lore);
+  const loreCap = Math.floor(budget * caps.lore);
   const lorePieces = mergedLorePieces(scenario, chat);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
@@ -326,10 +344,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     else if (preActivated) for (const id of preActivated) preAct.set(id, 'semantic');
     preAct.set(pov.pieceId, 'pov');
   }
-  const loreScanned = scanLore(lorePieces, conversationText, preAct);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct);
+  const loreScanned = scanLore(lorePieces, conversationText, preAct, loreOpts);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, loreOpts);
   const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
-  const loreTokens = loreText ? estimateTokens(loreText) : 0;
+  // Count the full block as sent (incl. the literal [World Info] header) so the
+  // layer estimate matches the exact /tokenize count and the history headroom.
+  const loreTokens = loreText ? est(`[World Info]\n${loreText}`) : 0;
   // Enabled pieces that were NOT injected — observability for "did it even scan?"
   const selectedIds = new Set(loreSel.map(s => s.id));
   const inactive = [];
@@ -339,7 +359,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
       origin: chatPieceIds.has(p.id) ? 'chat' : 'scenario',
-      tokens: estimateTokens(`${p.title ?? ''}\n${p.content ?? ''}`),
+      tokens: est(`${p.title ?? ''}\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
   }
@@ -353,7 +373,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   };
 
   // 4. memory layer: pinned first (oldest→newest), then recent unpinned
-  const memCap = Math.floor(budget * LAYER_CAPS.memory);
+  const memCap = Math.floor(budget * caps.memory);
   const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
   const memOrdered = [
     ...memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt),
@@ -362,16 +382,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const memSel = [];
   let memUsed = 0;
   for (const m of memOrdered) {
-    const cost = estimateTokens(m.text);
+    const cost = est(m.text);
     if (memUsed + cost > memCap) continue;
     memSel.push(m);
     memUsed += cost;
   }
   const memText = memSel.length ? `[Memories]\n${memSel.map(m => `- ${m.text}`).join('\n')}` : '';
-  const memTokens = memText ? estimateTokens(memText) : 0;
+  const memTokens = memText ? est(memText) : 0;
   manifest.layers.memory = {
     tokens: memTokens, cap: memCap,
-    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: estimateTokens(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
+    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: est(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
   };
 
   // 5. history fills the remainder; oldest messages dropped first
@@ -379,7 +399,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const kept = [];
   let histUsed = 0;
   for (let i = historyNodes.length - 1; i >= 0; i--) {
-    const cost = estimateTokens(activeText(historyNodes[i]));
+    const cost = est(activeText(historyNodes[i]));
     if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
     kept.unshift(historyNodes[i]);
     histUsed += cost;
@@ -396,7 +416,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   for (const n of kept)
     messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: sub(activeText(n)) });
 
-  manifest.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+  manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
 }
 
@@ -690,5 +710,14 @@ function splitSpeakerSegments(text, names) {
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
 const SPEAKER_PROMPT = `When several named characters are in the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line. Give each character at most one part per reply.`;
+
+// Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
+// substituted with the persona name at call time; the suggestions prompt also
+// takes {{count}} and {{words}}.
+const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
+const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
+const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
+const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.';
 // === PURE CORE END ===
 

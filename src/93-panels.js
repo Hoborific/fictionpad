@@ -5,8 +5,8 @@
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas, scenario,
-                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat }) {
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario,
+                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -15,9 +15,9 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
       </div>
       <div class="pbody">
         ${tab === 'inspector' && html`
-          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
         ${tab === 'chat' && html`
           <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
@@ -33,9 +33,9 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
 // ============================================================================
 const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
 
-function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
+function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog,
                       onUpdateChat, onSummarize, summarizing,
-                      width, onDragStart, onResetWidth, onClose, dateFormat }) {
+                      width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
@@ -49,9 +49,9 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
       <div class="pbody">
         ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
         ${chat && tab === 'inspector' && html`
-          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${chat && tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
       </div>
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}

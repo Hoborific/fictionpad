@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
 // ============================================================================
-function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat }) {
+function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat, memoryEvery }) {
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } });
@@ -9,7 +9,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat 
     <div>
       <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
         <span class="hint" style=${{ flex: 1 }}>
-          ${memories.length}/${MEMORY_CAP} memories · auto-summary every ${MEMORY_EVERY} messages
+          ${memories.length}/${MEMORY_CAP} memories · auto-summary every ${memoryEvery ?? MEMORY_EVERY} messages
         </span>
         <button class="btn small" disabled=${summarizing} onClick=${onSummarize}>
           ${summarizing ? 'Summarizing…' : 'Summarize now'}</button>

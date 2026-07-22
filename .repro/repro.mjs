@@ -12,7 +12,7 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, html };`);
+  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -110,6 +110,17 @@ trial('message list render incl. prose markdown', () => {
       characterNames=${['Vex']} streaming=${false} generating=${false}
       onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
       onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
+});
+
+// Settings modal smoke: tabbed categories render with realistic defaults.
+trial('settings modal renders tab bar + appearance tab (SSR smoke)', () => {
+  const out = renderToStaticMarkup(html`
+    <${fp.SettingsModal} settings=${fp.DEFAULT_SETTINGS} onSave=${() => {}} onClose=${() => {}}
+      theme="ctp-mocha" onThemeChange=${() => {}} accent="mauve" onAccentChange=${() => {}}
+      onOpenLogitBias=${() => {}} storageKind="local"
+      onUpload=${async () => 0} onDownload=${async () => 0} />`);
+  for (const label of ['Appearance', 'Connection', 'Models', 'Generation', 'Features', 'Prompts'])
+    if (!out.includes(label)) throw new Error(`missing settings tab: ${label}`);
 });
 
 // Regression: `Mia:\n*actions here*` — the prefix strip must not cross the

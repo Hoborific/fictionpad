@@ -21,7 +21,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
-  MEMORY_CAP, LINK_BOOST, estimateTokens, subUser,
+  MEMORY_CAP, LINK_BOOST, LAYER_CAPS, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, mergedLorePieces, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
@@ -575,6 +575,48 @@ section('assembler budgeting & manifest');
     platformPrompt: '',
   });
   ok(!noDirective.messages[0].content.includes('moderate length'), 'blank length directive injects nothing');
+
+  // user-overridable layer budget fractions change the caps; defaults unchanged
+  const b = 8192 - 400;
+  const withCaps = assemblePrompt({
+    scenario, persona, chat,
+    settings: { contextLength: 8192, maxTokens: 400, layerCaps: { static: 0.10, lore: 0.50, memory: 0.05 } },
+    platformPrompt: '',
+  });
+  ok(withCaps.manifest.layers.static.cap === Math.floor(b * 0.10), 'custom static layer cap honored');
+  ok(withCaps.manifest.layers.lore.cap === Math.floor(b * 0.50), 'custom lore layer cap honored');
+  ok(withCaps.manifest.layers.memory.cap === Math.floor(b * 0.05), 'custom memory layer cap honored');
+  const defaultCaps = assemblePrompt({
+    scenario, persona, chat, settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '',
+  });
+  ok(defaultCaps.manifest.layers.lore.cap === Math.floor(b * LAYER_CAPS.lore), 'default caps unchanged without override');
+
+  // estimate/scan knobs: settings.tokenChars flows into every layer estimate
+  const coarse = assemblePrompt({ scenario, persona, chat, settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '' });
+  const fine = assemblePrompt({
+    scenario, persona, chat,
+    settings: { contextLength: 8192, maxTokens: 400, tokenChars: 2 }, platformPrompt: '',
+  });
+  ok(fine.manifest.totalTokens > coarse.manifest.totalTokens, 'smaller chars/token inflates all layer estimates');
+}
+
+// ---- estimateTokens / scanLore option plumbing ----
+section('estimate + scan knobs');
+{
+  ok(estimateTokens('abcd', 2) === 2, 'estimateTokens honors custom chars/token');
+  ok(estimateTokens('abcd', 0) === estimateTokens('abcd'), 'invalid chars/token falls back to the default');
+
+  const linked = [
+    lore({ id: 'a', keys: ['xy'], links: ['b'] }),
+    lore({ id: 'b', keys: [] }),
+  ];
+  ok(scanLore(linked, 'xy marks it', null, { linkBoost: 5 }).get('b').boost === 5, 'custom link boost honored');
+  ok(scanLore(linked, 'xy marks it').get('b').boost === LINK_BOOST, 'default link boost unchanged');
+
+  const farKey = [lore({ id: 'k', keys: ['needle'] })];
+  const hay = 'needle' + ' y'.repeat(50);
+  ok(scanLore(farKey, hay).has('k'), 'default search depth finds a distant key');
+  ok(!scanLore(farKey, hay, null, { searchDepth: 10, chars: 1 }).has('k'), 'custom search depth narrows the scan window');
 }
 
 // ---- manifest observability fields (preview / content / inactive) ----

@@ -106,14 +106,14 @@ async function* parseEventStream(body) {
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
       model, messages, stream: true, max_tokens: maxTokens, ...samplers,
-      ...(tokenProbs ? { logprobs: true, top_logprobs: 10 } : {}),
+      ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
     }),
@@ -149,7 +149,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       const tape = lpContent.filter(t => t?.token && !stopSet?.has(t.token)).map(t => ({
         token: t.token,
         logprob: t.logprob ?? null,
-        top: (t.top_logprobs ?? []).slice(0, 10)
+        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
           .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
       }));
       if (tape.length) yield { lp: tape };

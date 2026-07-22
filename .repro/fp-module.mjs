@@ -239,7 +239,10 @@ const LENGTH_PRESETS = {
   long:   { maxTokens: 800, directive: 'Write a long, detailed response with rich description.' },
 };
 
-const estimateTokens = (text) => Math.ceil(String(text ?? '').length / TOKEN_CHARS);
+// charsPerToken is user-tunable (Settings → Generation); callers that budget
+// against settings pass it through so estimates and caps stay consistent.
+const estimateTokens = (text, charsPerToken = TOKEN_CHARS) =>
+  Math.ceil(String(text ?? '').length / (Number(charsPerToken) > 0 ? Number(charsPerToken) : TOKEN_CHARS));
 // Single-line, whitespace-collapsed excerpt (for manifest previews/tooltips).
 const toPreview = (text, max = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
@@ -392,7 +395,10 @@ function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}
 
 // Determine which pieces are active this turn.
 // Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'pov'|'link-boosted', boost }).
-function scanLore(lorePieces, conversationText, preActivated = null) {
+// opts: user-tunable lore defaults (Settings → Generation) — per-piece
+// searchDepth still wins over the global default.
+function scanLore(lorePieces, conversationText, preActivated = null,
+                  { searchDepth = DEFAULT_SEARCH_DEPTH, linkBoost = LINK_BOOST, chars = TOKEN_CHARS } = {}) {
   const pieces = Array.isArray(lorePieces) ? lorePieces : [];
   const active = new Map();
   for (const piece of pieces) {
@@ -402,8 +408,8 @@ function scanLore(lorePieces, conversationText, preActivated = null) {
       const reason = preActivated instanceof Map ? (preActivated.get(piece.id) ?? 'semantic') : 'semantic';
       active.set(piece.id, { piece, reason, boost: 0 }); continue;
     }
-    const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : DEFAULT_SEARCH_DEPTH;
-    const scanText = conversationText.slice(-Math.round(depth * TOKEN_CHARS));
+    const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : searchDepth;
+    const scanText = conversationText.slice(-Math.round(depth * chars));
     const opts = { wholeWord: !!piece.wholeWord, caseSensitive: !!piece.caseSensitive };
     if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText, opts)))
       active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
@@ -414,16 +420,16 @@ function scanLore(lorePieces, conversationText, preActivated = null) {
       const target = pieces.find(p => p.id === linkId);
       if (!target || target.enabled === false || target.pinned) continue;
       const entry = active.get(linkId);
-      if (entry) entry.boost += LINK_BOOST;
-      else active.set(linkId, { piece: target, reason: 'link-boosted', boost: LINK_BOOST });
+      if (entry) entry.boost += linkBoost;
+      else active.set(linkId, { piece: target, reason: 'link-boosted', boost: linkBoost });
     }
   }
   return active;
 }
 
 // Sort candidates by effective weight desc and fill the lore budget.
-function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null) {
-  const candidates = [...scanLore(lorePieces, conversationText, preActivated).values()].map(a => ({
+function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
+  const candidates = [...scanLore(lorePieces, conversationText, preActivated, opts).values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
     content: a.piece.content ?? '',
@@ -431,7 +437,7 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
     reason: a.reason,
     boost: a.boost,
     effWeight: (Number(a.piece.weight) || 0) + a.boost,
-    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`),
+    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`, opts.chars),
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
@@ -483,6 +489,18 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const contextLength = Number(settings.contextLength) || 8192;
   const budget = Math.max(0, contextLength - reserve);
   const manifest = { contextLength, reserve, budget, layers: {}, warnings: [] };
+  // Layer budget fractions: user-overridable in Settings → Generation;
+  // history always gets whatever the three layers leave behind.
+  const caps = { ...LAYER_CAPS, ...(settings.layerCaps ?? {}) };
+  // User-tunable estimate/scan knobs (Settings → Generation). `est` is the
+  // estimator for everything below so budgets and inspector numbers agree.
+  const chars = Number(settings.tokenChars) > 0 ? Number(settings.tokenChars) : TOKEN_CHARS;
+  const est = (t) => estimateTokens(t, chars);
+  const loreOpts = {
+    searchDepth: Number(settings.loreSearchDepth) > 0 ? Number(settings.loreSearchDepth) : DEFAULT_SEARCH_DEPTH,
+    linkBoost: settings.loreLinkBoost ?? LINK_BOOST,
+    chars,
+  };
 
   // 1. static layer: platform prompt + scenario instructions + backstory +
   //    persona block + per-chat custom instructions + length directive
@@ -512,16 +530,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
   let backstory = sub(scenario?.backstory ?? '').trim();
 
-  const staticCap = Math.floor(budget * LAYER_CAPS.static);
+  const staticCap = Math.floor(budget * caps.static);
   const buildStatic = (bs) => [...leadParts, ...(bs ? [bs] : []), ...tailParts].join('\n\n');
   let staticText = buildStatic(backstory);
-  if (backstory && estimateTokens(staticText) > staticCap) {
-    const allowedChars = Math.max(0, Math.floor((staticCap - estimateTokens(buildStatic(''))) * TOKEN_CHARS));
+  if (backstory && est(staticText) > staticCap) {
+    const allowedChars = Math.max(0, Math.floor((staticCap - est(buildStatic(''))) * chars));
     backstory = backstory.slice(0, allowedChars);
     staticText = buildStatic(backstory);
     manifest.warnings.push('Backstory truncated to fit the static-layer budget.');
   }
-  const staticTokens = estimateTokens(staticText);
+  const staticTokens = est(staticText);
   manifest.layers.static = { tokens: staticTokens, cap: staticCap };
 
   // 2. conversation: root assistant node doubles as the scenario greeting.
@@ -533,12 +551,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     greetingNode = path[0];
     historyNodes = path.slice(1);
   }
-  const greetingTokens = greetingNode ? estimateTokens(sub(activeText(greetingNode))) : 0;
+  const greetingTokens = greetingNode ? est(sub(activeText(greetingNode))) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
   // 3. lore layer (scenario pieces + per-chat overlay, chat wins on id)
-  const loreCap = Math.floor(budget * LAYER_CAPS.lore);
+  const loreCap = Math.floor(budget * caps.lore);
   const lorePieces = mergedLorePieces(scenario, chat);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
@@ -551,10 +569,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     else if (preActivated) for (const id of preActivated) preAct.set(id, 'semantic');
     preAct.set(pov.pieceId, 'pov');
   }
-  const loreScanned = scanLore(lorePieces, conversationText, preAct);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct);
+  const loreScanned = scanLore(lorePieces, conversationText, preAct, loreOpts);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, loreOpts);
   const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
-  const loreTokens = loreText ? estimateTokens(loreText) : 0;
+  // Count the full block as sent (incl. the literal [World Info] header) so the
+  // layer estimate matches the exact /tokenize count and the history headroom.
+  const loreTokens = loreText ? est(`[World Info]\n${loreText}`) : 0;
   // Enabled pieces that were NOT injected — observability for "did it even scan?"
   const selectedIds = new Set(loreSel.map(s => s.id));
   const inactive = [];
@@ -564,7 +584,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
       origin: chatPieceIds.has(p.id) ? 'chat' : 'scenario',
-      tokens: estimateTokens(`${p.title ?? ''}\n${p.content ?? ''}`),
+      tokens: est(`${p.title ?? ''}\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
   }
@@ -578,7 +598,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   };
 
   // 4. memory layer: pinned first (oldest→newest), then recent unpinned
-  const memCap = Math.floor(budget * LAYER_CAPS.memory);
+  const memCap = Math.floor(budget * caps.memory);
   const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
   const memOrdered = [
     ...memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt),
@@ -587,16 +607,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const memSel = [];
   let memUsed = 0;
   for (const m of memOrdered) {
-    const cost = estimateTokens(m.text);
+    const cost = est(m.text);
     if (memUsed + cost > memCap) continue;
     memSel.push(m);
     memUsed += cost;
   }
   const memText = memSel.length ? `[Memories]\n${memSel.map(m => `- ${m.text}`).join('\n')}` : '';
-  const memTokens = memText ? estimateTokens(memText) : 0;
+  const memTokens = memText ? est(memText) : 0;
   manifest.layers.memory = {
     tokens: memTokens, cap: memCap,
-    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: estimateTokens(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
+    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: est(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
   };
 
   // 5. history fills the remainder; oldest messages dropped first
@@ -604,7 +624,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const kept = [];
   let histUsed = 0;
   for (let i = historyNodes.length - 1; i >= 0; i--) {
-    const cost = estimateTokens(activeText(historyNodes[i]));
+    const cost = est(activeText(historyNodes[i]));
     if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
     kept.unshift(historyNodes[i]);
     histUsed += cost;
@@ -621,7 +641,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   for (const n of kept)
     messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: sub(activeText(n)) });
 
-  manifest.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+  manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
 }
 
@@ -915,6 +935,15 @@ function splitSpeakerSegments(text, names) {
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
 const SPEAKER_PROMPT = `When several named characters are in the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line. Give each character at most one part per reply.`;
+
+// Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
+// substituted with the persona name at call time; the suggestions prompt also
+// takes {{count}} and {{words}}.
+const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
+const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
+const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
+const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.';
 // === PURE CORE END ===
 
 // ============================================================================
@@ -1201,14 +1230,14 @@ async function* parseEventStream(body) {
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, logitBias = null, stop = null }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
       model, messages, stream: true, max_tokens: maxTokens, ...samplers,
-      ...(tokenProbs ? { logprobs: true, top_logprobs: 10 } : {}),
+      ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
     }),
@@ -1244,7 +1273,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       const tape = lpContent.filter(t => t?.token && !stopSet?.has(t.token)).map(t => ({
         token: t.token,
         logprob: t.logprob ?? null,
-        top: (t.top_logprobs ?? []).slice(0, 10)
+        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
           .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
       }));
       if (tape.length) yield { lp: tape };
@@ -1593,6 +1622,30 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
     </div>`;
 }
 
+// Number input that allows free typing and commits a clamped value on
+// blur/Enter — clamping on every keystroke fights mid-edit input (typing "3"
+// into a min-5 field would snap to 5 before the "0" for "30" arrives).
+// While focused, the text is authoritative; unfocused, it follows the prop.
+function NumInput({ value, min, max, step, fallback, onCommit }) {
+  const [text, setText] = useState(String(value ?? ''));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => { if (!focused) setText(String(value ?? '')); }, [value, focused]);
+  const commit = () => {
+    const raw = text.trim();
+    let n = raw === '' ? NaN : Number(raw);
+    if (!Number.isFinite(n)) n = fallback ?? value ?? 0;
+    if (min != null) n = Math.max(min, n);
+    if (max != null) n = Math.min(max, n);
+    if (n !== value) onCommit(n);
+    setText(String(n));
+  };
+  return html`<input type="number" min=${min} max=${max} step=${step} value=${text}
+    onFocus=${() => setFocused(true)}
+    onInput=${(e) => setText(e.target.value)}
+    onBlur=${() => { setFocused(false); commit(); }}
+    onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
+}
+
 // ============================================================================
 // COMPONENTS: SCENARIO EDITOR — full CRUD incl. lore piece editor.
 // ============================================================================
@@ -1813,9 +1866,32 @@ const DEFAULT_SETTINGS = {
   samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
+  topLogprobs: 10, // how many alternative tokens to request/store per position
   suggestions: true, // response-suggestion chips after generations
+  suggestionsCount: 2, // chips offered per reply (1–5)
+  suggestionsWords: 20, // max words per suggestion (5–60)
+  suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
+  suggestionsTemp: 0.9,
+  suggestionsDepth: 6, // recent messages handed to the suggestions call
+  memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
+  memoryPrompt: DEFAULT_MEMORY_PROMPT,
+  memoryTemp: 0.3,
+  memoryMaxTokens: 220, // aux response cap for a summary
+  memoryMaxChars: 500, // stored note length cap
+  memoryCap: MEMORY_CAP, // memory cards kept per chat (pinned exempt)
+  loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
+  loreExtractTemp: 0.3,
+  loreExtractMaxTokens: 400,
+  loreExtractMax: 3, // pieces proposed per extraction pass
+  improvePrompt: DEFAULT_IMPROVE_PROMPT, // /improve
+  improveTemp: 0.7,
+  improveMaxTokens: 400,
+  recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
+  recapTemp: 0.4,
+  recapMaxTokens: 700,
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
+  toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
   customTools: [], // user-defined tools: [{ id, name, argsHint, description, action: 'note'|'set_var'|'register_character'|'add_lore' }]
@@ -1823,7 +1899,20 @@ const DEFAULT_SETTINGS = {
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
   logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
+  layerCaps: { ...LAYER_CAPS }, // fraction of context budget per layer; history = remainder
+  tokenChars: TOKEN_CHARS, // chars/token estimate fallback (exact counts via /tokenize when available)
+  loreSearchDepth: DEFAULT_SEARCH_DEPTH, // estimated tokens scanned for lore keys (per-piece override wins)
+  loreLinkBoost: LINK_BOOST, // effective-weight bonus lent by one active linking piece
 };
+
+const SETTINGS_TABS = [
+  ['appearance', 'Appearance'],
+  ['connection', 'Connection'],
+  ['models', 'Models'],
+  ['generation', 'Generation'],
+  ['features', 'Features'],
+  ['prompts', 'Prompts'],
+];
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload }) {
@@ -1834,12 +1923,16 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     d.lengthDirective ??= LENGTH_PRESETS[d.responseLength ?? 'medium']?.directive ?? '';
     return d;
   });
+  const [tab, setTab] = useState('appearance');
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
   const [migBusy, setMigBusy] = useState(null);
   const [migNote, setMigNote] = useState(null);
   const set = (patch) => setDraft(d => ({ ...d, ...patch }));
   const setSampler = (k, v) => setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } }));
+  const setCap = (k, pct) => setDraft(d => ({
+    ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
+  }));
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
@@ -1859,186 +1952,294 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
   };
 
+  // Shared prompt-textarea block for the Prompts tab.
+  const promptField = (key, label, def, rows, hint) => html`
+    <label class="field"><span>${label}</span>
+      <textarea rows=${rows} value=${draft[key] ?? def} onInput=${(e) => set({ [key]: e.target.value })} /></label>
+    ${hint && html`<div class="hint" style=${{ margin: '-6px 0 6px' }}>${hint}</div>`}
+    <button class="btn small" style=${{ marginBottom: '10px' }} onClick=${() => set({ [key]: def })}>Reset to default</button>`;
+
+  // Compact numeric field for the advanced knobs. NumInput lets the user type
+  // freely and clamps on blur/Enter instead of fighting every keystroke.
+  const numField = (key, label, def, { min, max, step } = {}) => html`
+    <label class="field"><span>${label}</span>
+      <${NumInput} value=${draft[key] ?? def} min=${min} max=${max} step=${step} fallback=${def}
+        onCommit=${(n) => set({ [key]: n })} /></label>`;
+
   return html`
     <${Modal} title="Settings" wide onClose=${onClose}
       footer=${html`<button class="btn ghost" onClick=${onClose}>Cancel</button>
         <button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
-      <label class="field"><span>Theme — applies immediately, saved automatically</span>
-        <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
-          ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
-        </select></label>
-      ${THEMES[theme]?.accentable && html`
-        <label class="field"><span>Accent — drives quotes, names on bubbles, buttons</span>
-          <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span style=${{ width: '14px', height: '14px', borderRadius: '50%', flex: 'none',
-              background: (CTP_ACCENTS[theme] ?? {})[accent] ?? 'transparent', border: '1px solid var(--c-border)' }}></span>
-            <select value=${accent} onChange=${(e) => onAccentChange(e.target.value)} style=${{ flex: 1 }}>
-              ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
-            </select>
-          </div></label>`}
-      <label class="field"><span>Date format — message stamps, memories, chat names</span>
-        <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
-          ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-        </select></label>
-      <div class="grid2">
-        <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
-          <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
-          ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
-            <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
-        </label>
-        <label class="field"><span>API key (sent as Bearer token; stored in localStorage)</span>
-          <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
+      <div class="m-tabs">
+        ${SETTINGS_TABS.map(([id, label]) => html`
+          <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
       </div>
-      ${storageKind === 'server' && html`
-        <label class="check">
-          <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
-          Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
-        </label>`}
-      <div class="grid2">
-        <label class="field"><span>Chat model</span>
-          <div style=${{ display: 'flex', gap: '6px' }}>
-            <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
-            <button class="btn" onClick=${fetchModels}>Fetch</button>
-          </div>
-          <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
-          ${modelsError && html`<span class="warn">${modelsError}</span>`}
-          ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
-        </label>
-        <label class="field"><span>Aux model (memory summaries; blank = chat model)</span>
-          <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
-      </div>
-      <div class="grid2">
-        <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
-          <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
-            onInput=${(e) => set({ embeddingModel: e.target.value })} />
-          <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
-        </label>
-        <label class="field"><span>Semantic threshold (0–1)</span>
-          <input type="number" min="0" max="1" step="0.05" value=${draft.semanticThreshold ?? 0.55}
-            onInput=${(e) => set({ semanticThreshold: Number(e.target.value) })} />
-          <span class="hint">Cosine similarity a smart lore piece needs to inject. Near-misses show in the Inspector.</span>
-        </label>
-      </div>
-      <div class="grid3">
-        <label class="field"><span>Context length (tokens)</span>
-          <input type="number" value=${draft.contextLength} onInput=${(e) => set({ contextLength: Number(e.target.value) })} /></label>
-        <label class="field"><span>Response length preset</span>
-          <select value=${draft.responseLength}
-            onChange=${(e) => set({
-              responseLength: e.target.value,
-              maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
-              lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
-            })}>
-            <option value="short">Short (~150 tokens)</option>
-            <option value="medium">Medium (~400 tokens)</option>
-            <option value="long">Long (~800 tokens)</option>
+
+      ${tab === 'appearance' && html`
+        <label class="field"><span>Theme — applies immediately, saved automatically</span>
+          <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
+            ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
           </select></label>
-        <label class="field"><span>Max tokens (response reserve)</span>
-          <input type="number" value=${draft.maxTokens} onInput=${(e) => set({ maxTokens: Number(e.target.value) })} /></label>
-      </div>
-      <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
-        <textarea rows=${2} value=${draft.lengthDirective ?? ''}
-          onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
-      <div class="grid3">
-        <label class="field"><span>Temperature</span>
-          <input type="number" step="0.05" value=${draft.samplers.temperature} onInput=${(e) => setSampler('temperature', Number(e.target.value))} /></label>
-        <label class="field"><span>top_p</span>
-          <input type="number" step="0.01" value=${draft.samplers.top_p} onInput=${(e) => setSampler('top_p', Number(e.target.value))} /></label>
-        <label class="field"><span>top_k</span>
-          <input type="number" value=${draft.samplers.top_k} onInput=${(e) => setSampler('top_k', Number(e.target.value))} /></label>
-        <label class="field"><span>min_p</span>
-          <input type="number" step="0.01" value=${draft.samplers.min_p} onInput=${(e) => setSampler('min_p', Number(e.target.value))} /></label>
-        <label class="field"><span>Repetition penalty</span>
-          <input type="number" step="0.01" value=${draft.samplers.repetition_penalty} onInput=${(e) => setSampler('repetition_penalty', Number(e.target.value))} /></label>
-      </div>
-      <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
-        <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
-          placeholder="e.g. your EOS marker, if your model emits one"
-          onChange=${(stopStrings) => set({ stopStrings })} /></label>
-      <div class="field"><span>Storage</span>
-        <div class="hint">${storageKind === 'server'
-          ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
-          : 'Local storage — data lives in this browser only.'}</div>
-        <label class="field" style=${{ marginTop: '6px' }}>
-          <span>Server token (only when the server sets FICTIONPAD_TOKEN; applies after reload)</span>
-          <input type="password" value=${draft.serverToken ?? ''} onInput=${(e) => set({ serverToken: e.target.value })} /></label>
+        ${THEMES[theme]?.accentable && html`
+          <label class="field"><span>Accent — drives quotes, names on bubbles, buttons</span>
+            <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style=${{ width: '14px', height: '14px', borderRadius: '50%', flex: 'none',
+                background: (CTP_ACCENTS[theme] ?? {})[accent] ?? 'transparent', border: '1px solid var(--c-border)' }}></span>
+              <select value=${accent} onChange=${(e) => onAccentChange(e.target.value)} style=${{ flex: 1 }}>
+                ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
+              </select>
+            </div></label>`}
+        <label class="field"><span>Date format — message stamps, memories, chat names</span>
+          <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
+            ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
+          </select></label>`}
+
+      ${tab === 'connection' && html`
+        <div class="grid2">
+          <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
+            <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
+            ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
+              <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
+          </label>
+          <label class="field"><span>API key (sent as Bearer token; stored in localStorage)</span>
+            <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
+        </div>
         ${storageKind === 'server' && html`
-          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('up')}>
-              ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
-            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
-              ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+          <label class="check">
+            <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
+            Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
+          </label>`}
+        <div class="field"><span>Storage</span>
+          <div class="hint">${storageKind === 'server'
+            ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
+            : 'Local storage — data lives in this browser only.'}</div>
+          <label class="field" style=${{ marginTop: '6px' }}>
+            <span>Server token (only when the server sets FICTIONPAD_TOKEN; applies after reload)</span>
+            <input type="password" value=${draft.serverToken ?? ''} onInput=${(e) => set({ serverToken: e.target.value })} /></label>
+          ${storageKind === 'server' && html`
+            <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('up')}>
+                ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
+              <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
+                ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+            </div>
+            ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
+        </div>`}
+
+      ${tab === 'models' && html`
+        <div class="grid2">
+          <label class="field"><span>Chat model</span>
+            <div style=${{ display: 'flex', gap: '6px' }}>
+              <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
+              <button class="btn" onClick=${fetchModels}>Fetch</button>
+            </div>
+            <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
+            ${modelsError && html`<span class="warn">${modelsError}</span>`}
+            ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
+          </label>
+          <label class="field"><span>Aux model (memory summaries, suggestions, /improve, /recap; blank = chat model)</span>
+            <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
+        </div>
+        <div class="grid2">
+          <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
+            <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
+              onInput=${(e) => set({ embeddingModel: e.target.value })} />
+            <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
+          </label>
+          ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
+          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a smart lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
+        </div>`}
+
+      ${tab === 'generation' && html`
+        <div class="grid3">
+          <label class="field"><span>Context length (tokens)</span>
+            <${NumInput} value=${draft.contextLength} min=${256} step=${512} fallback=${8192}
+              onCommit=${(n) => set({ contextLength: n })} /></label>
+          <label class="field"><span>Response length preset</span>
+            <select value=${draft.responseLength}
+              onChange=${(e) => set({
+                responseLength: e.target.value,
+                maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
+                lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
+              })}>
+              <option value="short">Short (~150 tokens)</option>
+              <option value="medium">Medium (~400 tokens)</option>
+              <option value="long">Long (~800 tokens)</option>
+            </select></label>
+          <label class="field"><span>Max tokens (response reserve)</span>
+            <${NumInput} value=${draft.maxTokens} min=${1} fallback=${LENGTH_PRESETS.medium.maxTokens}
+              onCommit=${(n) => set({ maxTokens: n })} /></label>
+        </div>
+        <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
+          <textarea rows=${2} value=${draft.lengthDirective ?? ''}
+            onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
+        <div class="grid3">
+          ${['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'].map(k => html`
+            <label class="field" key=${k}><span>${{ temperature: 'Temperature', repetition_penalty: 'Repetition penalty' }[k] ?? k}</span>
+              <${NumInput} value=${draft.samplers[k]} step=${k === 'top_k' ? 1 : 0.05} fallback=${DEFAULT_SETTINGS.samplers[k]}
+                onCommit=${(n) => setSampler(k, n)} /></label>`)}
+        </div>
+        <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
+          <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
+            placeholder="e.g. your EOS marker, if your model emits one"
+            onChange=${(stopStrings) => set({ stopStrings })} /></label>
+        <div class="grid3">
+          <label class="field"><span>Top logprobs — alternatives stored per token</span>
+            <${NumInput} value=${draft.topLogprobs ?? 10} min=${1} max=${20} fallback=${10}
+              onCommit=${(n) => set({ topLogprobs: n })} />
+            <span class="hint">Sent as top_logprobs when token probabilities are on (Features tab).</span></label>
+        </div>
+        <div class="field"><span>Context budget split (%) — static / lore / memory; chat history gets the remainder</span>
+          <div class="grid3">
+            <label class="field"><span>Static</span>
+              <${NumInput} value=${Math.round(((draft.layerCaps ?? LAYER_CAPS).static ?? 0.3) * 100)} min=${0} max=${90}
+                fallback=${Math.round(LAYER_CAPS.static * 100)} onCommit=${(n) => setCap('static', n)} /></label>
+            <label class="field"><span>Lore</span>
+              <${NumInput} value=${Math.round(((draft.layerCaps ?? LAYER_CAPS).lore ?? 0.2) * 100)} min=${0} max=${90}
+                fallback=${Math.round(LAYER_CAPS.lore * 100)} onCommit=${(n) => setCap('lore', n)} /></label>
+            <label class="field"><span>Memory</span>
+              <${NumInput} value=${Math.round(((draft.layerCaps ?? LAYER_CAPS).memory ?? 0.1) * 100)} min=${0} max=${90}
+                fallback=${Math.round(LAYER_CAPS.memory * 100)} onCommit=${(n) => setCap('memory', n)} /></label>
           </div>
-          ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
-      </div>
-      <label class="field"><span>Platform system prompt — lowest instruction rank; {{user}} works here</span>
-        <textarea rows=${5} value=${draft.platformPrompt} onInput=${(e) => set({ platformPrompt: e.target.value })} /></label>
-      <button class="btn small" onClick=${() => set({ platformPrompt: DEFAULT_PLATFORM_PROMPT })}>Reset prompt to default</button>
-      <div class="field"><span>Auxiliary features</span>
-        <label class="check">
-          <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
-          Token probabilities (request logprobs + top-10 alternatives per token)
-        </label>
-        <label class="check">
-          <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
-          Response suggestions (2 clickable options after each AI reply)
-        </label>
-        <label class="check">
-          <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
-          Tool calling (model may register characters + lore mid-reply, into this chat's lore)
-        </label>
-        ${draft.toolsEnabled !== false && html`
-          <label class="field"><span>Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.</span>
-            <textarea rows=${9} value=${draft.toolsPrompt ?? TOOLS_PROMPT}
-              onInput=${(e) => set({ toolsPrompt: e.target.value })} /></label>
-          <button class="btn small" onClick=${() => set({ toolsPrompt: TOOLS_PROMPT })}>Reset tools prompt to default</button>
-          <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
-            <button class="btn small" style=${{ marginLeft: '8px' }}
-              onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
-            <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
-            ${(draft.customTools ?? []).map((t, i) => {
-              const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
-              return html`
-                <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
-                  <div class="grid2">
-                    <label class="field"><span>Tool name (no spaces)</span>
-                      <input type="text" value=${t.name} placeholder="roll_dice"
-                        onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
-                    <label class="field"><span>Action</span>
-                      <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
-                        <option value="note">author's note (append steering text)</option>
-                        <option value="set_var">set story variable ({{var:name}})</option>
-                        <option value="register_character">register character</option>
-                        <option value="add_lore">add lore piece</option>
-                      </select></label>
-                  </div>
-                  <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
-                    <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
-                      onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
-                  <label class="field"><span>Description — when/why the model should call it</span>
-                    <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
-                  <button class="btn small danger"
-                    onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
-                </div>`;
-            })}
-          </div>`}
-        <label class="check">
-          <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
-          Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
-        </label>
-        ${draft.multiSpeaker !== false && html`
-          <label class="field"><span>Multi-speaker instructions — appended to the platform prompt.</span>
-            <textarea rows=${4} value=${draft.speakerPrompt ?? SPEAKER_PROMPT}
-              onInput=${(e) => set({ speakerPrompt: e.target.value })} /></label>
-          <button class="btn small" onClick=${() => set({ speakerPrompt: SPEAKER_PROMPT })}>Reset multi-speaker prompt to default</button>`}
+          <button class="btn small" onClick=${() => set({ layerCaps: { ...LAYER_CAPS } })}>Reset split to default</button>
+        </div>
+        <div class="field"><span>Estimates & lore scanning</span>
+          <div class="grid3">
+            ${numField('tokenChars', 'Chars per token (estimate fallback)', TOKEN_CHARS, { min: 1, max: 8, step: 0.1 })}
+            ${numField('loreSearchDepth', 'Lore search depth (est. tokens)', DEFAULT_SEARCH_DEPTH, { min: 0, step: 128 })}
+            ${numField('loreLinkBoost', 'Lore link boost (weight bonus)', LINK_BOOST, { min: 0, max: 20 })}
+          </div>
+          <div class="hint">Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.</div>
+        </div>
         <div style=${{ marginTop: '4px' }}>
           <button class="btn small" onClick=${onOpenLogitBias}>Edit logit bias…</button>
           <span class="hint" style=${{ marginLeft: '8px' }}>${Object.keys(draft.logitBias ?? {}).length} entr(ies)</span>
+        </div>`}
+
+      ${tab === 'features' && html`
+        <div class="field"><span>Enable features</span>
+          <label class="check">
+            <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
+            Token probabilities (logprobs + alternatives per token; count in Generation tab)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
+            Response suggestions ("what you might do next" chips after each AI reply)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
+            Tool calling (model may register characters + lore mid-reply, into this chat's lore)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
+            Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
+          </label>
         </div>
-      </div>
+        ${draft.suggestions !== false && html`
+          <div class="field"><span>Response suggestions</span>
+            <div class="grid2">
+              <label class="field"><span>Number of suggestions (1–5)</span>
+                <${NumInput} value=${draft.suggestionsCount ?? 2} min=${1} max=${5} fallback=${2}
+                  onCommit=${(n) => set({ suggestionsCount: n })} /></label>
+              <label class="field"><span>Max words per suggestion</span>
+                <${NumInput} value=${draft.suggestionsWords ?? 20} min=${5} max=${60} fallback=${20}
+                  onCommit=${(n) => set({ suggestionsWords: n })} /></label>
+            </div>
+            <div class="grid2">
+              ${numField('suggestionsTemp', 'Temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
+              ${numField('suggestionsDepth', 'Context messages sent', 6, { min: 1, max: 30 })}
+            </div>
+            <div class="hint">Uses the aux model; the prompt is editable in the Prompts tab.</div>
+          </div>`}
+        <div class="field"><span>Memory</span>
+          <label class="field"><span>Auto-summarize every N messages (also the lore-extraction cadence)</span>
+            <${NumInput} value=${draft.memoryEvery ?? MEMORY_EVERY} min=${5} max=${200} fallback=${MEMORY_EVERY}
+              onCommit=${(n) => set({ memoryEvery: n })} /></label>
+          <div class="grid3">
+            ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
+            ${numField('memoryMaxTokens', 'Summary max tokens', 220, { min: 50, max: 2000, step: 10 })}
+            ${numField('memoryMaxChars', 'Note max characters', 500, { min: 100, max: 5000, step: 50 })}
+          </div>
+          <div class="grid3">
+            ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}
+          </div>
+          <div class="hint">Summarize / extraction prompts are editable in the Prompts tab. Pinned cards are exempt from the card cap.</div>
+        </div>
+        <div class="field"><span>Lore extraction (runs on the memory cadence)</span>
+          <div class="grid3">
+            ${numField('loreExtractTemp', 'Temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
+            ${numField('loreExtractMaxTokens', 'Max tokens', 400, { min: 50, max: 2000, step: 10 })}
+            ${numField('loreExtractMax', 'Max pieces per pass', 3, { min: 1, max: 10 })}
+          </div>
+          <div class="hint">If you raise max pieces, also raise the "up to 3" in the extraction prompt (Prompts tab).</div>
+        </div>
+        <div class="field"><span>Slash commands (aux model)</span>
+          <div class="grid3">
+            ${numField('improveTemp', '/improve temperature', 0.7, { min: 0, max: 2, step: 0.05 })}
+            ${numField('improveMaxTokens', '/improve max tokens', 400, { min: 50, max: 4000, step: 10 })}
+          </div>
+          <div class="grid3">
+            ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
+            ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
+          </div>
+        </div>
+        <div class="field"><span>Tool calling</span>
+          ${draft.toolsEnabled === false
+            ? html`<div class="hint">Off — enable it above.</div>`
+            : html`
+            <div class="hint" style=${{ margin: '4px 0' }}>Protocol instructions are editable in the Prompts tab.</div>
+            <div class="grid3">
+              ${numField('toolCallCap', 'Max tool calls per generation', TOOL_CALL_CAP, { min: 1, max: 25 })}
+            </div>
+            <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
+              <button class="btn small" style=${{ marginLeft: '8px' }}
+                onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
+              <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
+              ${(draft.customTools ?? []).map((t, i) => {
+                const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
+                return html`
+                  <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
+                    <div class="grid2">
+                      <label class="field"><span>Tool name (no spaces)</span>
+                        <input type="text" value=${t.name} placeholder="roll_dice"
+                          onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
+                      <label class="field"><span>Action</span>
+                        <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
+                          <option value="note">author's note (append steering text)</option>
+                          <option value="set_var">set story variable ({{var:name}})</option>
+                          <option value="register_character">register character</option>
+                          <option value="add_lore">add lore piece</option>
+                        </select></label>
+                    </div>
+                    <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
+                      <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
+                        onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
+                    <label class="field"><span>Description — when/why the model should call it</span>
+                      <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
+                    <button class="btn small danger"
+                      onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
+                  </div>`;
+              })}
+            </div>`}
+        </div>`}
+
+      ${tab === 'prompts' && html`
+        ${promptField('platformPrompt', 'Platform system prompt — lowest instruction rank; {{user}} works here', DEFAULT_PLATFORM_PROMPT, 5)}
+        ${promptField('suggestionsPrompt', 'Suggestions prompt — asks the aux model for reply options', DEFAULT_SUGGESTIONS_PROMPT, 3,
+          '{{user}} = persona name, {{count}} and {{words}} = the values from the Features tab. Used when suggestions are on.')}
+        ${promptField('memoryPrompt', 'Memory summary prompt — auto-summaries and /memory', DEFAULT_MEMORY_PROMPT, 3)}
+        ${promptField('loreExtractPrompt', 'Lore extraction prompt — proposes new lore pieces on the memory cadence', DEFAULT_LORE_EXTRACT_PROMPT, 4)}
+        ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
+          '{{user}} = persona name (+ description, when set).')}
+        ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}
+        ${draft.toolsEnabled !== false
+          ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
+          : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
+        ${draft.multiSpeaker !== false
+          ? promptField('speakerPrompt', 'Multi-speaker instructions — appended to the platform prompt.', SPEAKER_PROMPT, 4)
+          : html`<div class="hint">Multi-speaker prompt hidden — multi-speaker is off (Features tab).</div>`}`}
     <//>`;
 }
-
 // ============================================================================
 // COMPONENTS: LOGIT BIAS EDITOR — { [inputString]: { ids, strings, power } }.
 // Literal strings are tokenized via /tokenize ("!==" + s, prefix tokens sliced
@@ -2166,18 +2367,32 @@ function LayerCard({ name, tokens, cap, note, about }) {
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [] }) {
   const [showInactive, setShowInactive] = useState(false);
+  // Aux calls (memory summaries, lore extraction, suggestions, /improve,
+  // /recap) are separate requests that never enter the main context, so the
+  // manifest can't show them. Session log (last 12), newest first.
+  const auxSection = (auxLog ?? []).length > 0 && html`
+    <${InspectorSection} title="Aux calls" count=${auxLog.length}>
+      ${[...auxLog].reverse().map((a, i) => html`
+        <${InspectorRow} key=${`${a.at}-${i}`} dimmed=${!a.ok}
+          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'chat' : 'pinned' }]}
+          title=${a.kind} meta=${`${new Date(a.at).toLocaleTimeString()} · ~${estimateTokens(`${a.system}\n${a.user}`)}t in`}
+          preview=${toPreview(a.out, 140)}
+          content=${`[system]\n${a.system}\n\n[user]\n${a.user}\n\n[${a.ok ? 'response' : 'error'}]\n${a.out}`} />`)}
+    <//>`;
   if (!manifest?.layers) return html`
     <div>
       <div class="hint">No generation recorded yet. Send a message, or preview the context that would be sent right now.</div>
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Preview current context</button>`}
+      ${auxSection}
     </div>`;
   const L = manifest.layers;
   // One number per card, one source per panel: when /tokenize gave us a real
   // total, every card shows its real count (est fallback for empty blocks);
   // otherwise all cards are estimates. The greeting is the first chat message,
-  // so it counts toward History here; budgeting still treats it as pinned.
+  // so it counts toward History here — tokens AND cap both include it (it's
+  // budget-pinned), keeping the card's % honest.
   const exact = realCounts?.total != null;
   const tok = (est, real) => (exact ? (real ?? est) : est);
   const total = tok(manifest.totalTokens, realCounts?.total);
@@ -2185,6 +2400,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
   const hasGreeting = (L.greeting?.tokens ?? 0) > 0;
   const histTok = tok(L.history.tokens + (L.greeting?.tokens ?? 0),
     exact ? (realCounts?.history ?? 0) + (realCounts?.greeting ?? 0) : null);
+  const histCap = L.history.cap + (L.greeting?.tokens ?? 0);
   const keptNote = L.history.dropped
     ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
     : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
@@ -2208,8 +2424,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
         meta=${`(${manifest.budget > 0 ? Math.round((total / manifest.budget) * 100) : 0}%)`}>
         <${LayerCard} name="Static"
           tokens=${tok(L.static.tokens, realCounts?.static)} cap=${L.static.cap}
-          note="platform prompt · scenario · persona"
-          about="Platform system prompt, scenario instructions and backstory, and the persona — always sent in full." />
+          note="platform + speaker/tools prompts · scenario · persona · directives"
+          about="Platform system prompt, multi-speaker and tool-calling instructions, scenario instructions and backstory, persona, per-chat custom instructions, author's note, and the length directive — always sent in full." />
         <${LayerCard} name="Lore"
           tokens=${tok(L.lore.tokens, realCounts?.lore)} cap=${L.lore.cap}
           note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} not` : ''}`}
@@ -2220,9 +2436,9 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             ? `${L.memory.memories.length} injected · ${memPinned} pinned` : 'no memories yet'}
           about="Pinned memories first, then recent ones, trimmed to budget; new summaries are written as the chat grows." />
         <${LayerCard} name="History"
-          tokens=${histTok} cap=${L.history.cap}
+          tokens=${histTok} cap=${histCap}
           note=${hasGreeting ? `greeting + ${keptNote}` : keptNote}
-          about="Chat messages, oldest dropped first under pressure; the greeting is pinned and always sent." />
+          about="Chat messages, oldest dropped first under pressure; the greeting is pinned and always sent — its tokens count toward both sides of this card." />
         <${LayerCard} name="Total"
           tokens=${total} cap=${manifest.budget}
           about="Everything sent to the model. Budget = context length minus the response reserve." />
@@ -2261,6 +2477,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
             preview=${m.preview} content=${m.text} />`)}
       <//>
+      ${auxSection}
       ${(manifest.toolCalls ?? []).length > 0 && html`
         <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
           ${manifest.toolCalls.map((t, i) => html`
@@ -2276,7 +2493,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
 // ============================================================================
 // COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
 // ============================================================================
-function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat }) {
+function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat, memoryEvery }) {
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } });
@@ -2284,7 +2501,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat 
     <div>
       <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
         <span class="hint" style=${{ flex: 1 }}>
-          ${memories.length}/${MEMORY_CAP} memories · auto-summary every ${MEMORY_EVERY} messages
+          ${memories.length}/${MEMORY_CAP} memories · auto-summary every ${memoryEvery ?? MEMORY_EVERY} messages
         </span>
         <button class="btn small" disabled=${summarizing} onClick=${onSummarize}>
           ${summarizing ? 'Summarizing…' : 'Summarize now'}</button>
@@ -2941,8 +3158,8 @@ function ContextMenu({ x, y, items, onClose }) {
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas, scenario,
-                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat }) {
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario,
+                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -2951,9 +3168,9 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
       </div>
       <div class="pbody">
         ${tab === 'inspector' && html`
-          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
         ${tab === 'chat' && html`
           <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
@@ -2969,9 +3186,9 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
 // ============================================================================
 const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
 
-function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
+function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog,
                       onUpdateChat, onSummarize, summarizing,
-                      width, onDragStart, onResetWidth, onClose, dateFormat }) {
+                      width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
@@ -2985,9 +3202,9 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview,
       <div class="pbody">
         ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
         ${chat && tab === 'inspector' && html`
-          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} />`}
+          <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${chat && tab === 'memory' && html`
-          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
+          <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
       </div>
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
@@ -3015,6 +3232,28 @@ function newChat(scenario, personaId, dateFormat) {
   };
 }
 
+// User-defined tools (Settings → Features): advertised to the model after the
+// built-ins, executed by action kind in applyToolCall. Built-in names are
+// reserved — a custom def can never shadow register_character / add_lore.
+const enabledCustomTools = (st) => (st.customTools ?? []).filter(t => t?.name?.trim()
+  && t.name !== 'register_character' && t.name !== 'add_lore');
+
+// Full system-prompt head: platform prompt + enabled feature prompts (multi-
+// speaker, tool calling + user-defined tools). Shared by runGeneration and
+// the inspector preview so both count exactly what a generation would send.
+function buildPlatformPrompt(st) {
+  const defs = enabledCustomTools(st);
+  const customSection = defs.length
+    ? '\nAdditional tools:\n' + defs.map(t =>
+        `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
+    : '';
+  return [
+    st.platformPrompt,
+    ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
+    ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+  ].filter(s => s?.trim()).join('\n\n');
+}
+
 // Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
 // when unset, a pane auto-sizes to consume the slack margin around the chat
 // column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
@@ -3030,6 +3269,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const settings = useMemo(() => ({
     ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
     samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
+    layerCaps: { ...DEFAULT_SETTINGS.layerCaps, ...(settingsRaw?.layerCaps ?? {}) },
   }), [settingsRaw]);
   // Settings sync via server storage: Meta/app.settings is the shared source
   // when server storage is active (server wins at boot, last-write-wins after).
@@ -3070,6 +3310,23 @@ function Main({ storage, storageKind, storageFailed }) {
   const [auxBusy, setAuxBusy] = useState(null); // 'improve' | 'recap' | 'memory' | null
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
+
+  // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
+  // separate requests that never touch the main context, so the manifest can't
+  // show them. Keep a short session log (last 12) of what was sent and what
+  // came back; the Inspector renders it as its own section.
+  const [auxLog, setAuxLog] = useState([]);
+  async function auxLogged(kind, args) {
+    const entry = { kind, at: Date.now(), model: args.model ?? '', system: args.system ?? '', user: args.user ?? '' };
+    try {
+      const out = await auxCall(args);
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
+      return out;
+    } catch (e) {
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: String(e?.message ?? e) }]);
+      throw e;
+    }
+  }
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
@@ -3286,31 +3543,33 @@ function Main({ storage, storageKind, storageFailed }) {
   // Shared memory-card generation (auto-summarize + /memory). Returns the
   // ≤500-char note text, or null when there's nothing to summarize. Throws on
   // endpoint/HTTP errors.
-  async function generateMemory(chatObj, messageCount = MEMORY_EVERY) {
+  async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const every = st.memoryEvery ?? MEMORY_EVERY;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const recent = path.slice(-messageCount)
+    const recent = path.slice(-(messageCount ?? every))
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return null;
-    const out = await auxCall({
+    const maxChars = st.memoryMaxChars ?? 500;
+    const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-      system: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.',
-      user: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):`,
-      maxTokens: 220, temperature: 0.3, stop: st.stopStrings,
+      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName),
+      user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
+      maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     });
-    return out.slice(0, 500) || null;
+    return out.slice(0, maxChars) || null;
   }
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
-      const text = await generateMemory(chatObj, MEMORY_EVERY);
+      const text = await generateMemory(chatObj);
       if (text) {
         const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-        const store = addMemory(chatObj.memoryStore, text);
+        const store = addMemory(chatObj.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP);
         saveChat({ ...chatObj, memoryStore: { ...store, cursor: pathLen } });
       }
     } catch (e) {
@@ -3320,8 +3579,9 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
   function maybeSummarize(chatObj) {
+    const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
     const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= MEMORY_EVERY) summarizeNow(chatObj);
+    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
   // ---- emergent lore extraction (v2.0d) ----
@@ -3338,20 +3598,21 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!model) return;
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
     const pathLen = path.length;
-    if (pathLen - (chatObj.emergentCursor ?? 0) < MEMORY_EVERY) return;
+    const every = st.memoryEvery ?? MEMORY_EVERY;
+    if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
     const advance = (c) => saveChat({ ...c, emergentCursor: pathLen });
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
-    const recent = path.slice(-MEMORY_EVERY)
+    const recent = path.slice(-every)
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
     const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
-      const out = await auxCall({
+      const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.',
+        system: st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT,
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
-        maxTokens: 400, temperature: 0.3, stop: st.stopStrings,
+        maxTokens: st.loreExtractMaxTokens ?? 400, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       });
       const m = out.match(/\[[\s\S]*\]/);
       const proposals = m ? JSON.parse(m[0]) : [];
@@ -3365,7 +3626,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }))
         .filter(p => p.title && p.content
           && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
-        .slice(0, 3);
+        .slice(0, Math.max(1, st.loreExtractMax ?? 3));
       if (fresh.length) {
         let work = chatObj;
         if (mode === 'auto') {
@@ -3398,14 +3659,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
-    // User-defined tools (v2.0d): advertised after the built-ins in the tools
-    // prompt; executed by action kind in applyToolCall. Built-in names reserved.
-    const customDefs = (st.customTools ?? []).filter(t => t?.name?.trim()
-      && t.name !== 'register_character' && t.name !== 'add_lore');
-    const customSection = customDefs.length
-      ? '\nAdditional tools:\n' + customDefs.map(t =>
-          `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
-      : '';
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -3442,11 +3695,7 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     let { messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
-      platformPrompt: [
-        st.platformPrompt,
-        ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
-        ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
-      ].filter(s => s?.trim()).join('\n\n'),
+      platformPrompt: buildPlatformPrompt(st),
       preActivated, pov,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
@@ -3467,10 +3716,11 @@ function Main({ storage, storageKind, storageFailed }) {
         : null;
       if (headTok != null) {
         const headroom = man.budget - headTok;
-        let estHist = hist.reduce((t, m) => t + estimateTokens(m.content), 0);
+        const estT = (t) => estimateTokens(t, st.tokenChars);
+        let estHist = hist.reduce((t, m) => t + estT(m.content), 0);
         let extraDrops = 0;
         while (estHist > headroom && hist.length > 1) {
-          estHist -= estimateTokens(hist.shift().content);
+          estHist -= estT(hist.shift().content);
           extraDrops++;
         }
         if (extraDrops > 0) {
@@ -3478,7 +3728,7 @@ function Main({ storage, storageKind, storageFailed }) {
           man.layers.history.kept -= extraDrops;
           man.layers.history.dropped += extraDrops;
           man.layers.history.tokens = estHist;
-          man.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+          man.totalTokens = messages.reduce((t, m) => t + estT(m.content), 0);
           man.warnings.push(`Exact token count left less room than the estimate — dropped ${extraDrops} more oldest message(s).`);
         }
         if (headTok > man.budget)
@@ -3556,7 +3806,7 @@ function Main({ storage, storageKind, storageFailed }) {
       for await (const chunk of openaiChatStream({
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
-        tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
+        tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: st.stopStrings,
       })) {
         if (chunk.done) { sawDone = true; continue; }
         if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
@@ -3607,10 +3857,11 @@ function Main({ storage, storageKind, storageFailed }) {
           // being tuned. TODO: remove this console.debug once format
           // compliance is confirmed across models.
           console.debug('FictionPad tool calls:', parsed.calls.map(c => ({ raw: c.raw, parsed: { name: c.name, args: c.args }, error: c.error })));
+          const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
           const applied = applyToolCalls(work, parsed.calls, {
-            nodeId, now: Date.now(),
+            nodeId, now: Date.now(), cap: callCap,
             queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
-            customTools: customDefs,
+            customTools: enabledCustomTools(st),
           });
           toolResults = applied.results;
           if (applied.chat !== work) { work = applied.chat; upsertChat(work.id, work); }
@@ -3619,7 +3870,7 @@ function Main({ storage, storageKind, storageFailed }) {
           }));
           const capped = applied.results.filter(r => r.note === 'call cap reached').length;
           const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
-          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${TOOL_CALL_CAP}.`);
+          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
           if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
           setManifest({ ...man });
         }
@@ -3665,23 +3916,27 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) return;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const count = Math.max(1, Math.min(5, st.suggestionsCount ?? 2));
+    const words = Math.max(5, Math.min(60, st.suggestionsWords ?? 20));
+    const sysPrompt = subUser(st.suggestionsPrompt || DEFAULT_SUGGESTIONS_PROMPT, pName)
+      .replaceAll('{{count}}', String(count)).replaceAll('{{words}}', String(words));
     const swipeIdx = chatObj.messages[nodeId]?.activeSwipe ?? 0;
-    const recent = getActivePath(chatObj.messages, nodeId).slice(-6)
+    const recent = getActivePath(chatObj.messages, nodeId).slice(-(st.suggestionsDepth ?? 6))
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     const key = { chatId: chatObj.id, nodeId, swipe: swipeIdx };
     setSuggestions({ ...key, loading: true, items: null });
     try {
-      const out = await auxCall({
+      const out = await auxLogged('suggestions', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: `You suggest what the user's character (${pName}) might say or do next in this roleplay. Reply with exactly 2 options as a numbered list, one per line, at most 20 words each, written in first person as ${pName}. In-character; do not narrate other characters' actions; no commentary.`,
-        user: `Recent scene:\n\n${recent}\n\nTwo options for ${pName}:`,
-        maxTokens: 120, temperature: 0.9, stop: st.stopStrings,
+        system: sysPrompt,
+        user: `Recent scene:\n\n${recent}\n\n${count === 1 ? 'One option' : `${count} options`} for ${pName}:`,
+        maxTokens: Math.min(500, 60 + count * words * 2), temperature: st.suggestionsTemp ?? 0.9, stop: st.stopStrings,
       });
       const items = out.split('\n')
         .map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim())
-        .filter(l => l.length > 0 && l.split(/\s+/).length <= 30 && !/^\d+$/.test(l) && !/:$/.test(l))
-        .slice(0, 2);
+        .filter(l => l.length > 0 && l.split(/\s+/).length <= Math.ceil(words * 1.5) && !/^\d+$/.test(l) && !/:$/.test(l))
+        .slice(0, count);
       setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId)
         ? (items.length ? { ...key, loading: false, items } : null) : s);
     } catch {
@@ -3788,11 +4043,11 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     setAuxBusy('improve');
     try {
-      const out = await auxCall({
+      const out = await auxLogged('improve', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: `Rewrite the user's draft in first person as ${pName}${personaDesc}, matching the roleplay's tone. Output only the rewritten text.`,
+        system: subUser(st.improvePrompt || DEFAULT_IMPROVE_PROMPT, `${pName}${personaDesc}`),
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
-        maxTokens: 400, temperature: 0.7, stop: st.stopStrings,
+        maxTokens: st.improveMaxTokens ?? 400, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
       });
       if (!out) throw new Error('empty response from the model');
       setComposerInject({ text: out, nonce: Date.now() });
@@ -3814,11 +4069,11 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
     setAuxBusy('recap');
     try {
-      const out = await auxCall({
+      const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.',
+        system: st.recapPrompt || DEFAULT_RECAP_PROMPT,
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
-        maxTokens: 700, temperature: 0.4, stop: st.stopStrings,
+        maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       });
       if (!out) throw new Error('empty response from the model');
       setModal({ kind: 'recap', text: out });
@@ -3835,7 +4090,7 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const text = await generateMemory(c, n);
       if (!text) { setComposerInject({ hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
-      const store = addMemory(c.memoryStore, text); // manual: cursor untouched
+      const store = addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP); // manual: cursor untouched
       saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
       setComposerInject({ hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
     } catch (e) {
@@ -3975,11 +4230,19 @@ function Main({ storage, storageKind, storageFailed }) {
   const onPreview = () => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
+    const st = ref.current.settings;
+    // Same platform-prompt composition as runGeneration so the preview counts
+    // the speaker/tools prompts too. Semantic activation is NOT rerun here
+    // (async embeddings) — the preview is keyword-trigger lore only.
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: ref.current.settings, platformPrompt: ref.current.settings.platformPrompt,
+      chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
     });
+    // Surface the keyword-only caveat when smart pieces could have fired.
+    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c)
+        .some(p => p && p.enabled !== false && !p.pinned && p.smart))
+      man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
     setManifest(man);
     setLastMessages(messages);
   };
@@ -4049,8 +4312,8 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
       <${RightDrawer}
         chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
-        dateFormat=${settings.dateFormat}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
+        dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
@@ -4083,7 +4346,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSaveMemory=${() => {
           const c = ref.current.chats[ui.chatId];
           if (c) {
-            const store = addMemory(c.memoryStore, modal.text);
+            const store = addMemory(c.memoryStore, modal.text, Date.now(), settings.memoryCap ?? MEMORY_CAP);
             saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
           }
         }} /><//>`}
@@ -4091,9 +4354,9 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="chat panel"><${ChatPanelModal}
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
         personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
-        dateFormat=${settings.dateFormat}
+        dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
@@ -4217,4 +4480,4 @@ function App() {
 
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, html };
+  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS };

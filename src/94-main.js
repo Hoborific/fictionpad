@@ -18,6 +18,28 @@ function newChat(scenario, personaId, dateFormat) {
   };
 }
 
+// User-defined tools (Settings → Features): advertised to the model after the
+// built-ins, executed by action kind in applyToolCall. Built-in names are
+// reserved — a custom def can never shadow register_character / add_lore.
+const enabledCustomTools = (st) => (st.customTools ?? []).filter(t => t?.name?.trim()
+  && t.name !== 'register_character' && t.name !== 'add_lore');
+
+// Full system-prompt head: platform prompt + enabled feature prompts (multi-
+// speaker, tool calling + user-defined tools). Shared by runGeneration and
+// the inspector preview so both count exactly what a generation would send.
+function buildPlatformPrompt(st) {
+  const defs = enabledCustomTools(st);
+  const customSection = defs.length
+    ? '\nAdditional tools:\n' + defs.map(t =>
+        `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
+    : '';
+  return [
+    st.platformPrompt,
+    ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
+    ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+  ].filter(s => s?.trim()).join('\n\n');
+}
+
 // Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
 // when unset, a pane auto-sizes to consume the slack margin around the chat
 // column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
@@ -33,6 +55,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const settings = useMemo(() => ({
     ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
     samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
+    layerCaps: { ...DEFAULT_SETTINGS.layerCaps, ...(settingsRaw?.layerCaps ?? {}) },
   }), [settingsRaw]);
   // Settings sync via server storage: Meta/app.settings is the shared source
   // when server storage is active (server wins at boot, last-write-wins after).
@@ -73,6 +96,23 @@ function Main({ storage, storageKind, storageFailed }) {
   const [auxBusy, setAuxBusy] = useState(null); // 'improve' | 'recap' | 'memory' | null
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
+
+  // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
+  // separate requests that never touch the main context, so the manifest can't
+  // show them. Keep a short session log (last 12) of what was sent and what
+  // came back; the Inspector renders it as its own section.
+  const [auxLog, setAuxLog] = useState([]);
+  async function auxLogged(kind, args) {
+    const entry = { kind, at: Date.now(), model: args.model ?? '', system: args.system ?? '', user: args.user ?? '' };
+    try {
+      const out = await auxCall(args);
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
+      return out;
+    } catch (e) {
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: String(e?.message ?? e) }]);
+      throw e;
+    }
+  }
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
@@ -289,31 +329,33 @@ function Main({ storage, storageKind, storageFailed }) {
   // Shared memory-card generation (auto-summarize + /memory). Returns the
   // ≤500-char note text, or null when there's nothing to summarize. Throws on
   // endpoint/HTTP errors.
-  async function generateMemory(chatObj, messageCount = MEMORY_EVERY) {
+  async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const every = st.memoryEvery ?? MEMORY_EVERY;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const recent = path.slice(-messageCount)
+    const recent = path.slice(-(messageCount ?? every))
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return null;
-    const out = await auxCall({
+    const maxChars = st.memoryMaxChars ?? 500;
+    const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-      system: 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.',
-      user: `Recent conversation:\n\n${recent}\n\nMemory note (max 500 characters):`,
-      maxTokens: 220, temperature: 0.3, stop: st.stopStrings,
+      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName),
+      user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
+      maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     });
-    return out.slice(0, 500) || null;
+    return out.slice(0, maxChars) || null;
   }
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
-      const text = await generateMemory(chatObj, MEMORY_EVERY);
+      const text = await generateMemory(chatObj);
       if (text) {
         const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-        const store = addMemory(chatObj.memoryStore, text);
+        const store = addMemory(chatObj.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP);
         saveChat({ ...chatObj, memoryStore: { ...store, cursor: pathLen } });
       }
     } catch (e) {
@@ -323,8 +365,9 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
   function maybeSummarize(chatObj) {
+    const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
     const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= MEMORY_EVERY) summarizeNow(chatObj);
+    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
   // ---- emergent lore extraction (v2.0d) ----
@@ -341,20 +384,21 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!model) return;
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
     const pathLen = path.length;
-    if (pathLen - (chatObj.emergentCursor ?? 0) < MEMORY_EVERY) return;
+    const every = st.memoryEvery ?? MEMORY_EVERY;
+    if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
     const advance = (c) => saveChat({ ...c, emergentCursor: pathLen });
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
-    const recent = path.slice(-MEMORY_EVERY)
+    const recent = path.slice(-every)
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
     const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
-      const out = await auxCall({
+      const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.',
+        system: st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT,
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
-        maxTokens: 400, temperature: 0.3, stop: st.stopStrings,
+        maxTokens: st.loreExtractMaxTokens ?? 400, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       });
       const m = out.match(/\[[\s\S]*\]/);
       const proposals = m ? JSON.parse(m[0]) : [];
@@ -368,7 +412,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }))
         .filter(p => p.title && p.content
           && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
-        .slice(0, 3);
+        .slice(0, Math.max(1, st.loreExtractMax ?? 3));
       if (fresh.length) {
         let work = chatObj;
         if (mode === 'auto') {
@@ -401,14 +445,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
-    // User-defined tools (v2.0d): advertised after the built-ins in the tools
-    // prompt; executed by action kind in applyToolCall. Built-in names reserved.
-    const customDefs = (st.customTools ?? []).filter(t => t?.name?.trim()
-      && t.name !== 'register_character' && t.name !== 'add_lore');
-    const customSection = customDefs.length
-      ? '\nAdditional tools:\n' + customDefs.map(t =>
-          `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
-      : '';
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -445,11 +481,7 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     let { messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
-      platformPrompt: [
-        st.platformPrompt,
-        ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
-        ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
-      ].filter(s => s?.trim()).join('\n\n'),
+      platformPrompt: buildPlatformPrompt(st),
       preActivated, pov,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
@@ -470,10 +502,11 @@ function Main({ storage, storageKind, storageFailed }) {
         : null;
       if (headTok != null) {
         const headroom = man.budget - headTok;
-        let estHist = hist.reduce((t, m) => t + estimateTokens(m.content), 0);
+        const estT = (t) => estimateTokens(t, st.tokenChars);
+        let estHist = hist.reduce((t, m) => t + estT(m.content), 0);
         let extraDrops = 0;
         while (estHist > headroom && hist.length > 1) {
-          estHist -= estimateTokens(hist.shift().content);
+          estHist -= estT(hist.shift().content);
           extraDrops++;
         }
         if (extraDrops > 0) {
@@ -481,7 +514,7 @@ function Main({ storage, storageKind, storageFailed }) {
           man.layers.history.kept -= extraDrops;
           man.layers.history.dropped += extraDrops;
           man.layers.history.tokens = estHist;
-          man.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
+          man.totalTokens = messages.reduce((t, m) => t + estT(m.content), 0);
           man.warnings.push(`Exact token count left less room than the estimate — dropped ${extraDrops} more oldest message(s).`);
         }
         if (headTok > man.budget)
@@ -559,7 +592,7 @@ function Main({ storage, storageKind, storageFailed }) {
       for await (const chunk of openaiChatStream({
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
         samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
-        tokenProbs: st.tokenProbs !== false, logitBias, stop: st.stopStrings,
+        tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: st.stopStrings,
       })) {
         if (chunk.done) { sawDone = true; continue; }
         if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
@@ -610,10 +643,11 @@ function Main({ storage, storageKind, storageFailed }) {
           // being tuned. TODO: remove this console.debug once format
           // compliance is confirmed across models.
           console.debug('FictionPad tool calls:', parsed.calls.map(c => ({ raw: c.raw, parsed: { name: c.name, args: c.args }, error: c.error })));
+          const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
           const applied = applyToolCalls(work, parsed.calls, {
-            nodeId, now: Date.now(),
+            nodeId, now: Date.now(), cap: callCap,
             queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
-            customTools: customDefs,
+            customTools: enabledCustomTools(st),
           });
           toolResults = applied.results;
           if (applied.chat !== work) { work = applied.chat; upsertChat(work.id, work); }
@@ -622,7 +656,7 @@ function Main({ storage, storageKind, storageFailed }) {
           }));
           const capped = applied.results.filter(r => r.note === 'call cap reached').length;
           const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
-          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${TOOL_CALL_CAP}.`);
+          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
           if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
           setManifest({ ...man });
         }
@@ -668,23 +702,27 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) return;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const count = Math.max(1, Math.min(5, st.suggestionsCount ?? 2));
+    const words = Math.max(5, Math.min(60, st.suggestionsWords ?? 20));
+    const sysPrompt = subUser(st.suggestionsPrompt || DEFAULT_SUGGESTIONS_PROMPT, pName)
+      .replaceAll('{{count}}', String(count)).replaceAll('{{words}}', String(words));
     const swipeIdx = chatObj.messages[nodeId]?.activeSwipe ?? 0;
-    const recent = getActivePath(chatObj.messages, nodeId).slice(-6)
+    const recent = getActivePath(chatObj.messages, nodeId).slice(-(st.suggestionsDepth ?? 6))
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     const key = { chatId: chatObj.id, nodeId, swipe: swipeIdx };
     setSuggestions({ ...key, loading: true, items: null });
     try {
-      const out = await auxCall({
+      const out = await auxLogged('suggestions', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: `You suggest what the user's character (${pName}) might say or do next in this roleplay. Reply with exactly 2 options as a numbered list, one per line, at most 20 words each, written in first person as ${pName}. In-character; do not narrate other characters' actions; no commentary.`,
-        user: `Recent scene:\n\n${recent}\n\nTwo options for ${pName}:`,
-        maxTokens: 120, temperature: 0.9, stop: st.stopStrings,
+        system: sysPrompt,
+        user: `Recent scene:\n\n${recent}\n\n${count === 1 ? 'One option' : `${count} options`} for ${pName}:`,
+        maxTokens: Math.min(500, 60 + count * words * 2), temperature: st.suggestionsTemp ?? 0.9, stop: st.stopStrings,
       });
       const items = out.split('\n')
         .map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim())
-        .filter(l => l.length > 0 && l.split(/\s+/).length <= 30 && !/^\d+$/.test(l) && !/:$/.test(l))
-        .slice(0, 2);
+        .filter(l => l.length > 0 && l.split(/\s+/).length <= Math.ceil(words * 1.5) && !/^\d+$/.test(l) && !/:$/.test(l))
+        .slice(0, count);
       setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId)
         ? (items.length ? { ...key, loading: false, items } : null) : s);
     } catch {
@@ -791,11 +829,11 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     setAuxBusy('improve');
     try {
-      const out = await auxCall({
+      const out = await auxLogged('improve', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: `Rewrite the user's draft in first person as ${pName}${personaDesc}, matching the roleplay's tone. Output only the rewritten text.`,
+        system: subUser(st.improvePrompt || DEFAULT_IMPROVE_PROMPT, `${pName}${personaDesc}`),
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
-        maxTokens: 400, temperature: 0.7, stop: st.stopStrings,
+        maxTokens: st.improveMaxTokens ?? 400, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
       });
       if (!out) throw new Error('empty response from the model');
       setComposerInject({ text: out, nonce: Date.now() });
@@ -817,11 +855,11 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
     setAuxBusy('recap');
     try {
-      const out = await auxCall({
+      const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.',
+        system: st.recapPrompt || DEFAULT_RECAP_PROMPT,
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
-        maxTokens: 700, temperature: 0.4, stop: st.stopStrings,
+        maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       });
       if (!out) throw new Error('empty response from the model');
       setModal({ kind: 'recap', text: out });
@@ -838,7 +876,7 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const text = await generateMemory(c, n);
       if (!text) { setComposerInject({ hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
-      const store = addMemory(c.memoryStore, text); // manual: cursor untouched
+      const store = addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP); // manual: cursor untouched
       saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
       setComposerInject({ hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
     } catch (e) {
@@ -978,11 +1016,19 @@ function Main({ storage, storageKind, storageFailed }) {
   const onPreview = () => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
+    const st = ref.current.settings;
+    // Same platform-prompt composition as runGeneration so the preview counts
+    // the speaker/tools prompts too. Semantic activation is NOT rerun here
+    // (async embeddings) — the preview is keyword-trigger lore only.
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: ref.current.settings, platformPrompt: ref.current.settings.platformPrompt,
+      chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
     });
+    // Surface the keyword-only caveat when smart pieces could have fired.
+    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c)
+        .some(p => p && p.enabled !== false && !p.pinned && p.smart))
+      man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
     setManifest(man);
     setLastMessages(messages);
   };
@@ -1052,8 +1098,8 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
       <${RightDrawer}
         chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
-        dateFormat=${settings.dateFormat}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
+        dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
@@ -1086,7 +1132,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSaveMemory=${() => {
           const c = ref.current.chats[ui.chatId];
           if (c) {
-            const store = addMemory(c.memoryStore, modal.text);
+            const store = addMemory(c.memoryStore, modal.text, Date.now(), settings.memoryCap ?? MEMORY_CAP);
             saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
           }
         }} /><//>`}
@@ -1094,9 +1140,9 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="chat panel"><${ChatPanelModal}
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
         personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
-        dateFormat=${settings.dateFormat}
+        dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}

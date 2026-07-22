@@ -53,18 +53,32 @@ function LayerCard({ name, tokens, cap, note, about }) {
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [] }) {
   const [showInactive, setShowInactive] = useState(false);
+  // Aux calls (memory summaries, lore extraction, suggestions, /improve,
+  // /recap) are separate requests that never enter the main context, so the
+  // manifest can't show them. Session log (last 12), newest first.
+  const auxSection = (auxLog ?? []).length > 0 && html`
+    <${InspectorSection} title="Aux calls" count=${auxLog.length}>
+      ${[...auxLog].reverse().map((a, i) => html`
+        <${InspectorRow} key=${`${a.at}-${i}`} dimmed=${!a.ok}
+          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'chat' : 'pinned' }]}
+          title=${a.kind} meta=${`${new Date(a.at).toLocaleTimeString()} · ~${estimateTokens(`${a.system}\n${a.user}`)}t in`}
+          preview=${toPreview(a.out, 140)}
+          content=${`[system]\n${a.system}\n\n[user]\n${a.user}\n\n[${a.ok ? 'response' : 'error'}]\n${a.out}`} />`)}
+    <//>`;
   if (!manifest?.layers) return html`
     <div>
       <div class="hint">No generation recorded yet. Send a message, or preview the context that would be sent right now.</div>
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Preview current context</button>`}
+      ${auxSection}
     </div>`;
   const L = manifest.layers;
   // One number per card, one source per panel: when /tokenize gave us a real
   // total, every card shows its real count (est fallback for empty blocks);
   // otherwise all cards are estimates. The greeting is the first chat message,
-  // so it counts toward History here; budgeting still treats it as pinned.
+  // so it counts toward History here — tokens AND cap both include it (it's
+  // budget-pinned), keeping the card's % honest.
   const exact = realCounts?.total != null;
   const tok = (est, real) => (exact ? (real ?? est) : est);
   const total = tok(manifest.totalTokens, realCounts?.total);
@@ -72,6 +86,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
   const hasGreeting = (L.greeting?.tokens ?? 0) > 0;
   const histTok = tok(L.history.tokens + (L.greeting?.tokens ?? 0),
     exact ? (realCounts?.history ?? 0) + (realCounts?.greeting ?? 0) : null);
+  const histCap = L.history.cap + (L.greeting?.tokens ?? 0);
   const keptNote = L.history.dropped
     ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
     : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
@@ -95,8 +110,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
         meta=${`(${manifest.budget > 0 ? Math.round((total / manifest.budget) * 100) : 0}%)`}>
         <${LayerCard} name="Static"
           tokens=${tok(L.static.tokens, realCounts?.static)} cap=${L.static.cap}
-          note="platform prompt · scenario · persona"
-          about="Platform system prompt, scenario instructions and backstory, and the persona — always sent in full." />
+          note="platform + speaker/tools prompts · scenario · persona · directives"
+          about="Platform system prompt, multi-speaker and tool-calling instructions, scenario instructions and backstory, persona, per-chat custom instructions, author's note, and the length directive — always sent in full." />
         <${LayerCard} name="Lore"
           tokens=${tok(L.lore.tokens, realCounts?.lore)} cap=${L.lore.cap}
           note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} not` : ''}`}
@@ -107,9 +122,9 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             ? `${L.memory.memories.length} injected · ${memPinned} pinned` : 'no memories yet'}
           about="Pinned memories first, then recent ones, trimmed to budget; new summaries are written as the chat grows." />
         <${LayerCard} name="History"
-          tokens=${histTok} cap=${L.history.cap}
+          tokens=${histTok} cap=${histCap}
           note=${hasGreeting ? `greeting + ${keptNote}` : keptNote}
-          about="Chat messages, oldest dropped first under pressure; the greeting is pinned and always sent." />
+          about="Chat messages, oldest dropped first under pressure; the greeting is pinned and always sent — its tokens count toward both sides of this card." />
         <${LayerCard} name="Total"
           tokens=${total} cap=${manifest.budget}
           about="Everything sent to the model. Budget = context length minus the response reserve." />
@@ -148,6 +163,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
             preview=${m.preview} content=${m.text} />`)}
       <//>
+      ${auxSection}
       ${(manifest.toolCalls ?? []).length > 0 && html`
         <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
           ${manifest.toolCalls.map((t, i) => html`

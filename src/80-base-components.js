@@ -41,3 +41,27 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
     </div>`;
 }
 
+// Number input that allows free typing and commits a clamped value on
+// blur/Enter — clamping on every keystroke fights mid-edit input (typing "3"
+// into a min-5 field would snap to 5 before the "0" for "30" arrives).
+// While focused, the text is authoritative; unfocused, it follows the prop.
+function NumInput({ value, min, max, step, fallback, onCommit }) {
+  const [text, setText] = useState(String(value ?? ''));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => { if (!focused) setText(String(value ?? '')); }, [value, focused]);
+  const commit = () => {
+    const raw = text.trim();
+    let n = raw === '' ? NaN : Number(raw);
+    if (!Number.isFinite(n)) n = fallback ?? value ?? 0;
+    if (min != null) n = Math.max(min, n);
+    if (max != null) n = Math.min(max, n);
+    if (n !== value) onCommit(n);
+    setText(String(n));
+  };
+  return html`<input type="number" min=${min} max=${max} step=${step} value=${text}
+    onFocus=${() => setFocused(true)}
+    onInput=${(e) => setText(e.target.value)}
+    onBlur=${() => { setFocused(false); commit(); }}
+    onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
+}
+
