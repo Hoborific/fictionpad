@@ -7,8 +7,11 @@
 // A straight quote only OPENS dialogue when it looks like one: not after a
 // letter/digit (5ft8", rock"in') and not before whitespace/end — otherwise a
 // stray inch-mark would pair with the next real quote and eat the text in
-// between. Unterminated quotes are left raw. Curly “…” pairs unambiguously.
-function wrapDialogue(md) {
+// between. Unterminated quotes are left raw — except with closeOpen (live
+// streaming), where an opener with no closer yet wraps to end-of-line so the
+// partial sentence colours as it arrives; the final render shows the raw truth.
+// Curly “…” pairs unambiguously.
+function wrapDialogue(md, closeOpen = false) {
   let inFence = false;
   return String(md ?? '').split('\n').map(line => {
     if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
@@ -21,12 +24,32 @@ function wrapDialogue(md) {
         && !/[\s"“]/.test(line[i + 1] ?? ' '));
       if (!opens) { out += ch; i++; continue; }
       const end = line.indexOf(ch === '“' ? '”' : '"', i + 1);
-      if (end === -1) { out += ch; i++; continue; }
+      if (end === -1) {
+        if (closeOpen) { out += `<span class="dialogue">${line.slice(i)}</span>`; break; }
+        out += ch; i++; continue;
+      }
       out += `<span class="dialogue">${line.slice(i, end + 1)}</span>`;
       i = end + 1;
     }
     return out;
   }).join('\n');
+}
+
+// Streaming-only display tweak: tentatively close unterminated emphasis so a
+// partial reply formats as it grows (`*she wav` renders italic immediately).
+// Only closes when real content follows the opener — a lone trailing `*` stays
+// literal instead of flickering into an empty `**`. The final (non-streaming)
+// render uses the raw text, so if the model never closes the marker the
+// formatting simply snaps back off.
+function autoCloseProse(text) {
+  const s = String(text ?? '');
+  const scan = s.replace(/\\./g, 'x'); // escaped chars can't delimit emphasis
+  let out = s;
+  if ((scan.match(/\*\*/g) ?? []).length % 2 === 1
+    && /[^\s*]/.test(scan.slice(scan.lastIndexOf('**') + 2))) out += '**';
+  if ((scan.replace(/\*\*/g, '').match(/\*/g) ?? []).length % 2 === 1
+    && /[^\s*]/.test(scan.slice(scan.lastIndexOf('*') + 1))) out += '*';
+  return out;
 }
 
 // Heuristic speaker attribution: does the text start with a known character
@@ -42,19 +65,23 @@ function detectSpeaker(text, names) {
   return names.find(n => n.toLowerCase() === candidate) ?? null;
 }
 
-const characterNamesOf = (scenario) =>
-  (scenario?.lorePieces ?? [])
+const characterNamesOf = (scenario, chat = null) =>
+  mergedLorePieces(scenario, chat)
     .filter(p => p.type === 'character' && p.enabled !== false)
     .map(p => p.title?.trim())
     .filter(Boolean);
 
 // Remove the leading `Name:` / `**Name:**` / `*Name*` speaker prefix for
 // display — the meta row already labels who is speaking, so showing the
-// prefix in the bubble too breaks immersion.
+// prefix in the bubble too breaks immersion. Stars AFTER the colon are only
+// stripped when they close a bold prefix (`**Name:**` — stars followed by
+// whitespace/EOL), never an action's opening star: in `Mia:\n*does a thing*`
+// or `Mia: *waves*` the old `\s*\*{0,2}\s*` crossed the newline / ate the `*`
+// and left the emphasis unpaired.
 function stripSpeakerPrefix(text, name) {
   if (!text || !name) return text;
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = new RegExp(`^\\s*\\*{0,2}\\s*${esc}\\s*\\*{0,2}\\s*:\\s*`, 'i').exec(text)
+  const m = new RegExp(`^\\s*\\*{0,2}\\s*${esc}\\s*\\*{0,2}\\s*:(?:[ \\t]*\\*{1,2}(?=\\s|$))?\\s*`, 'i').exec(text)
         ?? new RegExp(`^\\s*\\*{1,2}\\s*${esc}\\s*\\*{1,2}\\s*`, 'i').exec(text);
   return m ? text.slice(m[0].length) : text;
 }

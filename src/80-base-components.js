@@ -17,10 +17,13 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-function Markdown({ text, prose = false }) {
-  const rendered = useMemo(
-    () => marked.parse(prose ? wrapDialogue(text ?? '') : (text ?? '')),
-    [text, prose]);
+function Markdown({ text, prose = false, streaming = false }) {
+  const rendered = useMemo(() => {
+    // Live stream: tentatively close unterminated emphasis/dialogue so the
+    // partial reply formats as it grows; the final render uses the raw text.
+    const t = prose && streaming ? autoCloseProse(text ?? '') : (text ?? '');
+    return marked.parse(prose ? wrapDialogue(t, streaming) : t);
+  }, [text, prose, streaming]);
   return html`<div class="md" dangerouslySetInnerHTML=${{ __html: rendered }} />`;
 }
 

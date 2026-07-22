@@ -138,8 +138,11 @@ function applyTheme(id, accentId = DEFAULT_ACCENT) {
 // A straight quote only OPENS dialogue when it looks like one: not after a
 // letter/digit (5ft8", rock"in') and not before whitespace/end — otherwise a
 // stray inch-mark would pair with the next real quote and eat the text in
-// between. Unterminated quotes are left raw. Curly “…” pairs unambiguously.
-function wrapDialogue(md) {
+// between. Unterminated quotes are left raw — except with closeOpen (live
+// streaming), where an opener with no closer yet wraps to end-of-line so the
+// partial sentence colours as it arrives; the final render shows the raw truth.
+// Curly “…” pairs unambiguously.
+function wrapDialogue(md, closeOpen = false) {
   let inFence = false;
   return String(md ?? '').split('\n').map(line => {
     if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
@@ -152,12 +155,32 @@ function wrapDialogue(md) {
         && !/[\s"“]/.test(line[i + 1] ?? ' '));
       if (!opens) { out += ch; i++; continue; }
       const end = line.indexOf(ch === '“' ? '”' : '"', i + 1);
-      if (end === -1) { out += ch; i++; continue; }
+      if (end === -1) {
+        if (closeOpen) { out += `<span class="dialogue">${line.slice(i)}</span>`; break; }
+        out += ch; i++; continue;
+      }
       out += `<span class="dialogue">${line.slice(i, end + 1)}</span>`;
       i = end + 1;
     }
     return out;
   }).join('\n');
+}
+
+// Streaming-only display tweak: tentatively close unterminated emphasis so a
+// partial reply formats as it grows (`*she wav` renders italic immediately).
+// Only closes when real content follows the opener — a lone trailing `*` stays
+// literal instead of flickering into an empty `**`. The final (non-streaming)
+// render uses the raw text, so if the model never closes the marker the
+// formatting simply snaps back off.
+function autoCloseProse(text) {
+  const s = String(text ?? '');
+  const scan = s.replace(/\\./g, 'x'); // escaped chars can't delimit emphasis
+  let out = s;
+  if ((scan.match(/\*\*/g) ?? []).length % 2 === 1
+    && /[^\s*]/.test(scan.slice(scan.lastIndexOf('**') + 2))) out += '**';
+  if ((scan.replace(/\*\*/g, '').match(/\*/g) ?? []).length % 2 === 1
+    && /[^\s*]/.test(scan.slice(scan.lastIndexOf('*') + 1))) out += '*';
+  return out;
 }
 
 // Heuristic speaker attribution: does the text start with a known character
@@ -173,19 +196,23 @@ function detectSpeaker(text, names) {
   return names.find(n => n.toLowerCase() === candidate) ?? null;
 }
 
-const characterNamesOf = (scenario) =>
-  (scenario?.lorePieces ?? [])
+const characterNamesOf = (scenario, chat = null) =>
+  mergedLorePieces(scenario, chat)
     .filter(p => p.type === 'character' && p.enabled !== false)
     .map(p => p.title?.trim())
     .filter(Boolean);
 
 // Remove the leading `Name:` / `**Name:**` / `*Name*` speaker prefix for
 // display — the meta row already labels who is speaking, so showing the
-// prefix in the bubble too breaks immersion.
+// prefix in the bubble too breaks immersion. Stars AFTER the colon are only
+// stripped when they close a bold prefix (`**Name:**` — stars followed by
+// whitespace/EOL), never an action's opening star: in `Mia:\n*does a thing*`
+// or `Mia: *waves*` the old `\s*\*{0,2}\s*` crossed the newline / ate the `*`
+// and left the emphasis unpaired.
 function stripSpeakerPrefix(text, name) {
   if (!text || !name) return text;
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = new RegExp(`^\\s*\\*{0,2}\\s*${esc}\\s*\\*{0,2}\\s*:\\s*`, 'i').exec(text)
+  const m = new RegExp(`^\\s*\\*{0,2}\\s*${esc}\\s*\\*{0,2}\\s*:(?:[ \\t]*\\*{1,2}(?=\\s|$))?\\s*`, 'i').exec(text)
         ?? new RegExp(`^\\s*\\*{1,2}\\s*${esc}\\s*\\*{1,2}\\s*`, 'i').exec(text);
   return m ? text.slice(m[0].length) : text;
 }
@@ -220,6 +247,10 @@ const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
 // {{user}} is the only supported macro (no {{char}} — ambiguous in multi-char scenes).
 const subUser = (text, personaName) =>
   String(text ?? '').replace(/\{\{user\}\}/gi, personaName || 'User');
+// {{var:name}} story variables (v2.0d): per-chat key/value store written by the
+// set_var tool action; unknown variables substitute to empty.
+const subVars = (text, vars) =>
+  String(text ?? '').replace(/\{\{var:([^}]+)\}\}/gi, (_, k) => String(vars?.[k.trim()] ?? ''));
 
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
@@ -314,13 +345,21 @@ function deleteSubtree(messages, nodeId) {
 }
 
 // Truncate the active branch at nodeId and roll the memory store back to it.
+// Tool-written lore (createdAt-tagged, v2.0b) rolls back with the same cutoff;
+// hand-authored pieces (no createdAt) always survive.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
   const cutoff = node.swipes[node.activeSwipe]?.createdAt ?? Date.now();
   const memories = (chat.memoryStore?.memories ?? []).filter(m => m.createdAt <= cutoff);
-  const next = { ...chat, activeLeafId: nodeId, memoryStore: { memories, cursor: 0 } };
+  const lorePieces = Array.isArray(chat.lorePieces)
+    ? chat.lorePieces.filter(p => (p.createdAt ?? 0) <= cutoff) : chat.lorePieces;
+  const next = {
+    ...chat, activeLeafId: nodeId, memoryStore: { memories, cursor: 0 },
+    ...(lorePieces !== chat.lorePieces ? { lorePieces } : {}),
+  };
   next.memoryStore.cursor = getActivePath(next.messages, nodeId).length;
+  next.emergentCursor = next.memoryStore.cursor; // extraction cadence rolls back too
   return next;
 }
 
@@ -405,6 +444,23 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
   return selected;
 }
 
+// Per-chat scenario overlay (v2.0a): chat.lorePieces merge over the
+// scenario's by id — the chat wins, including enabled:false to switch a
+// scenario piece off for one chat only; chat-only pieces append after the
+// scenario's. This is where model-generated characters/lore land (v2.0b+)
+// and the "edit the scenario of this chat" surface. Branches inherit a copy
+// via branchChat's deepClone.
+function mergedLorePieces(scenario, chat) {
+  const base = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
+  const over = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
+  if (!over.length) return base;
+  const byId = new Map(over.filter(p => p?.id).map(p => [p.id, p]));
+  const merged = base.map(p => (p && byId.has(p.id) ? byId.get(p.id) : p));
+  const baseIds = new Set(base.map(p => p?.id));
+  for (const p of over) if (p && !baseIds.has(p.id)) merged.push(p);
+  return merged;
+}
+
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
@@ -430,16 +486,22 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
 
   // 1. static layer: platform prompt + scenario instructions + backstory +
   //    persona block + per-chat custom instructions + length directive
+  // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
+  const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
   const leadParts = [];
-  const plat = subUser(platformPrompt, personaName).trim();
+  const plat = sub(platformPrompt).trim();
   if (plat) leadParts.push(plat);
-  const scenInstr = subUser(scenario?.scenarioInstructions ?? '', personaName).trim();
+  const scenInstr = sub(scenario?.scenarioInstructions ?? '').trim();
   if (scenInstr) leadParts.push(scenInstr);
   const tailParts = [];
   if (persona?.description?.trim())
-    tailParts.push(`${personaName} is ${subUser(persona.description, personaName).trim()}`);
-  const customInstr = subUser(chat?.customInstructions ?? '', personaName).trim();
+    tailParts.push(`${personaName} is ${sub(persona.description).trim()}`);
+  const customInstr = sub(chat?.customInstructions ?? '').trim();
   if (customInstr) tailParts.push(customInstr);
+  // Author's note: per-chat sticky steering, appended to by the note tool
+  // action (v2.0d), editable in chat settings.
+  const authorsNote = sub(chat?.authorsNote ?? '').trim();
+  if (authorsNote) tailParts.push(`Author's note: ${authorsNote}`);
   // Length directive: user-editable in settings; falls back to the preset's
   // default text when unset (existing installs keep current behavior).
   const directive = (settings.lengthDirective ?? LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive)?.trim();
@@ -448,7 +510,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const povName = String(pov?.name ?? '').trim();
   if (povName)
     tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
-  let backstory = subUser(scenario?.backstory ?? '', personaName).trim();
+  let backstory = sub(scenario?.backstory ?? '').trim();
 
   const staticCap = Math.floor(budget * LAYER_CAPS.static);
   const buildStatic = (bs) => [...leadParts, ...(bs ? [bs] : []), ...tailParts].join('\n\n');
@@ -471,13 +533,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     greetingNode = path[0];
     historyNodes = path.slice(1);
   }
-  const greetingTokens = greetingNode ? estimateTokens(subUser(activeText(greetingNode), personaName)) : 0;
+  const greetingTokens = greetingNode ? estimateTokens(sub(activeText(greetingNode))) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
-  // 3. lore layer
+  // 3. lore layer (scenario pieces + per-chat overlay, chat wins on id)
   const loreCap = Math.floor(budget * LAYER_CAPS.lore);
-  const lorePieces = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
+  const lorePieces = mergedLorePieces(scenario, chat);
+  const chatPieceIds = new Set(
+    (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
   // /pov forces the named character's piece in (reason 'pov') alongside any
   // semantic pre-activations.
   let preAct = preActivated;
@@ -489,7 +553,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   }
   const loreScanned = scanLore(lorePieces, conversationText, preAct);
   const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct);
-  const loreText = loreSel.map(s => `[${s.title}]\n${subUser(s.content, personaName)}`).join('\n\n');
+  const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
   const loreTokens = loreText ? estimateTokens(loreText) : 0;
   // Enabled pieces that were NOT injected — observability for "did it even scan?"
   const selectedIds = new Set(loreSel.map(s => s.id));
@@ -499,6 +563,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     inactive.push({
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
+      origin: chatPieceIds.has(p.id) ? 'chat' : 'scenario',
       tokens: estimateTokens(`${p.title ?? ''}\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
@@ -508,7 +573,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
   manifest.layers.lore = {
     tokens: loreTokens, cap: loreCap,
-    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
+    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: chatPieceIds.has(s.id) ? 'chat' : 'scenario', tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
     inactive,
   };
 
@@ -552,13 +617,304 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const messages = [{ role: 'system', content: staticText }];
   if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
   if (memText) messages.push({ role: 'system', content: memText });
-  if (greetingNode) messages.push({ role: 'assistant', content: subUser(activeText(greetingNode), personaName) });
+  if (greetingNode) messages.push({ role: 'assistant', content: sub(activeText(greetingNode)) });
   for (const n of kept)
-    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: subUser(activeText(n), personaName) });
+    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: sub(activeText(n)) });
 
   manifest.totalTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
   return { messages, manifest };
 }
+
+// ---- tool calls (v2.0b) ---------------------------------------------------
+// Prompt-based protocol: the platform prompt teaches the model to emit
+//   ```tool
+//   {"name": "…", "args": {…}}
+//   ```
+// blocks mid-reply. Works on any OpenAI-compatible endpoint — no tools param,
+// no extra round-trip, middleware-transparent. Blocks are stripped from
+// display text and executed app-side against the per-chat lore overlay
+// (v2.0a). An unterminated fence is never a call (partial stream or model
+// rambling) — it's hidden from display but executes nothing.
+const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
+const TOOL_NAME_MAX = 60;
+const TOOL_TEXT_MAX = 2000;
+
+const TOOL_BLOCK_RE = /```tool[ \t]*\r?\n?([\s\S]*?)```/g;
+
+// Split finished reply text into display text + parsed calls. Malformed JSON
+// inside a well-formed fence = call with error: still stripped from display
+// and reported, but not executed.
+function parseToolCalls(text) {
+  const s = String(text ?? '');
+  const calls = [];
+  TOOL_BLOCK_RE.lastIndex = 0;
+  let m;
+  while ((m = TOOL_BLOCK_RE.exec(s))) {
+    const raw = m[1].trim();
+    try {
+      const call = JSON.parse(raw);
+      // Canonical field is `tool` ({"tool": "register_character", …}) — the
+      // old `name` collided with args.name (the character's name) and small
+      // models put the character there. `name` accepted as a fallback.
+      calls.push({
+        name: String(call?.tool ?? call?.name ?? ''),
+        args: (call?.args && typeof call.args === 'object') ? call.args : {},
+        error: null, raw,
+      });
+    } catch {
+      calls.push({ name: '', args: {}, error: 'malformed JSON', raw: toPreview(raw, 120) });
+    }
+  }
+  // A trailing unterminated ```tool fence on a FINISHED reply is a truncated
+  // protocol emission, not prose — stripToolBlocksMapped drops it from
+  // display too (matches the streaming view, so text doesn't pop back in).
+  return { text: stripToolBlocksMapped(s).text, calls };
+}
+
+// Strip tool blocks exactly like parseToolCalls' display text (complete
+// blocks removed, trailing unterminated fence cut, \n{3,} collapsed, trimmed)
+// while keeping a char map: map[strippedIndex] = rawIndex. Lets the raw
+// logprob tape — which covers the protocol text too — be projected onto the
+// stripped message, so token probs work on tool replies.
+function stripToolBlocksMapped(text) {
+  const s = String(text ?? '');
+  const removed = [];
+  TOOL_BLOCK_RE.lastIndex = 0;
+  let m;
+  while ((m = TOOL_BLOCK_RE.exec(s))) removed.push([m.index, m.index + m[0].length]);
+  // Trailing unterminated fence: last ```tool occurrence that doesn't start a
+  // complete (removed) block.
+  let cut = s.length;
+  let p = s.lastIndexOf('```tool');
+  while (p !== -1) {
+    if (!removed.some(([a]) => a === p)) { cut = p; break; }
+    p = p > 0 ? s.lastIndexOf('```tool', p - 1) : -1;
+  }
+  const map = []; // keptIdx -> rawIdx
+  let pos = 0;
+  const take = (a, b) => { for (let i = a; i < b; i++) map.push(i); };
+  for (const [a, b] of removed) {
+    if (a >= cut) break;
+    take(pos, Math.min(a, cut));
+    pos = Math.max(pos, b);
+  }
+  take(pos, cut);
+  const kept = map.map(i => s[i]).join('');
+  // Collapse \n{3,} → \n\n, tracking indices.
+  const out = []; // indices into kept
+  for (let i = 0; i < kept.length;) {
+    if (kept[i] === '\n') {
+      let j = i;
+      while (j < kept.length && kept[j] === '\n') j++;
+      for (let k = 0; k < Math.min(j - i, 2); k++) out.push(i + k);
+      i = j;
+    } else { out.push(i); i++; }
+  }
+  // trim
+  let a = 0, b = out.length;
+  while (a < b && /\s/.test(kept[out[a]])) a++;
+  while (b > a && /\s/.test(kept[out[b - 1]])) b--;
+  const idx = out.slice(a, b);
+  return { text: idx.map(k => kept[k]).join(''), map: idx.map(k => map[k]) };
+}
+
+// Streaming view: hide complete blocks AND any trailing unterminated ```tool
+// fence, so protocol text is never shown mid-generation. No trimming — the
+// streaming bubble wants the raw spacing of what remains.
+function stripToolBlocks(text) {
+  const s = String(text ?? '');
+  let out = '', last = 0;
+  TOOL_BLOCK_RE.lastIndex = 0;
+  let m;
+  while ((m = TOOL_BLOCK_RE.exec(s))) { out += s.slice(last, m.index); last = m.index + m[0].length; }
+  out += s.slice(last);
+  const open = out.lastIndexOf('```tool');
+  if (open !== -1) out = out.slice(0, open);
+  return out;
+}
+
+// Execute parsed calls against the chat's lore overlay. Returns
+// { chat, results: [{ name, args, ok, note }] }; same chat object when
+// nothing applied. Unknown tools / validation failures are notes, not throws.
+// New pieces are tagged { createdAt: now, createdBy: nodeId } — provenance for
+// rewind rollback (timestamp cutoff, like memories) and regenerate pruning
+// (pruneToolPieces). Updates keep the original piece's provenance.
+// opts.queueLore: add_lore calls for NEW titles go to the review queue
+// (emergent-lore 'queue' mode) instead of straight into lorePieces.
+// opts.customTools: user-defined tools (Settings) — action aliases for the
+// built-ins plus 'note' (author's note) and 'set_var' (story variable).
+function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}) {
+  let work = chat;
+  const results = [];
+  let applied = 0;
+  for (const c of calls ?? []) {
+    if (c.error) { results.push({ name: '(unparsed)', args: {}, ok: false, note: `${c.error}: ${c.raw ?? ''}` }); continue; }
+    if (applied >= cap) { results.push({ name: c.name, args: c.args, ok: false, note: 'call cap reached' }); continue; }
+    const r = applyToolCall(work, c, opts);
+    results.push({ name: c.name, args: c.args, ok: r.ok, note: r.note });
+    if (r.ok) { work = r.chat; applied++; }
+  }
+  return { chat: work, results };
+}
+
+// Remove tool-written pieces created by a given node (its earlier swipes).
+// SAFE only when that node has no children — the caller checks. No-op (same
+// object) when nothing matches.
+function pruneToolPieces(chat, nodeId) {
+  const pieces = chat?.lorePieces;
+  if (!Array.isArray(pieces) || !pieces.some(p => p?.createdBy === nodeId)) return chat;
+  return { ...chat, lorePieces: pieces.filter(p => p?.createdBy !== nodeId) };
+}
+
+// ---- emergent lore review queue (v2.0d) ------------------------------------
+// Proposals (add_lore tool calls under a 'queue'-mode scenario, or the
+// extraction pipeline) wait in chat.loreQueue for user review. Accept moves a
+// proposal into lorePieces as USER-OWNED — provenance stripped, so prune and
+// rewind no longer auto-remove it.
+function queueLorePiece(chat, entry) {
+  const loreQueue = [...(Array.isArray(chat?.loreQueue) ? chat.loreQueue : []),
+    { id: uid(), type: 'lore', title: '', content: '', keys: [], source: 'tool', createdAt: Date.now(), ...entry }];
+  return { ...chat, loreQueue };
+}
+
+function acceptQueuedLore(chat, queueId) {
+  const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
+  if (!q) return chat;
+  const piece = {
+    pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
+    wholeWord: false, caseSensitive: false, smart: false, hidden: false, playable: false,
+    id: q.id, type: q.type ?? 'lore', title: q.title ?? '', content: q.content ?? '', keys: q.keys ?? [],
+  };
+  return { ...chat,
+    loreQueue: chat.loreQueue.filter(e => e.id !== queueId),
+    lorePieces: [...(Array.isArray(chat.lorePieces) ? chat.lorePieces : []), piece] };
+}
+
+function dismissQueuedLore(chat, queueId) {
+  if (!Array.isArray(chat?.loreQueue)) return chat;
+  return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
+}
+
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, customTools = [] } = {}) {
+  const fail = (note) => ({ ok: false, note, chat });
+  const args = call?.args ?? {};
+  const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
+  const base = {
+    pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
+    wholeWord: false, caseSensitive: false, smart: false, hidden: false, playable: false,
+  };
+  const save = (lorePieces, note) => ({ ok: true, note, chat: { ...chat, lorePieces } });
+  const provenance = { createdAt: now, createdBy: nodeId };
+  if (call.name === 'register_character') {
+    const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
+    const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
+    if (!cname) return fail('register_character: name required');
+    if (!desc) return fail('register_character: description required');
+    const existing = pieces.find(p => p.type === 'character'
+      && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
+    if (existing)
+      return save(pieces.map(p => p.id === existing.id ? { ...p, content: desc } : p),
+        `updated character "${cname}"`);
+    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'character', title: cname, content: desc, keys: [cname] }],
+      `registered character "${cname}"`);
+  }
+  if (call.name === 'add_lore') {
+    const title = String(args.title ?? '').trim().slice(0, TOOL_NAME_MAX);
+    const content = String(args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
+    if (!title) return fail('add_lore: title required');
+    if (!content) return fail('add_lore: content required');
+    const keys = (Array.isArray(args.keys) ? args.keys : [])
+      .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+    const existing = pieces.find(p => (p.type ?? 'lore') === 'lore'
+      && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
+    if (existing)
+      return save(pieces.map(p => p.id === existing.id ? { ...p, content, ...(keys.length ? { keys } : {}) } : p),
+        `updated lore "${title}"`);
+    // Emergent-lore 'queue' mode: new titles wait for user review.
+    if (queueLore)
+      return { ok: true, note: `queued lore "${title}" for review`,
+        chat: queueLorePiece(chat, { title, content, keys, source: 'tool', createdAt: now }) };
+    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
+      `added lore "${title}"`);
+  }
+  // User-defined custom tools (Settings → custom tools). Built-in names are
+  // reserved — a custom def can never shadow register_character / add_lore.
+  const def = customTools.find(t => t?.name?.trim() === call.name);
+  if (def) {
+    if (def.action === 'register_character' || def.action === 'add_lore')
+      return applyToolCall(chat, { name: def.action, args: call.args }, { nodeId, now, queueLore, customTools });
+    if (def.action === 'note') {
+      const text = String(args.text ?? '').trim().slice(0, TOOL_TEXT_MAX);
+      if (!text) return fail(`${def.name}: text required`);
+      const authorsNote = [String(chat?.authorsNote ?? '').trim(), text].filter(Boolean).join('\n');
+      return { ok: true, note: 'author\'s note updated', chat: { ...chat, authorsNote } };
+    }
+    if (def.action === 'set_var') {
+      const vname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
+      if (!vname) return fail(`${def.name}: name required`);
+      const value = String(args.value ?? '').slice(0, TOOL_TEXT_MAX);
+      return { ok: true, note: `set {{var:${vname}}}`, chat: { ...chat, vars: { ...(chat?.vars ?? {}), [vname]: value } } };
+    }
+    return fail(`tool "${def.name}" has unknown action "${def.action}"`);
+  }
+  return fail(`unknown tool "${call.name}"`);
+}
+
+// Default platform-prompt addition teaching the protocol. Appended when tool
+// calling is enabled (settings.toolsEnabled !== false); the text itself is
+// user-editable in Settings (settings.toolsPrompt, this is the default).
+// {{user}} inside is substituted at assembly time like the rest of the
+// platform prompt. NOTE: the canonical JSON field is `tool`, not `name` —
+// `name` collided with args.name and models put the character's name there.
+const TOOLS_PROMPT = `You can grow the story's cast and world by emitting tool blocks in your reply, in this exact format:
+\`\`\`tool
+{"tool": "register_character", "args": {"name": "Vex", "description": "A wiry dock informant with a copper eye. Nervous, greedy, loyal to whoever pays."}}
+\`\`\`
+Available tools:
+- register_character(name, description) — a NEW named character enters the story who may recur. description: appearance, personality, motives in a few sentences.
+- add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
+Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
+
+// ---- multi-speaker segments (v2.0c) ----------------------------------------
+// One turn stays ONE swipe in the tree; a reply containing several
+// `Name:`-prefixed parts is split for DISPLAY into per-speaker bubbles.
+// Split points are line starts like `Name:` / `**Name:**` / `*Name*:` where
+// Name is a known character (case-insensitive) — or the literal `Narrator:`,
+// which starts a narration segment (that's how narration RESUMES after a
+// character's part; an unprefixed line always continues the current segment).
+// Leading text before the first prefix is narration (speaker: null).
+// Prefixes are stripped from segment text. Unknown `Name:` lines (not in
+// `names`) never split.
+function splitSpeakerSegments(text, names) {
+  const s = String(text ?? '');
+  if (!s || !names?.length) return [{ speaker: null, text: s }];
+  const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
+  // Stars after the colon only close a bold prefix (`**Name:**` — stars
+  // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
+  // must survive or the emphasis is left unpaired.
+  const re = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const segments = [];
+  let cur = { speaker: null, text: '' };
+  const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };
+  for (const line of s.split('\n')) {
+    const m = re.exec(line);
+    const key = m?.[1].trim().toLowerCase();
+    const name = m && key !== 'narrator' ? byLower.get(key) : null;
+    if (name || key === 'narrator') {
+      push();
+      cur = { speaker: name ?? null, text: line.slice(m[0].length) };
+    } else {
+      cur.text += (cur.text ? '\n' : '') + line;
+    }
+  }
+  push();
+  return segments.length ? segments : [{ speaker: null, text: s }];
+}
+
+// Default platform-prompt addition permitting multi-speaker replies.
+// Appended when settings.multiSpeaker !== false; user-editable
+// (settings.speakerPrompt, this is the default).
+const SPEAKER_PROMPT = `When several named characters are in the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line. Give each character at most one part per reply.`;
 // === PURE CORE END ===
 
 // ============================================================================
@@ -953,6 +1309,47 @@ function alignTokensToSpans(text, lpTape) {
   return spans;
 }
 
+// Tool replies: align the raw lp tape against the RAW text (which it tiles
+// exactly), then project the spans through stripToolBlocksMapped's char map
+// onto the stripped display text. Protocol-text spans vanish; a token that
+// straddles a strip boundary keeps its prob on the surviving fragment(s)
+// (approximation — fences almost always tokenize separately).
+//   rawText  — the raw streamed text being aligned (may be a slice)
+//   map      — map[strippedIdx] = rawIdx, absolute in the FULL raw reply
+//   rawOffset — absolute raw index of rawText[0] (continuation base length)
+// Returns spans tiling the stripped text, or null when they don't (map
+// mismatch — caller falls back to plain alignment).
+function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
+  const rawSpans = alignTokensToSpans(rawText, lpTape);
+  const inv = new Int32Array(rawOffset + rawText.length).fill(-1); // rawIdx → strippedIdx
+  for (let i = 0; i < map.length; i++) inv[map[i]] = i;
+  const spans = [];
+  const pushPlain = (t) => {
+    if (!t) return;
+    const last = spans[spans.length - 1];
+    if (last && last.logprob == null) last.text += t;
+    else spans.push({ text: t, logprob: null, top: [] });
+  };
+  let pos = 0;
+  for (const s of rawSpans) {
+    const a = pos, b = pos + s.text.length;
+    pos = b;
+    let frag = '';
+    const flushFrag = () => {
+      if (!frag) return;
+      if (s.logprob == null) pushPlain(frag);
+      else spans.push({ text: frag, logprob: s.logprob, top: s.top });
+      frag = '';
+    };
+    for (let i = a; i < b; i++) {
+      if (inv[rawOffset + i] !== -1) frag += rawText[i];
+      else flushFrag();
+    }
+    flushFrag();
+  }
+  return spans.map(s => s.text).join('') === strippedText ? spans : null;
+}
+
 // ---- /tokenize (vLLM; degrade to null when unavailable) ----
 // Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text.
@@ -1172,10 +1569,13 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-function Markdown({ text, prose = false }) {
-  const rendered = useMemo(
-    () => marked.parse(prose ? wrapDialogue(text ?? '') : (text ?? '')),
-    [text, prose]);
+function Markdown({ text, prose = false, streaming = false }) {
+  const rendered = useMemo(() => {
+    // Live stream: tentatively close unterminated emphasis/dialogue so the
+    // partial reply formats as it grows; the final render uses the raw text.
+    const t = prose && streaming ? autoCloseProse(text ?? '') : (text ?? '');
+    return marked.parse(prose ? wrapDialogue(t, streaming) : t);
+  }, [text, prose, streaming]);
   return html`<div class="md" dangerouslySetInnerHTML=${{ __html: rendered }} />`;
 }
 
@@ -1302,6 +1702,7 @@ function newScenario() {
   return {
     id: uid(), name: 'New scenario', description: '', tags: [],
     backstory: '', greeting: '', scenarioInstructions: '', lorePieces: [],
+    emergentLore: 'queue', // off | queue (review) | auto — model/extractor-proposed lore routing
     createdAt: Date.now(),
   };
 }
@@ -1328,6 +1729,12 @@ function ScenarioEditor({ scenario, onSave, onClose }) {
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
       <label class="field"><span>Greeting — first assistant message of every new chat</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
+      <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
+        <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
+          <option value="off">off — no proposals, no extraction</option>
+          <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
+          <option value="auto">auto-add — proposals go straight into chat lore</option>
+        </select></label>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
@@ -1407,6 +1814,11 @@ const DEFAULT_SETTINGS = {
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
   suggestions: true, // response-suggestion chips after generations
+  toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
+  toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
+  multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
+  speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
+  customTools: [], // user-defined tools: [{ id, name, argsHint, description, action: 'note'|'set_var'|'register_character'|'add_lore' }]
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
@@ -1571,6 +1983,54 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
           Response suggestions (2 clickable options after each AI reply)
         </label>
+        <label class="check">
+          <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
+          Tool calling (model may register characters + lore mid-reply, into this chat's lore)
+        </label>
+        ${draft.toolsEnabled !== false && html`
+          <label class="field"><span>Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.</span>
+            <textarea rows=${9} value=${draft.toolsPrompt ?? TOOLS_PROMPT}
+              onInput=${(e) => set({ toolsPrompt: e.target.value })} /></label>
+          <button class="btn small" onClick=${() => set({ toolsPrompt: TOOLS_PROMPT })}>Reset tools prompt to default</button>
+          <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
+            <button class="btn small" style=${{ marginLeft: '8px' }}
+              onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
+            <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
+            ${(draft.customTools ?? []).map((t, i) => {
+              const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
+              return html`
+                <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
+                  <div class="grid2">
+                    <label class="field"><span>Tool name (no spaces)</span>
+                      <input type="text" value=${t.name} placeholder="roll_dice"
+                        onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
+                    <label class="field"><span>Action</span>
+                      <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
+                        <option value="note">author's note (append steering text)</option>
+                        <option value="set_var">set story variable ({{var:name}})</option>
+                        <option value="register_character">register character</option>
+                        <option value="add_lore">add lore piece</option>
+                      </select></label>
+                  </div>
+                  <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
+                    <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
+                      onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
+                  <label class="field"><span>Description — when/why the model should call it</span>
+                    <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
+                  <button class="btn small danger"
+                    onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
+                </div>`;
+            })}
+          </div>`}
+        <label class="check">
+          <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
+          Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
+        </label>
+        ${draft.multiSpeaker !== false && html`
+          <label class="field"><span>Multi-speaker instructions — appended to the platform prompt.</span>
+            <textarea rows=${4} value=${draft.speakerPrompt ?? SPEAKER_PROMPT}
+              onInput=${(e) => set({ speakerPrompt: e.target.value })} /></label>
+          <button class="btn small" onClick=${() => set({ speakerPrompt: SPEAKER_PROMPT })}>Reset multi-speaker prompt to default</button>`}
         <div style=${{ marginTop: '4px' }}>
           <button class="btn small" onClick=${onOpenLogitBias}>Edit logit bias…</button>
           <span class="hint" style=${{ marginLeft: '8px' }}>${Object.keys(draft.logitBias ?? {}).length} entr(ies)</span>
@@ -1776,6 +2236,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
         ${L.lore.pieces.map(p => html`
           <${InspectorRow} key=${p.id}
             pills=${[{ text: p.reason, cls: p.reason },
+              ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
               ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : []),
               ...semPill(p.id, true)]}
             title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
@@ -1787,6 +2248,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
           ${showInactive && L.lore.inactive.map((p, i) => html`
             <${InspectorRow} key=${p.id ?? i} dimmed
               pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' },
+                ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
                 ...semPill(p.id, false)]}
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}
@@ -1799,6 +2261,14 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
             preview=${m.preview} content=${m.text} />`)}
       <//>
+      ${(manifest.toolCalls ?? []).length > 0 && html`
+        <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
+          ${manifest.toolCalls.map((t, i) => html`
+            <${InspectorRow} key=${i} dimmed=${!t.ok}
+              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'chat' : 'pinned' }]}
+              title=${t.name || '(unparsed)'} meta=${t.note}
+              preview=${t.args} content=${t.args} />`)}
+        <//>`}
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Re-run assembler on current chat</button>`}
     </div>`;
 }
@@ -1837,8 +2307,11 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat 
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
+function ChatOptions({ chat, personas, scenario, onUpdateChat, onExport, onDelete }) {
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
+  const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
+  const allPieces = mergedLorePieces(scenario, chat);
+  const setPieces = (lorePieces) => onUpdateChat({ ...chat, lorePieces });
   return html`
     <div>
       <label class="field"><span>Chat name</span>
@@ -1854,6 +2327,37 @@ function ChatOptions({ chat, personas, onUpdateChat, onExport, onDelete }) {
       <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
         <textarea rows=${4} value=${chat.customInstructions ?? ''}
           onInput=${(e) => onUpdateChat({ ...chat, customInstructions: e.target.value })} /></label>
+      <label class="field"><span>Author's note — sticky steering injected after custom instructions; "note"-action tools append here</span>
+        <textarea rows=${2} value=${chat.authorsNote ?? ''}
+          onInput=${(e) => onUpdateChat({ ...chat, authorsNote: e.target.value })} /></label>
+      ${Object.keys(chat.vars ?? {}).length > 0 && html`
+        <div class="hint">Story variables (usable as {{var:name}}): ${Object.entries(chat.vars).map(([k, v]) => `${k} = ${v}`).join(' · ')}</div>`}
+      ${(chat.loreQueue ?? []).length > 0 && html`
+        <div class="field">
+          <span>Suggested lore — awaiting review (${chat.loreQueue.length})</span>
+          <div class="hint">Proposed by the model or the extraction pass. Accept moves it into this chat's lore as yours; dismiss discards it.</div>
+          ${chat.loreQueue.map(q => html`
+            <div class="lore-card" key=${q.id}>
+              <div class="lc-head">
+                <span class="t">${q.title || '(untitled)'}</span>
+                <span class="pill">${q.source === 'extract' ? 'extracted' : 'tool'}</span>
+                <button class="btn small" onClick=${() => onUpdateChat(acceptQueuedLore(chat, q.id))}>accept</button>
+                <button class="btn small danger" onClick=${() => onUpdateChat(dismissQueuedLore(chat, q.id))}>✕</button>
+              </div>
+              <div class="hint" style=${{ padding: '2px 8px 6px' }}>${toPreview(q.content, 160)}</div>
+            </div>`)}
+        </div>`}
+      <div class="field">
+        <span>Lore — this chat only (${pieces.length})
+          <button class="btn small" style=${{ marginLeft: '8px' }}
+            onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
+        </span>
+        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and smart activation for this chat only.</div>
+        ${pieces.map(p => html`
+          <${LorePieceCard} key=${p.id} piece=${p} allPieces=${allPieces}
+            onChange=${(next) => setPieces(pieces.map(q => q.id === p.id ? next : q))}
+            onRemove=${() => setPieces(pieces.filter(q => q.id !== p.id))} />`)}
+      </div>
       <div style=${{ display: 'flex', gap: '6px' }}>
         <button class="btn small" onClick=${onExport}>Export chat JSON</button>
         <button class="btn small danger" onClick=${onDelete}>Delete chat</button>
@@ -1902,16 +2406,18 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const [showProbs, setShowProbs] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
   const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
-  // Auto-hide the actions/meta popovers when tapping anywhere else.
+  const [toolsOpen, setToolsOpen] = useState(false); // gear pill: per-swipe tool-call popover
+  // Auto-hide the actions/meta/tools popovers when tapping anywhere else.
   useEffect(() => {
-    if (!actionsOpen && !metaOpen) return;
+    if (!actionsOpen && !metaOpen && !toolsOpen) return;
     const onDown = (e) => {
       if (!e.target.closest?.('.actions, .actions-toggle')) setActionsOpen(false);
       if (!e.target.closest?.('.meta-details, .meta-toggle')) setMetaOpen(false);
+      if (!e.target.closest?.('.tools-pop, .tools-toggle')) setToolsOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [actionsOpen, metaOpen]);
+  }, [actionsOpen, metaOpen, toolsOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   const text = subUser(swipe.text, personaName);
@@ -1960,6 +2466,13 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
+  // Multi-speaker split (v2.0c): one swipe, several `Name:` parts → one
+  // bubble per part. Rendering only; storage/swipes/probs are untouched.
+  const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
+  const multi = (segments?.length ?? 0) > 1;
+  // Multi-speaker swipe: the header names everyone who spoke, in speaking
+  // order (first appearance), each with its own colour.
+  const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
   return html`
     <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
       onContextMenu=${(e) => {
@@ -1969,12 +2482,27 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         setCtxMenu({ x: e.clientX, y: e.clientY });
       }}>
       <div class="meta">
-        <span class="who ${isCharacter ? 'speaker' : ''}"
-          style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
+        ${isUser ? html`<span class="who">${personaName}</span>`
+          : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
+              class="who ${name !== 'Narrator' ? 'speaker' : ''}"
+              style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
+          : html`<span class="who ${isCharacter ? 'speaker' : ''}"
+              style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
         ${index != null && html`<span>#${index}</span>`}
         ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
         ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
+        ${(swipe.toolCalls ?? []).length > 0 && html`
+          <button class="pill chat tools-toggle" title="Tool calls made during this generation — click to view"
+            onClick=${() => setToolsOpen(!toolsOpen)}>⚙\uFE0E ${swipe.toolCalls.length}</button>
+          ${toolsOpen && html`
+            <span class="tools-pop">
+              ${swipe.toolCalls.map((t, i) => html`
+                <span key=${i} class="tools-row ${t.ok ? '' : 'failed'}">
+                  <span>${t.ok ? '✓' : '✕'} <b>${t.name || '(unparsed)'}</b>${t.note ? html`<span class="tools-note"> — ${t.note}</span>` : null}</span>
+                  ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
+                </span>`)}
+            </span>`}`}
         ${(node.edited || swipe.modelId) && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
@@ -2019,6 +2547,14 @@ ${showNav && html`
           </span>`}
         
       </div>
+      ${multi && !editing && !(showProbs && hasProbs) ? segments.map((seg, si) => html`
+        <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
+          style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
+          ...${gestureHandlers}>
+          <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
+            style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
+          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${Markdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
+        </div>`) : html`
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
@@ -2036,8 +2572,8 @@ ${showNav && html`
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose /></div>`}
-      </div>
+            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose streaming=${streaming} /></div>`}
+      </div>`}
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
@@ -2405,7 +2941,7 @@ function ContextMenu({ x, y, items, onClose }) {
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas,
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas, scenario,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
@@ -2419,7 +2955,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
         ${tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
         ${tab === 'chat' && html`
-          <${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${onUpdateChat}
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
       </div>
     <//>`;
@@ -2588,7 +3124,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const persona = chat?.personaId ? personas[chat.personaId] : null;
   const personaName = persona?.name?.trim() || 'User';
   const characterNames = useMemo(
-    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null),
+    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat),
     [chat, scenarios]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
@@ -2788,6 +3324,65 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= MEMORY_EVERY) summarizeNow(chatObj);
   }
 
+  // ---- emergent lore extraction (v2.0d) ----
+  // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
+  // the recent conversation. 'queue' mode (default): proposals wait for review
+  // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
+  // Failures degrade silently (console.warn) and the cursor still advances.
+  async function maybeExtractLore(chatObj) {
+    const { scenarios: sc, personas: pe, settings: st } = ref.current;
+    const scen = sc[chatObj.scenarioId];
+    const mode = scen?.emergentLore ?? 'queue';
+    if (mode === 'off' || !st.endpoint) return;
+    const model = st.auxModel || st.model;
+    if (!model) return;
+    const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
+    const pathLen = path.length;
+    if (pathLen - (chatObj.emergentCursor ?? 0) < MEMORY_EVERY) return;
+    const advance = (c) => saveChat({ ...c, emergentCursor: pathLen });
+    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const recent = path.slice(-MEMORY_EVERY)
+      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    if (!recent.trim()) return;
+    const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
+    try {
+      const out = await auxCall({
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        system: 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.',
+        user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
+        maxTokens: 400, temperature: 0.3, stop: st.stopStrings,
+      });
+      const m = out.match(/\[[\s\S]*\]/);
+      const proposals = m ? JSON.parse(m[0]) : [];
+      const existing = new Set(titles.map(t => t.toLowerCase()));
+      const queued = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+      const fresh = (Array.isArray(proposals) ? proposals : [])
+        .map(p => ({
+          title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+          content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+          keys: (Array.isArray(p?.keys) ? p.keys : []).map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5),
+        }))
+        .filter(p => p.title && p.content
+          && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
+        .slice(0, 3);
+      if (fresh.length) {
+        let work = chatObj;
+        if (mode === 'auto') {
+          work = applyToolCalls(work, fresh.map(p => ({ name: 'add_lore', args: p })), { now: Date.now() }).chat;
+        } else {
+          for (const p of fresh) work = queueLorePiece(work, { ...p, source: 'extract' });
+        }
+        advance(work);
+        return;
+      }
+      advance(chatObj);
+    } catch (e) {
+      console.warn('Emergent lore extraction failed:', e);
+      advance(chatObj);
+    }
+  }
+
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
@@ -2803,6 +3398,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
+    // User-defined tools (v2.0d): advertised after the built-ins in the tools
+    // prompt; executed by action kind in applyToolCall. Built-in names reserved.
+    const customDefs = (st.customTools ?? []).filter(t => t?.name?.trim()
+      && t.name !== 'register_character' && t.name !== 'add_lore');
+    const customSection = customDefs.length
+      ? '\nAdditional tools:\n' + customDefs.map(t =>
+          `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
+      : '';
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -2815,7 +3418,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     if (st.embeddingModel) {
-      const smartPieces = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
+      const smartPieces = mergedLorePieces(scen, chatObj).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
@@ -2838,7 +3441,13 @@ function Main({ storage, storageKind, storageFailed }) {
       }
     }
     let { messages, manifest: man } = assemblePrompt({
-      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt, preActivated, pov,
+      scenario: scen, persona: pers, chat: promptChat, settings: st,
+      platformPrompt: [
+        st.platformPrompt,
+        ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
+        ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+      ].filter(s => s?.trim()).join('\n\n'),
+      preActivated, pov,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
@@ -2898,6 +3507,11 @@ function Main({ storage, storageKind, storageFailed }) {
       : [];
     let acc = baseText;
     const lpTape = [];
+    // Tool replies: the RAW accumulated text and its raw→stripped char map
+    // (set when tool blocks were stripped) so the lp tape — which covers the
+    // protocol text too — can still be aligned and projected onto the
+    // stripped display text.
+    let rawAcc = null, probMap = null;
     const applyText = (text, tokens) => {
       const n = work.messages[nodeId];
       if (!n) return;
@@ -2910,7 +3524,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // swipe.tokens when at least one span carries real prob data. Runs on
     // completion AND abort, so partial generations keep their probs.
     const attachProbs = () => {
-      const spans = [...baseSpans, ...alignTokensToSpans(acc.slice(baseText.length), lpTape)];
+      let spans = null;
+      if (probMap && rawAcc != null)
+        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape, probMap.map, baseText.length, acc.slice(baseText.length));
+      if (!spans) spans = alignTokensToSpans(acc.slice(baseText.length), lpTape);
+      spans = [...baseSpans, ...spans];
       if (spans.some(s => s.logprob != null)) applyText(acc, spans);
       else if (st.tokenProbs !== false && acc)
         console.warn('FictionPad: logprobs were requested but the stream contained none — ' +
@@ -2943,7 +3561,9 @@ function Main({ storage, storageKind, storageFailed }) {
         if (chunk.done) { sawDone = true; continue; }
         if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
         acc += chunk.content;
-        applyText(acc);
+        // Streaming view hides tool protocol blocks (complete + trailing
+        // unterminated) so the user never sees them mid-generation.
+        applyText(st.toolsEnabled !== false ? stripToolBlocks(acc) : acc);
       }
       if (!acc && !abort.signal.aborted)
         setError(sawDone ? 'The model returned an empty response.'
@@ -2954,6 +3574,56 @@ function Main({ storage, storageKind, storageFailed }) {
     } finally {
       genRef.current = null;
       setGenerating(null);
+      // Tool calls (v2.0b): parse the finished text, strip protocol blocks
+      // from display, execute against the chat lore overlay. Logprobs still
+      // attach on tool replies: the lp tape is aligned against the RAW text
+      // (which it tiles exactly) and projected through the strip's char map
+      // onto the stripped display text (attachProbs).
+      let toolResults = null;
+      // Regenerate hygiene: a successful regeneration replaces the previous
+      // swipe — drop tool-written pieces it created, but ONLY when nothing
+      // follows this node in the tree (mid-tree regenerates keep them: later
+      // messages may rely on them). Runs even with tools toggled off — the
+      // old swipe's pieces were written when they were on.
+      if (acc && !fresh && !continuation
+          && !Object.values(work.messages).some(m => m.parentId === nodeId)) {
+        const pruned = pruneToolPieces(work, nodeId);
+        if (pruned !== work) { work = pruned; upsertChat(work.id, work); }
+      }
+      if (acc && st.toolsEnabled !== false) {
+        const parsed = parseToolCalls(acc);
+        if (parsed.text !== acc) {
+          // Keep the raw text + raw→stripped map for logprob projection.
+          probMap = stripToolBlocksMapped(acc);
+          rawAcc = acc;
+          // Drift guard: if the map's text isn't exactly what we store,
+          // discard it — attachProbs falls back to plain alignment.
+          if (probMap.text !== parsed.text) { probMap = null; rawAcc = null; }
+          acc = parsed.text;
+          if (acc) applyText(acc);
+        }
+        if (parsed.calls.length) {
+          // DEBUG: log raw tool blocks + parsed calls while the protocol is
+          // being tuned. TODO: remove this console.debug once format
+          // compliance is confirmed across models.
+          console.debug('FictionPad tool calls:', parsed.calls.map(c => ({ raw: c.raw, parsed: { name: c.name, args: c.args }, error: c.error })));
+          const applied = applyToolCalls(work, parsed.calls, {
+            nodeId, now: Date.now(),
+            queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
+            customTools: customDefs,
+          });
+          toolResults = applied.results;
+          if (applied.chat !== work) { work = applied.chat; upsertChat(work.id, work); }
+          man.toolCalls = applied.results.map(r => ({
+            name: r.name, ok: r.ok, note: r.note, args: toPreview(JSON.stringify(r.args ?? {}), 200),
+          }));
+          const capped = applied.results.filter(r => r.note === 'call cap reached').length;
+          const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
+          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${TOOL_CALL_CAP}.`);
+          if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
+          setManifest({ ...man });
+        }
+      }
       if (!acc) discardEmptySwipe();
       // Stream ended without a finish chunk and not by the user's Stop — the
       // connection dropped mid-generation. Partial text is kept, but flagged.
@@ -2962,16 +3632,21 @@ function Main({ storage, storageKind, storageFailed }) {
         attachProbs();
         // Attribute the finished swipe to a character (or "Narrator"), and
         // record how long the generation took.
-        const names = characterNamesOf(scen);
+        const names = characterNamesOf(scen, work);
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
           swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart,
-            ...(interrupted ? { interrupted: true } : {}) };
+            ...(interrupted ? { interrupted: true } : {}),
+            // Persisted on the swipe so the gear popover can show them after the fact.
+            ...(toolResults ? { toolCalls: toolResults.map(({ name, ok, note, args }) => ({
+              name, ok, note, args: toPreview(JSON.stringify(args ?? {}), 200),
+            })) } : {}) };
           work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } } };
           upsertChat(work.id, work);
         }
         maybeSummarize(work);
+        maybeExtractLore(work);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions !== false) {
@@ -3054,7 +3729,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // the model sees that definition; otherwise the directive alone stands.
         const scen = ref.current.scenarios[c.scenarioId];
         const q = arg.toLowerCase();
-        const chars = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        const chars = mergedLorePieces(scen, c).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
@@ -3417,7 +4092,7 @@ function Main({ storage, storageKind, storageFailed }) {
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
         manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
-        personas=${personas} onUpdateChat=${saveChat}
+        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
         dateFormat=${settings.dateFormat}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
@@ -3541,5 +4216,5 @@ function App() {
 
 
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, alignTokensToSpans, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html };

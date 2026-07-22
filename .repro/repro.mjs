@@ -11,7 +11,7 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 // Neutralize the browser boot line; export what we need instead.
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
-  openaiChatStream, alignTokensToSpans, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
+  openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
@@ -112,6 +112,33 @@ trial('message list render incl. prose markdown', () => {
       onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
 });
 
+// Regression: `Mia:\n*actions here*` — the prefix strip must not cross the
+// newline and eat the action's opening star (leaves `actions here*` unpaired).
+trial('speaker prefix strip keeps action stars across a newline', () => {
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('x1', null, 'assistant', 'Mia:\n*actions here*')}
+      isRoot=${false} personaName="Ari" characterNames=${['Mia']}
+      streaming=${false} generating=${false}
+      onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
+      onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
+  if (!out.includes('<em>actions here</em>')) throw new Error('action em eaten by prefix strip: ' + out);
+  if (out.includes('Mia:')) throw new Error('speaker prefix not stripped: ' + out);
+});
+
+// Multi-speaker swipe: the header names everyone who spoke, in order.
+trial('multi-speaker header lists all speakers in order', () => {
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('x2', null, 'assistant', 'Mia: "Hi."\n\nNarrator: *Narration happens.*\n\nSamantha: "Hey."')}
+      isRoot=${false} personaName="Ari" characterNames=${['Mia', 'Samantha']}
+      streaming=${false} generating=${false}
+      onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
+      onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
+  const meta = out.match(/<div class="meta">[\s\S]*?<\/div>/)?.[0] ?? '';
+  const mi = meta.indexOf('>Mia<'), ni = meta.indexOf('>Narrator<'), si = meta.indexOf('>Samantha<');
+  if (mi < 0 || ni < 0 || si < 0) throw new Error('header missing a speaker: ' + meta);
+  if (!(mi < ni && ni < si)) throw new Error('speakers out of order: ' + meta);
+});
+
 // RP prose formatting: quote pairing must survive inch marks, contractions,
 // unterminated quotes, and emphasis inside speech (regression: the old
 // naive /"[^"\n]+"/ regex paired a 5ft8" inch mark with the next real quote
@@ -147,6 +174,26 @@ trial('prose: curly quotes wrap; apostrophes do not interfere', () => {
   const out = proseHtml('“I don’t know,” she said.');
   if (!out.includes('<span class="dialogue">“I don’t know,”</span>'))
     throw new Error('curly dialogue broken: ' + out);
+});
+
+// Streaming auto-close: unterminated emphasis/dialogue format predictively
+// while streaming; the final (non-streaming) render shows the raw text.
+trial('streaming prose: unterminated emphasis + dialogue auto-close', () => {
+  const em = renderToStaticMarkup(html`<${Markdown} text="*she waves" prose=${true} streaming=${true} />`);
+  if (!em.includes('<em>she waves</em>')) throw new Error('em not auto-closed: ' + em);
+  const bold = renderToStaticMarkup(html`<${Markdown} text="**bold words" prose=${true} streaming=${true} />`);
+  if (!bold.includes('<strong>bold words</strong>')) throw new Error('bold not auto-closed: ' + bold);
+  const dl = renderToStaticMarkup(html`<${Markdown} text='He says "hello the' prose=${true} streaming=${true} />`);
+  if (!dl.includes('class="dialogue"')) throw new Error('dialogue not auto-closed: ' + dl);
+});
+
+trial('prose auto-close edge cases (lone star, final render raw)', () => {
+  const bare = renderToStaticMarkup(html`<${Markdown} text="*" prose=${true} streaming=${true} />`);
+  if (bare.includes('<em>')) throw new Error('lone star should stay literal: ' + bare);
+  const final = renderToStaticMarkup(html`<${Markdown} text="*she waves" prose=${true} streaming=${false} />`);
+  if (final.includes('<em>')) throw new Error('final render must show the raw unclosed star: ' + final);
+  const rawQ = renderToStaticMarkup(html`<${Markdown} text='He says "hello' prose=${true} streaming=${false} />`);
+  if (rawQ.includes('class="dialogue"')) throw new Error('final render must leave unterminated quote raw: ' + rawQ);
 });
 
 // ProbsView renders per-token spans with popovers (no client JS needed for SSR).
@@ -330,6 +377,42 @@ trial('alignTokensToSpans: exact / suffix / prefix / greedy / degenerate', () =>
   const annotated = spans.filter(s => s.logprob != null);
   if (annotated.length !== 6 || annotated.some((s, i) => s.text !== [' lean',' back',' against',' wall',' I',' said'][i]))
     throw new Error('distant-token: tokens misattributed: ' + JSON.stringify(spans));
+});
+
+// alignStrippedToolSpans: tape covers the RAW reply (tool blocks included);
+// spans must project onto the stripped text, protocol tokens vanish, prose
+// keeps its probs.
+trial('alignStrippedToolSpans: probs survive tool-block stripping', () => {
+  const raw = 'Hi ```tool\n{"tool":"add_lore","args":{"title":"X","content":"Y"}}\n``` there';
+  const { text: stripped, map } = fp.stripToolBlocksMapped(raw);
+  if (stripped !== 'Hi  there') throw new Error('strip: ' + JSON.stringify(stripped));
+  const tape = [
+    { token: 'Hi ', logprob: -0.1, top: [{ token: 'Hi', logprob: -0.1 }] },
+    { token: '```tool\n{"tool":"add_lore","args":{"title":"X","content":"Y"}}\n```', logprob: -1.0, top: [] },
+    { token: ' there', logprob: -0.4, top: [{ token: ' there', logprob: -0.4 }] },
+  ];
+  const spans = fp.alignStrippedToolSpans(raw, tape, map, 0, stripped);
+  if (!spans) throw new Error('projection returned null');
+  if (spans.map(s => s.text).join('') !== stripped) throw new Error('coverage: ' + JSON.stringify(spans));
+  const annotated = spans.filter(s => s.logprob != null);
+  if (annotated.length !== 2 || annotated[0].text !== 'Hi ' || annotated[1].text !== ' there')
+    throw new Error('prose probs lost: ' + JSON.stringify(spans));
+
+  // token straddling the strip boundary: prob survives on the kept fragment
+  const raw2 = 'a ```tool\n{}\n```b';
+  const m2 = fp.stripToolBlocksMapped(raw2);
+  if (m2.text !== 'a b') throw new Error('strip2: ' + JSON.stringify(m2.text));
+  const spans2 = fp.alignStrippedToolSpans(raw2, [
+    { token: 'a ```tool\n{}\n```b', logprob: -0.3, top: [] },
+  ], m2.map, 0, m2.text);
+  if (!spans2 || spans2.map(s => s.text).join('') !== 'a b'
+    || spans2[0].text !== 'a ' || spans2[0].logprob !== -0.3
+    || spans2[1].text !== 'b' || spans2[1].logprob !== -0.3)
+    throw new Error('straddle: ' + JSON.stringify(spans2));
+
+  // map/stripped mismatch → null (caller falls back)
+  if (fp.alignStrippedToolSpans(raw, tape, map, 0, 'something else') !== null)
+    throw new Error('mismatch should return null');
 });
 // /tokenize shape tolerance: {tokens:[ids]}, count-only, and 404 → null.
 trial('tokenize: ids / count-only / unavailable', async () => {

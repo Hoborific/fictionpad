@@ -107,6 +107,7 @@ function newScenario() {
   return {
     id: uid(), name: 'New scenario', description: '', tags: [],
     backstory: '', greeting: '', scenarioInstructions: '', lorePieces: [],
+    emergentLore: 'queue', // off | queue (review) | auto — model/extractor-proposed lore routing
     createdAt: Date.now(),
   };
 }
@@ -133,6 +134,12 @@ function ScenarioEditor({ scenario, onSave, onClose }) {
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
       <label class="field"><span>Greeting — first assistant message of every new chat</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
+      <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
+        <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
+          <option value="off">off — no proposals, no extraction</option>
+          <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
+          <option value="auto">auto-add — proposals go straight into chat lore</option>
+        </select></label>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}

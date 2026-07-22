@@ -123,6 +123,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
         ${L.lore.pieces.map(p => html`
           <${InspectorRow} key=${p.id}
             pills=${[{ text: p.reason, cls: p.reason },
+              ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
               ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : []),
               ...semPill(p.id, true)]}
             title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
@@ -134,6 +135,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
           ${showInactive && L.lore.inactive.map((p, i) => html`
             <${InspectorRow} key=${p.id ?? i} dimmed
               pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' },
+                ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
                 ...semPill(p.id, false)]}
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}
@@ -146,6 +148,14 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts }) {
             title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
             preview=${m.preview} content=${m.text} />`)}
       <//>
+      ${(manifest.toolCalls ?? []).length > 0 && html`
+        <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
+          ${manifest.toolCalls.map((t, i) => html`
+            <${InspectorRow} key=${i} dimmed=${!t.ok}
+              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'chat' : 'pinned' }]}
+              title=${t.name || '(unparsed)'} meta=${t.note}
+              preview=${t.args} content=${t.args} />`)}
+        <//>`}
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Re-run assembler on current chat</button>`}
     </div>`;
 }

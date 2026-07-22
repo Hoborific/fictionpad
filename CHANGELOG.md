@@ -372,3 +372,91 @@ source is unchanged from v3.5.
 
 No other changes - this is a cosmetic patch on top of v3.6.
 
+
+## v3.7 - Tool calling & emergent lore
+
+### v3.7
+
+**Added**
+- Prompt-based tool calling: the model can register new characters and add lore mid-reply via hidden ```tool blocks. Results land in the chat's own lore (so registered characters get speaker colours, /pov, and smart activation). Works on any OpenAI-compatible endpoint. Toggle and editable protocol prompt in Settings; capped at 5 calls per generation.
+- Per-chat lore: the Chat options tab now has a lore editor scoped to that chat. Pieces merge over the scenario's lore at generation time - a chat can add pieces, override a scenario piece, or switch one off for that chat only. Branches inherit a copy.
+- Multi-speaker replies: when several named characters speak in one turn (each part prefixed `Name:`), the reply renders as separate bubbles with coloured speaker chips; `Narrator:` resumes narration. Display-only - swipes and storage are untouched. Toggle and editable prompt in Settings.
+- Inspector: new "Tool calls" section showing each call's result, and a "chat" pill marking lore pieces that come from the chat overlay. Replies that made tool calls show a ⚙ pill in their meta line.
+
+**Changed**
+- Character names, /pov character lookup, and semantic (smart) activation now consider the merged scenario + chat lore, not just the scenario's.
+- Tool-protocol text is hidden from the streaming view as it generates, not just after completion.
+- Token-probability colouring is skipped on replies that contain tool calls (the raw logprob stream can't be aligned to the stripped display text).
+
+### v3.7.1
+
+**Added**
+
+- **Custom tools**: define your own tools in Settings (name, args hint, description, action). Actions map to author's note, story variable, register character, or add lore. Custom tools are advertised to the model after the built-ins; built-in names are reserved.
+- **Story variables**: a per-chat key/value store written by `set_var` tool calls and usable as `{{var:name}}` anywhere `{{user}}` works (backstory, instructions, lore, persona). Current variables are listed in chat settings.
+- **Author's note**: per-chat sticky steering injected after custom instructions; editable in chat settings and appended to by "note"-action tools.
+- **Emergent lore**: a per-scenario setting (off / suggest for review / auto-add) controlling where model-proposed lore goes. Covers both `add_lore` tool calls and a new periodic extraction pass that asks the aux model for up to 3 new lasting lore facts from recent conversation (runs on the memory cadence).
+- **Lore review queue**: proposed lore waits in chat settings with a preview and its source (tool or extraction). Accept moves it into the chat's lore as your own; dismiss discards it.
+
+**Changed**
+
+- Tool-written lore pieces are now tagged with provenance (creation time and message). Rewinding a chat rolls tool-written lore back with the message history, while hand-authored and accepted pieces always survive.
+- Regenerating the last message prunes lore pieces the replaced swipe created, so retries don't accumulate duplicate tool-written lore (mid-tree regenerates keep them).
+- Prompt assembly now substitutes `{{var:name}}` alongside `{{user}}` throughout the static layer, lore, and history.
+
+**Fixed**
+
+- Nothing user-facing beyond the regeneration/rewind hygiene above.
+
+### v3.7.2
+
+**Changed**
+- The gear pill on messages with tool calls is now a button that opens a popover listing every tool call made during that generation - ✓/✕ status, tool name, note, and arguments - instead of showing them only as a hover tooltip
+- Tool-call arguments (JSON, truncated to a 200-character preview) are now persisted on each swipe, so the record stays viewable after generation finishes
+
+**Fixed**
+- Failed tool calls are now clearly highlighted in the popover
+- The tool popover auto-dismisses when tapping anywhere else, matching the actions/meta popovers
+
+### v3.7.3
+
+**Fixed**
+- Asterisks opening an action right after a `Name:` speaker prefix are no longer eaten by the prefix strip - `Mia: *waves*` and `Mia:` followed by `*waves*` on the next line now keep their emphasis instead of showing unpaired `waves*` text.
+- The same fix applies to multi-speaker segment splitting, so bolded `**Name:**` prefixes are still stripped correctly while action stars survive.
+
+### v3.7.4
+
+**Changed**
+
+- Streaming replies now format predictively as they arrive: an unterminated `*italic*` or `**bold**` marker is tentatively closed so partial text renders styled immediately, and an open dialogue quote colours through to the end of the line.
+- Only the currently streaming segment gets the tentative treatment; once the reply finishes, the final render shows the raw text exactly as the model produced it, so unclosed markers snap back off rather than being silently repaired.
+
+**Fixed**
+
+- A lone trailing `*` mid-stream no longer flickers into an empty emphasis span - it stays literal until real content follows.
+
+### v3.7.5
+
+**Changed**
+
+- When an assistant message contains dialogue from several characters, the header above the bubble now lists everyone who spoke, in speaking order, each name in its own colour - previously only a single speaker name was shown.
+
+**Fixed**
+
+- Multi-speaker messages no longer misattribute the whole message to one character in the header.
+
+### v3.7.6
+
+**Changed**
+
+- Token probability highlighting now works on replies that contain tool calls. Previously logprobs were skipped for tool replies because the raw logprob stream also covers the protocol text; the stream is now aligned against the raw reply and projected through a character map onto the stripped display text, so prose keeps its per-token probabilities while tool-protocol tokens simply vanish.
+- Tool-block stripping was refactored into a single mapping-aware routine (`stripToolBlocksMapped`) that `parseToolCalls` now shares, guaranteeing the displayed text and the probability projection stay consistent.
+
+**Fixed**
+
+- Aborted or partial tool-call generations now also retain their token probabilities (probability attachment runs in all completion paths, with a fallback to plain alignment if the strip mapping ever mismatches).
+
+**Added**
+
+- New tests covering the mapped tool-block stripping and the logprob projection, including tokens straddling a strip boundary and mismatch fallback.
+

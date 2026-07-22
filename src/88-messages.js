@@ -39,16 +39,18 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const [showProbs, setShowProbs] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
   const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
-  // Auto-hide the actions/meta popovers when tapping anywhere else.
+  const [toolsOpen, setToolsOpen] = useState(false); // gear pill: per-swipe tool-call popover
+  // Auto-hide the actions/meta/tools popovers when tapping anywhere else.
   useEffect(() => {
-    if (!actionsOpen && !metaOpen) return;
+    if (!actionsOpen && !metaOpen && !toolsOpen) return;
     const onDown = (e) => {
       if (!e.target.closest?.('.actions, .actions-toggle')) setActionsOpen(false);
       if (!e.target.closest?.('.meta-details, .meta-toggle')) setMetaOpen(false);
+      if (!e.target.closest?.('.tools-pop, .tools-toggle')) setToolsOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [actionsOpen, metaOpen]);
+  }, [actionsOpen, metaOpen, toolsOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   const text = subUser(swipe.text, personaName);
@@ -97,6 +99,13 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
+  // Multi-speaker split (v2.0c): one swipe, several `Name:` parts → one
+  // bubble per part. Rendering only; storage/swipes/probs are untouched.
+  const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
+  const multi = (segments?.length ?? 0) > 1;
+  // Multi-speaker swipe: the header names everyone who spoke, in speaking
+  // order (first appearance), each with its own colour.
+  const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
   return html`
     <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
       onContextMenu=${(e) => {
@@ -106,12 +115,27 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         setCtxMenu({ x: e.clientX, y: e.clientY });
       }}>
       <div class="meta">
-        <span class="who ${isCharacter ? 'speaker' : ''}"
-          style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${isUser ? personaName : speaker}</span>
+        ${isUser ? html`<span class="who">${personaName}</span>`
+          : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
+              class="who ${name !== 'Narrator' ? 'speaker' : ''}"
+              style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
+          : html`<span class="who ${isCharacter ? 'speaker' : ''}"
+              style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
         ${index != null && html`<span>#${index}</span>`}
         ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
         ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
+        ${(swipe.toolCalls ?? []).length > 0 && html`
+          <button class="pill chat tools-toggle" title="Tool calls made during this generation — click to view"
+            onClick=${() => setToolsOpen(!toolsOpen)}>⚙\uFE0E ${swipe.toolCalls.length}</button>
+          ${toolsOpen && html`
+            <span class="tools-pop">
+              ${swipe.toolCalls.map((t, i) => html`
+                <span key=${i} class="tools-row ${t.ok ? '' : 'failed'}">
+                  <span>${t.ok ? '✓' : '✕'} <b>${t.name || '(unparsed)'}</b>${t.note ? html`<span class="tools-note"> — ${t.note}</span>` : null}</span>
+                  ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
+                </span>`)}
+            </span>`}`}
         ${(node.edited || swipe.modelId) && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
@@ -156,6 +180,14 @@ ${showNav && html`
           </span>`}
         
       </div>
+      ${multi && !editing && !(showProbs && hasProbs) ? segments.map((seg, si) => html`
+        <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
+          style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
+          ...${gestureHandlers}>
+          <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
+            style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
+          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${Markdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
+        </div>`) : html`
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
@@ -173,8 +205,8 @@ ${showNav && html`
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose /></div>`}
-      </div>
+            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose streaming=${streaming} /></div>`}
+      </div>`}
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[

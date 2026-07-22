@@ -214,6 +214,47 @@ function alignTokensToSpans(text, lpTape) {
   return spans;
 }
 
+// Tool replies: align the raw lp tape against the RAW text (which it tiles
+// exactly), then project the spans through stripToolBlocksMapped's char map
+// onto the stripped display text. Protocol-text spans vanish; a token that
+// straddles a strip boundary keeps its prob on the surviving fragment(s)
+// (approximation — fences almost always tokenize separately).
+//   rawText  — the raw streamed text being aligned (may be a slice)
+//   map      — map[strippedIdx] = rawIdx, absolute in the FULL raw reply
+//   rawOffset — absolute raw index of rawText[0] (continuation base length)
+// Returns spans tiling the stripped text, or null when they don't (map
+// mismatch — caller falls back to plain alignment).
+function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
+  const rawSpans = alignTokensToSpans(rawText, lpTape);
+  const inv = new Int32Array(rawOffset + rawText.length).fill(-1); // rawIdx → strippedIdx
+  for (let i = 0; i < map.length; i++) inv[map[i]] = i;
+  const spans = [];
+  const pushPlain = (t) => {
+    if (!t) return;
+    const last = spans[spans.length - 1];
+    if (last && last.logprob == null) last.text += t;
+    else spans.push({ text: t, logprob: null, top: [] });
+  };
+  let pos = 0;
+  for (const s of rawSpans) {
+    const a = pos, b = pos + s.text.length;
+    pos = b;
+    let frag = '';
+    const flushFrag = () => {
+      if (!frag) return;
+      if (s.logprob == null) pushPlain(frag);
+      else spans.push({ text: frag, logprob: s.logprob, top: s.top });
+      frag = '';
+    };
+    for (let i = a; i < b; i++) {
+      if (inv[rawOffset + i] !== -1) frag += rawText[i];
+      else flushFrag();
+    }
+    flushFrag();
+  }
+  return spans.map(s => s.text).join('') === strippedText ? spans : null;
+}
+
 // ---- /tokenize (vLLM; degrade to null when unavailable) ----
 // Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text.

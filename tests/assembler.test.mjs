@@ -15,13 +15,17 @@ const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  keyMatches, scanLore, selectLore, addMemory, assemblePrompt };`;
+  keyMatches, scanLore, selectLore, mergedLorePieces, addMemory, assemblePrompt,
+  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
   MEMORY_CAP, LINK_BOOST, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  keyMatches, scanLore, selectLore, addMemory, assemblePrompt,
+  keyMatches, scanLore, selectLore, mergedLorePieces, addMemory, assemblePrompt,
+  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore,
 } = core;
 
 // ---- tiny test runner ----
@@ -148,6 +152,301 @@ section('lore engine');
   const deep = scanLore([lore({ id: 'D', keys: ['ancient'], searchDepth: 1 })],
     'ancient ' + 'y'.repeat(100)); // 1 est. token ≈ 3 chars of scan window
   ok(!deep.has('D'), 'per-piece searchDepth limits the scan window');
+}
+
+// ---- per-chat lore overlay (v2.0a) ----
+section('chat lore overlay');
+{
+  const scen = { ...baseScenario, lorePieces: [
+    lore({ id: 'A', title: 'Alpha', keys: ['veyra'] }),
+    lore({ id: 'B', title: 'Beta', keys: ['veyra'] }),
+  ] };
+  // no overlay → scenario list returned as-is
+  ok(mergedLorePieces(scen, baseChat) === scen.lorePieces, 'no overlay returns scenario pieces unchanged');
+  ok(mergedLorePieces(scen, null) === scen.lorePieces, 'null chat returns scenario pieces unchanged');
+  // chat-only piece appends; override by id replaces; enabled:false override disables
+  const chat = { ...baseChat, lorePieces: [
+    lore({ id: 'B', title: 'BetaChat', content: 'chat version', keys: ['veyra'] }),
+    lore({ id: 'C', title: 'Gamma', keys: ['veyra'] }),
+    lore({ id: 'A', enabled: false }),
+  ] };
+  const merged = mergedLorePieces(scen, chat);
+  ok(merged.length === 3, 'overlay: override + append keeps count');
+  ok(merged.find(p => p.id === 'B')?.title === 'BetaChat', 'chat piece wins on id collision');
+  ok(merged.find(p => p.id === 'C')?.title === 'Gamma', 'chat-only piece appended');
+  ok(merged.find(p => p.id === 'A')?.enabled === false, 'chat can disable a scenario piece');
+  // assembler uses the overlay: disabled A + overridden B + appended C
+  const { manifest } = assemblePrompt({ scenario: scen, persona, chat, settings, platformPrompt: '' });
+  const activeIds = manifest.layers.lore.pieces.map(p => p.id);
+  ok(!activeIds.includes('A'), 'assembler: chat-disabled scenario piece not injected');
+  ok(activeIds.includes('B') && activeIds.includes('C'), 'assembler: chat pieces injected when triggered');
+  ok(manifest.layers.lore.pieces.find(p => p.id === 'B')?.content === 'chat version',
+    'assembler: overridden content is the chat version');
+  ok(manifest.layers.lore.pieces.every(p => p.origin === 'chat'), 'manifest marks chat origin');
+  ok(manifest.layers.lore.inactive.every(p => p.origin === 'scenario' || p.origin === 'chat'),
+    'manifest marks origin on inactive pieces too');
+}
+
+// ---- tool calls (v2.0b) ----
+section('tool calls');
+{
+  // parser
+  ok(parseToolCalls('plain prose').text === 'plain prose'
+    && parseToolCalls('plain prose').calls.length === 0, 'no blocks → text unchanged, no calls');
+  {
+    const t = 'She walks in.\n```tool\n{"tool":"register_character","args":{"name":"Vex","description":"wiry informant"}}\n```\n"Vex, at your service."';
+    const p = parseToolCalls(t);
+    ok(p.calls.length === 1 && p.calls[0].name === 'register_character' && p.calls[0].args.name === 'Vex',
+      'complete block parsed (canonical "tool" field)');
+    ok(!p.text.includes('```') && p.text.includes('She walks in.') && p.text.includes('at your service'),
+      'block stripped from display text');
+  }
+  {
+    const p = parseToolCalls('```tool\n{"name":"add_lore","args":{"title":"X","content":"Y"}}\n```');
+    ok(p.calls.length === 1 && p.calls[0].name === 'add_lore', 'legacy "name" field still accepted');
+  }
+  {
+    const p = parseToolCalls('```tool {"name":"add_lore","args":{"title":"X","content":"Y"}}``` done');
+    ok(p.calls.length === 1 && p.calls[0].name === 'add_lore', 'single-line fence parsed');
+  }
+  {
+    const p = parseToolCalls('a ```tool\n{"name":"add_lore",```\n b');
+    ok(p.calls.length === 1 && p.calls[0].error === 'malformed JSON', 'malformed JSON reported, still stripped');
+    ok(!p.text.includes('```'), 'malformed block removed from display');
+  }
+  {
+    const p = parseToolCalls('story text ```tool\n{"name":"register_character","args":{"na');
+    ok(p.calls.length === 0, 'unterminated fence is not a call');
+    ok(p.text === 'story text', 'trailing unterminated fence hidden from display');
+  }
+  {
+    const p = parseToolCalls('one ```tool\n{"name":"add_lore","args":{"title":"A","content":"a"}}\n``` two ```tool\n{"name":"add_lore","args":{"title":"B","content":"b"}}\n``` three');
+    ok(p.calls.length === 2 && p.text === 'one  two  three', 'multiple blocks parsed and stripped');
+  }
+  // streaming strip
+  ok(stripToolBlocks('abc ```tool\n{...partial') === 'abc ', 'streaming: unterminated fence hidden');
+  ok(stripToolBlocks('a ```tool\n{"name":"x"}\n``` b') === 'a  b', 'streaming: complete block hidden');
+  ok(stripToolBlocks('plain') === 'plain', 'streaming: plain text untouched');
+
+  // stripToolBlocksMapped: display text must equal parseToolCalls' exactly,
+  // and the map must project every stripped char back to its raw position.
+  {
+    const fixtures = [
+      'plain prose, no blocks',
+      'Hi ```tool\n{"tool":"add_lore","args":{"title":"X","content":"Y"}}\n``` there',
+      'a ```tool\n{"tool":"x"}\n```\n\n\n\nb',
+      'story text ```tool\n{"tool":"register_character","args":{"na',
+      'one ```tool\n{"tool":"a"}\n``` two ```tool\n{"tool":"b"}\n``` three ```tool\n{"unterminated"',
+      '\n\n  ```tool\n{"tool":"x"}\n```\n\n',
+    ];
+    for (const f of fixtures) {
+      const { text, map } = stripToolBlocksMapped(f);
+      ok(text === parseToolCalls(f).text, `mapped strip matches parseToolCalls: ${JSON.stringify(f.slice(0, 40))}`);
+      ok(map.length === text.length && [...text].every((ch, i) => f[map[i]] === ch),
+        `map projects stripped→raw: ${JSON.stringify(f.slice(0, 40))}`);
+    }
+  }
+
+  // executor
+  {
+    const r = applyToolCalls(baseChat, [{ name: 'register_character', args: { name: 'Vex', description: 'wiry informant' } }]);
+    const piece = r.chat.lorePieces?.[0];
+    ok(r.results[0].ok && piece?.type === 'character' && piece.title === 'Vex'
+      && piece.keys.includes('Vex') && piece.enabled === true, 'register_character creates character piece');
+    // update path: same name again → content updated, no duplicate
+    const r2 = applyToolCalls(r.chat, [{ name: 'register_character', args: { name: 'vex', description: 'updated desc' } }]);
+    ok(r2.chat.lorePieces.length === 1 && r2.chat.lorePieces[0].content === 'updated desc'
+      && r2.results[0].note.startsWith('updated'), 'register_character dedupes by name (case-insensitive)');
+  }
+  {
+    const r = applyToolCalls(baseChat, [{ name: 'add_lore', args: { title: 'The Tower', content: 'tall', keys: ['tower', 'x', 'ab', 'cd', 'ef', 'gh'] } }]);
+    const piece = r.chat.lorePieces?.[0];
+    ok(piece?.type === 'lore' && piece.keys.length === 5 && !piece.keys.includes('x'),
+      'add_lore creates piece; keys filtered to min length 2, capped at 5');
+  }
+  {
+    const r = applyToolCalls(baseChat, [{ name: 'nope', args: {} }]);
+    ok(!r.results[0].ok && r.results[0].note.includes('unknown tool') && r.chat === baseChat,
+      'unknown tool: note, chat unchanged');
+    const r2 = applyToolCalls(baseChat, [{ name: 'register_character', args: { name: '', description: 'd' } }]);
+    ok(!r2.results[0].ok && r2.chat === baseChat, 'missing required arg rejected');
+    const r3 = applyToolCalls(baseChat, [{ name: '', args: {}, error: 'malformed JSON', raw: '{bad' }]);
+    ok(!r3.results[0].ok && r3.results[0].note.includes('malformed JSON'), 'malformed call reported');
+  }
+  {
+    const many = Array.from({ length: TOOL_CALL_CAP + 2 }, (_, i) =>
+      ({ name: 'add_lore', args: { title: `L${i}`, content: 'c' } }));
+    const r = applyToolCalls(baseChat, many);
+    ok(r.chat.lorePieces.length === TOOL_CALL_CAP, 'call cap limits applied calls');
+    ok(r.results.filter(x => x.note === 'call cap reached').length === 2, 'excess calls noted as capped');
+  }
+  // end-to-end: parse a reply, execute, piece lands in chat lore
+  {
+    const reply = 'A stranger approaches.\n```tool\n{"name":"register_character","args":{"name":"Mira","description":"scarred cartographer"}}\n```\n"Mira," she says.';
+    const parsed = parseToolCalls(reply);
+    const applied = applyToolCalls(baseChat, parsed.calls);
+    ok(applied.chat.lorePieces?.[0]?.title === 'Mira', 'parse → execute end-to-end');
+  }
+  // provenance + prune + rewind rollback
+  {
+    const r = applyToolCalls(baseChat, [{ name: 'register_character', args: { name: 'Vex', description: 'd' } }],
+      { nodeId: 'N1', now: 1000 });
+    const piece = r.chat.lorePieces[0];
+    ok(piece.createdBy === 'N1' && piece.createdAt === 1000, 'new tool pieces tagged with provenance');
+    // update path preserves original provenance
+    const r2 = applyToolCalls(r.chat, [{ name: 'register_character', args: { name: 'Vex', description: 'd2' } }],
+      { nodeId: 'N2', now: 2000 });
+    ok(r2.chat.lorePieces[0].createdBy === 'N1' && r2.chat.lorePieces[0].createdAt === 1000
+      && r2.chat.lorePieces[0].content === 'd2', 'update keeps original provenance');
+    // prune removes only that node's pieces
+    const withManual = { ...r2.chat, lorePieces: [...r2.chat.lorePieces, lore({ id: 'M', title: 'Manual' })] };
+    const pruned = pruneToolPieces(withManual, 'N1');
+    ok(pruned.lorePieces.length === 1 && pruned.lorePieces[0].id === 'M', 'pruneToolPieces removes only createdBy-match');
+    ok(pruneToolPieces(withManual, 'NOPE') === withManual, 'pruneToolPieces no-op when nothing matches');
+    // rewind rolls tool lore back by createdAt; manual pieces survive
+    let chat = baseChat;
+    let r3 = appendMessage(chat, 'root', 'user', 'hi', null); chat = r3.chat; // createdAt: now
+    const before = Date.now();
+    const future = { ...chat, lorePieces: [
+      lore({ id: 'M', title: 'Manual' }),                       // hand-authored: no createdAt
+      { ...lore({ id: 'T', title: 'Tool' }), createdAt: before + 60000, createdBy: 'x' },
+    ] };
+    const rewound = rewindChat(future, 'root'); // cutoff = root swipe createdAt (1)
+    ok(rewound.lorePieces.length === 1 && rewound.lorePieces[0].id === 'M',
+      'rewind rolls back tool lore, keeps hand-authored pieces');
+  }
+}
+
+// ---- multi-speaker segments (v2.0c) ----
+section('speaker segments');
+{
+  const names = ['Vex', 'Mira'];
+  const seg = splitSpeakerSegments('plain narration, no prefixes', names);
+  ok(seg.length === 1 && seg[0].speaker === null && seg[0].text === 'plain narration, no prefixes',
+    'no prefixes → single narration segment');
+  ok(splitSpeakerSegments('Vex: hi', null)[0].speaker === null, 'no names → narration');
+  {
+    const s = splitSpeakerSegments('Vex: hello there\nsecond line', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === 'hello there\nsecond line',
+      'leading prefix: single character segment, prefix stripped');
+  }
+  {
+    const s = splitSpeakerSegments('The door opens.\nVex: hi there\n**Mira:** *nods*\nNarrator: Silence falls.', names);
+    ok(s.length === 4
+      && s[0].speaker === null && s[0].text === 'The door opens.'
+      && s[1].speaker === 'Vex' && s[1].text === 'hi there'
+      && s[2].speaker === 'Mira' && s[2].text === '*nods*'
+      && s[3].speaker === null && s[3].text === 'Silence falls.',
+      'narration + two speakers + Narrator: resume splits in order');
+  }
+  {
+    const s = splitSpeakerSegments('Vex: hi\nunmarked lines stay with Vex', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text.includes('unmarked'),
+      'unprefixed line continues the current segment (no Narrator: marker)');
+  }
+  {
+    const s = splitSpeakerSegments('*Vex*: whispered words', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === 'whispered words', 'italic prefix splits');
+  }
+  {
+    const s = splitSpeakerSegments('vex: lowercase still me', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex', 'case-insensitive name match');
+  }
+  {
+    const s = splitSpeakerSegments('Stranger: not a known character', names);
+    ok(s.length === 1 && s[0].speaker === null && s[0].text === 'Stranger: not a known character',
+      'unknown name never splits');
+  }
+  {
+    const s = splitSpeakerSegments('It was Vex: the informant.', names);
+    ok(s.length === 1 && s[0].speaker === null, 'mid-sentence colon with non-name candidate does not split');
+  }
+  {
+    const s = splitSpeakerSegments('Vex:\nMira: hi', names);
+    ok(s.length === 1 && s[0].speaker === 'Mira', 'empty speaker part dropped');
+  }
+  {
+    // Regression: the old `:\s*\*{0,2}\s*` tail ate an action's opening star.
+    const s = splitSpeakerSegments('Mira: *nods*', names);
+    ok(s.length === 1 && s[0].speaker === 'Mira' && s[0].text === '*nods*',
+      'action star on the same line survives the prefix strip');
+  }
+  {
+    const s = splitSpeakerSegments('Vex:\n*she waves*', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === '*she waves*',
+      'action star on the next line survives the prefix strip');
+  }
+  {
+    const s = splitSpeakerSegments('**Mira:** *nods*', names);
+    ok(s.length === 1 && s[0].speaker === 'Mira' && s[0].text === '*nods*',
+      'bold prefix closing stars still stripped');
+  }
+}
+
+// ---- story variables + author's note + lore queue (v2.0d) ----
+section('v2.0d: vars, notes, queue, custom tools');
+{
+  ok(subVars('HP: {{var:hp}}/{{var:max hp}}', { hp: '7', 'max hp': '12' }) === 'HP: 7/12', 'subVars substitutes');
+  ok(subVars('x{{var:nope}}y', {}) === 'xy', 'unknown var → empty');
+  {
+    const chat = { ...baseChat, vars: { city: 'Veyra' }, authorsNote: 'Keep it grounded.' };
+    const scen = { ...baseScenario, backstory: 'Welcome to {{var:city}}.' };
+    const { messages } = assemblePrompt({ scenario: scen, persona, chat, settings, platformPrompt: '' });
+    ok(messages[0].content.includes('Welcome to Veyra.'), '{{var}} substituted in backstory');
+    ok(messages[0].content.includes("Author's note: Keep it grounded."), "author's note injected into static layer");
+  }
+  // queue helpers
+  {
+    const q1 = queueLorePiece(baseChat, { title: 'Old Mill', content: 'abandoned', keys: ['mill'], source: 'extract' });
+    ok(q1.loreQueue.length === 1 && q1.loreQueue[0].source === 'extract', 'queueLorePiece appends');
+    const qid = q1.loreQueue[0].id;
+    const acc = acceptQueuedLore(q1, qid);
+    ok(acc.loreQueue.length === 0 && acc.lorePieces.length === 1 && acc.lorePieces[0].title === 'Old Mill'
+      && acc.lorePieces[0].createdBy === undefined && acc.lorePieces[0].enabled === true,
+      'accept moves to lorePieces as user-owned (provenance stripped)');
+    const q2 = queueLorePiece(baseChat, { title: 'X', content: 'y' });
+    const dis = dismissQueuedLore(q2, q2.loreQueue[0].id);
+    ok(dis.loreQueue.length === 0, 'dismiss discards');
+  }
+  // add_lore queue routing
+  {
+    const r = applyToolCalls(baseChat, [{ name: 'add_lore', args: { title: 'Tower', content: 'tall' } }], { queueLore: true });
+    ok(r.chat.loreQueue?.[0]?.title === 'Tower' && !r.chat.lorePieces, 'queueLore routes new titles to the queue');
+    ok(r.results[0].note.includes('queued'), 'queue routing noted');
+    // existing title still updates directly (already-admitted lore)
+    const withPiece = { ...baseChat, lorePieces: [lore({ id: 'T', title: 'Tower', keys: ['tower'] })] };
+    const r2 = applyToolCalls(withPiece, [{ name: 'add_lore', args: { title: 'tower', content: 'taller' } }], { queueLore: true });
+    ok(r2.chat.lorePieces[0].content === 'taller' && !r2.chat.loreQueue, 'queueLore: existing titles update directly');
+  }
+  // custom tool actions
+  {
+    const defs = [
+      { id: '1', name: 'add_beat', action: 'note' },
+      { id: '2', name: 'track', action: 'set_var' },
+      { id: '3', name: 'recruit', action: 'register_character' },
+      { id: '4', name: 'add_lore', action: 'note' }, // shadowing attempt: built-in must win
+      { id: '5', name: 'broken', action: 'explode' },
+    ];
+    let chat = baseChat;
+    chat = applyToolCalls(chat, [{ name: 'add_beat', args: { text: 'rain incoming' } }], { customTools: defs }).chat;
+    ok(chat.authorsNote === 'rain incoming', 'note action appends authorsNote');
+    chat = applyToolCalls(chat, [{ name: 'add_beat', args: { text: 'second line' } }], { customTools: defs }).chat;
+    ok(chat.authorsNote === 'rain incoming\nsecond line', 'note action appends with newline');
+    chat = applyToolCalls(chat, [{ name: 'track', args: { name: 'hp', value: '7' } }], { customTools: defs }).chat;
+    ok(chat.vars?.hp === '7', 'set_var writes chat.vars');
+    chat = applyToolCalls(chat, [{ name: 'recruit', args: { name: 'Vex', description: 'd' } }], { customTools: defs }).chat;
+    ok(chat.lorePieces?.[0]?.type === 'character' && chat.lorePieces[0].title === 'Vex', 'register_character alias works');
+    const r = applyToolCalls(baseChat, [{ name: 'add_lore', args: { title: 'X', content: 'y' } }], { customTools: defs });
+    ok(r.chat.lorePieces?.[0]?.type === 'lore', 'custom def cannot shadow a built-in');
+    const r2 = applyToolCalls(baseChat, [{ name: 'broken', args: {} }], { customTools: defs });
+    ok(!r2.results[0].ok && r2.results[0].note.includes('unknown action'), 'unknown custom action rejected');
+  }
+  // rewind resets the extraction cursor alongside memory
+  {
+    const chat = { ...baseChat, emergentCursor: 99 };
+    const rw = rewindChat(chat, 'root');
+    ok(rw.emergentCursor === rw.memoryStore.cursor, 'rewind rolls back emergentCursor');
+  }
 }
 
 // ---- memory store ----

@@ -5,7 +5,7 @@
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas,
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, personas, scenario,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
@@ -19,7 +19,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, per
         ${tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} />`}
         ${tab === 'chat' && html`
-          <${ChatOptions} chat=${chat} personas=${personas} onUpdateChat=${onUpdateChat}
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
       </div>
     <//>`;

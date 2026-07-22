@@ -31,6 +31,11 @@ const DEFAULT_SETTINGS = {
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
   suggestions: true, // response-suggestion chips after generations
+  toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
+  toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
+  multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
+  speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
+  customTools: [], // user-defined tools: [{ id, name, argsHint, description, action: 'note'|'set_var'|'register_character'|'add_lore' }]
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
@@ -195,6 +200,54 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
           Response suggestions (2 clickable options after each AI reply)
         </label>
+        <label class="check">
+          <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
+          Tool calling (model may register characters + lore mid-reply, into this chat's lore)
+        </label>
+        ${draft.toolsEnabled !== false && html`
+          <label class="field"><span>Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.</span>
+            <textarea rows=${9} value=${draft.toolsPrompt ?? TOOLS_PROMPT}
+              onInput=${(e) => set({ toolsPrompt: e.target.value })} /></label>
+          <button class="btn small" onClick=${() => set({ toolsPrompt: TOOLS_PROMPT })}>Reset tools prompt to default</button>
+          <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
+            <button class="btn small" style=${{ marginLeft: '8px' }}
+              onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
+            <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
+            ${(draft.customTools ?? []).map((t, i) => {
+              const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
+              return html`
+                <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
+                  <div class="grid2">
+                    <label class="field"><span>Tool name (no spaces)</span>
+                      <input type="text" value=${t.name} placeholder="roll_dice"
+                        onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
+                    <label class="field"><span>Action</span>
+                      <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
+                        <option value="note">author's note (append steering text)</option>
+                        <option value="set_var">set story variable ({{var:name}})</option>
+                        <option value="register_character">register character</option>
+                        <option value="add_lore">add lore piece</option>
+                      </select></label>
+                  </div>
+                  <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
+                    <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
+                      onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
+                  <label class="field"><span>Description — when/why the model should call it</span>
+                    <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
+                  <button class="btn small danger"
+                    onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
+                </div>`;
+            })}
+          </div>`}
+        <label class="check">
+          <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
+          Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
+        </label>
+        ${draft.multiSpeaker !== false && html`
+          <label class="field"><span>Multi-speaker instructions — appended to the platform prompt.</span>
+            <textarea rows=${4} value=${draft.speakerPrompt ?? SPEAKER_PROMPT}
+              onInput=${(e) => set({ speakerPrompt: e.target.value })} /></label>
+          <button class="btn small" onClick=${() => set({ speakerPrompt: SPEAKER_PROMPT })}>Reset multi-speaker prompt to default</button>`}
         <div style=${{ marginTop: '4px' }}>
           <button class="btn small" onClick=${onOpenLogitBias}>Edit logit bias…</button>
           <span class="hint" style=${{ marginLeft: '8px' }}>${Object.keys(draft.logitBias ?? {}).length} entr(ies)</span>

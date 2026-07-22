@@ -127,7 +127,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const persona = chat?.personaId ? personas[chat.personaId] : null;
   const personaName = persona?.name?.trim() || 'User';
   const characterNames = useMemo(
-    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null),
+    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat),
     [chat, scenarios]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
@@ -327,6 +327,65 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= MEMORY_EVERY) summarizeNow(chatObj);
   }
 
+  // ---- emergent lore extraction (v2.0d) ----
+  // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
+  // the recent conversation. 'queue' mode (default): proposals wait for review
+  // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
+  // Failures degrade silently (console.warn) and the cursor still advances.
+  async function maybeExtractLore(chatObj) {
+    const { scenarios: sc, personas: pe, settings: st } = ref.current;
+    const scen = sc[chatObj.scenarioId];
+    const mode = scen?.emergentLore ?? 'queue';
+    if (mode === 'off' || !st.endpoint) return;
+    const model = st.auxModel || st.model;
+    if (!model) return;
+    const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
+    const pathLen = path.length;
+    if (pathLen - (chatObj.emergentCursor ?? 0) < MEMORY_EVERY) return;
+    const advance = (c) => saveChat({ ...c, emergentCursor: pathLen });
+    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+    const recent = path.slice(-MEMORY_EVERY)
+      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    if (!recent.trim()) return;
+    const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
+    try {
+      const out = await auxCall({
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        system: 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.',
+        user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
+        maxTokens: 400, temperature: 0.3, stop: st.stopStrings,
+      });
+      const m = out.match(/\[[\s\S]*\]/);
+      const proposals = m ? JSON.parse(m[0]) : [];
+      const existing = new Set(titles.map(t => t.toLowerCase()));
+      const queued = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+      const fresh = (Array.isArray(proposals) ? proposals : [])
+        .map(p => ({
+          title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+          content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+          keys: (Array.isArray(p?.keys) ? p.keys : []).map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5),
+        }))
+        .filter(p => p.title && p.content
+          && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
+        .slice(0, 3);
+      if (fresh.length) {
+        let work = chatObj;
+        if (mode === 'auto') {
+          work = applyToolCalls(work, fresh.map(p => ({ name: 'add_lore', args: p })), { now: Date.now() }).chat;
+        } else {
+          for (const p of fresh) work = queueLorePiece(work, { ...p, source: 'extract' });
+        }
+        advance(work);
+        return;
+      }
+      advance(chatObj);
+    } catch (e) {
+      console.warn('Emergent lore extraction failed:', e);
+      advance(chatObj);
+    }
+  }
+
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
@@ -342,6 +401,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
+    // User-defined tools (v2.0d): advertised after the built-ins in the tools
+    // prompt; executed by action kind in applyToolCall. Built-in names reserved.
+    const customDefs = (st.customTools ?? []).filter(t => t?.name?.trim()
+      && t.name !== 'register_character' && t.name !== 'add_lore');
+    const customSection = customDefs.length
+      ? '\nAdditional tools:\n' + customDefs.map(t =>
+          `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
+      : '';
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -354,7 +421,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     if (st.embeddingModel) {
-      const smartPieces = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
+      const smartPieces = mergedLorePieces(scen, chatObj).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
@@ -377,7 +444,13 @@ function Main({ storage, storageKind, storageFailed }) {
       }
     }
     let { messages, manifest: man } = assemblePrompt({
-      scenario: scen, persona: pers, chat: promptChat, settings: st, platformPrompt: st.platformPrompt, preActivated, pov,
+      scenario: scen, persona: pers, chat: promptChat, settings: st,
+      platformPrompt: [
+        st.platformPrompt,
+        ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
+        ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+      ].filter(s => s?.trim()).join('\n\n'),
+      preActivated, pov,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
@@ -437,6 +510,11 @@ function Main({ storage, storageKind, storageFailed }) {
       : [];
     let acc = baseText;
     const lpTape = [];
+    // Tool replies: the RAW accumulated text and its raw→stripped char map
+    // (set when tool blocks were stripped) so the lp tape — which covers the
+    // protocol text too — can still be aligned and projected onto the
+    // stripped display text.
+    let rawAcc = null, probMap = null;
     const applyText = (text, tokens) => {
       const n = work.messages[nodeId];
       if (!n) return;
@@ -449,7 +527,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // swipe.tokens when at least one span carries real prob data. Runs on
     // completion AND abort, so partial generations keep their probs.
     const attachProbs = () => {
-      const spans = [...baseSpans, ...alignTokensToSpans(acc.slice(baseText.length), lpTape)];
+      let spans = null;
+      if (probMap && rawAcc != null)
+        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape, probMap.map, baseText.length, acc.slice(baseText.length));
+      if (!spans) spans = alignTokensToSpans(acc.slice(baseText.length), lpTape);
+      spans = [...baseSpans, ...spans];
       if (spans.some(s => s.logprob != null)) applyText(acc, spans);
       else if (st.tokenProbs !== false && acc)
         console.warn('FictionPad: logprobs were requested but the stream contained none — ' +
@@ -482,7 +564,9 @@ function Main({ storage, storageKind, storageFailed }) {
         if (chunk.done) { sawDone = true; continue; }
         if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
         acc += chunk.content;
-        applyText(acc);
+        // Streaming view hides tool protocol blocks (complete + trailing
+        // unterminated) so the user never sees them mid-generation.
+        applyText(st.toolsEnabled !== false ? stripToolBlocks(acc) : acc);
       }
       if (!acc && !abort.signal.aborted)
         setError(sawDone ? 'The model returned an empty response.'
@@ -493,6 +577,56 @@ function Main({ storage, storageKind, storageFailed }) {
     } finally {
       genRef.current = null;
       setGenerating(null);
+      // Tool calls (v2.0b): parse the finished text, strip protocol blocks
+      // from display, execute against the chat lore overlay. Logprobs still
+      // attach on tool replies: the lp tape is aligned against the RAW text
+      // (which it tiles exactly) and projected through the strip's char map
+      // onto the stripped display text (attachProbs).
+      let toolResults = null;
+      // Regenerate hygiene: a successful regeneration replaces the previous
+      // swipe — drop tool-written pieces it created, but ONLY when nothing
+      // follows this node in the tree (mid-tree regenerates keep them: later
+      // messages may rely on them). Runs even with tools toggled off — the
+      // old swipe's pieces were written when they were on.
+      if (acc && !fresh && !continuation
+          && !Object.values(work.messages).some(m => m.parentId === nodeId)) {
+        const pruned = pruneToolPieces(work, nodeId);
+        if (pruned !== work) { work = pruned; upsertChat(work.id, work); }
+      }
+      if (acc && st.toolsEnabled !== false) {
+        const parsed = parseToolCalls(acc);
+        if (parsed.text !== acc) {
+          // Keep the raw text + raw→stripped map for logprob projection.
+          probMap = stripToolBlocksMapped(acc);
+          rawAcc = acc;
+          // Drift guard: if the map's text isn't exactly what we store,
+          // discard it — attachProbs falls back to plain alignment.
+          if (probMap.text !== parsed.text) { probMap = null; rawAcc = null; }
+          acc = parsed.text;
+          if (acc) applyText(acc);
+        }
+        if (parsed.calls.length) {
+          // DEBUG: log raw tool blocks + parsed calls while the protocol is
+          // being tuned. TODO: remove this console.debug once format
+          // compliance is confirmed across models.
+          console.debug('FictionPad tool calls:', parsed.calls.map(c => ({ raw: c.raw, parsed: { name: c.name, args: c.args }, error: c.error })));
+          const applied = applyToolCalls(work, parsed.calls, {
+            nodeId, now: Date.now(),
+            queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
+            customTools: customDefs,
+          });
+          toolResults = applied.results;
+          if (applied.chat !== work) { work = applied.chat; upsertChat(work.id, work); }
+          man.toolCalls = applied.results.map(r => ({
+            name: r.name, ok: r.ok, note: r.note, args: toPreview(JSON.stringify(r.args ?? {}), 200),
+          }));
+          const capped = applied.results.filter(r => r.note === 'call cap reached').length;
+          const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
+          if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${TOOL_CALL_CAP}.`);
+          if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
+          setManifest({ ...man });
+        }
+      }
       if (!acc) discardEmptySwipe();
       // Stream ended without a finish chunk and not by the user's Stop — the
       // connection dropped mid-generation. Partial text is kept, but flagged.
@@ -501,16 +635,21 @@ function Main({ storage, storageKind, storageFailed }) {
         attachProbs();
         // Attribute the finished swipe to a character (or "Narrator"), and
         // record how long the generation took.
-        const names = characterNamesOf(scen);
+        const names = characterNamesOf(scen, work);
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
           swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart,
-            ...(interrupted ? { interrupted: true } : {}) };
+            ...(interrupted ? { interrupted: true } : {}),
+            // Persisted on the swipe so the gear popover can show them after the fact.
+            ...(toolResults ? { toolCalls: toolResults.map(({ name, ok, note, args }) => ({
+              name, ok, note, args: toPreview(JSON.stringify(args ?? {}), 200),
+            })) } : {}) };
           work = { ...work, messages: { ...work.messages, [nodeId]: { ...n, swipes } } };
           upsertChat(work.id, work);
         }
         maybeSummarize(work);
+        maybeExtractLore(work);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions !== false) {
@@ -593,7 +732,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // the model sees that definition; otherwise the directive alone stands.
         const scen = ref.current.scenarios[c.scenarioId];
         const q = arg.toLowerCase();
-        const chars = (scen?.lorePieces ?? []).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        const chars = mergedLorePieces(scen, c).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
@@ -956,7 +1095,7 @@ function Main({ storage, storageKind, storageFailed }) {
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
         manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
-        personas=${personas} onUpdateChat=${saveChat}
+        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
         dateFormat=${settings.dateFormat}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
