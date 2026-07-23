@@ -576,3 +576,82 @@ No other changes - this is a cosmetic patch on top of v3.6.
 - The collapse is measured pre-paint (no flash), re-checked when you switch swipes or the row resizes, and never measured while a reply is streaming.
 - Phones now always show the «/» edge arrows as ribbon pane toggles, replacing the previous width-tiered behavior that kept the FictionPad/Inspector labels until space ran out. Desktop is unchanged - arrows remain opt-in via Settings → Appearance.
 
+
+## v4.0 - Major bugfixes
+
+### v4.0
+
+**Added**
+- Stop button in the top bar during generation, with a "generating…" indicator when the active generation belongs to another chat
+- "Discard unsaved changes?" guards when closing the Settings, scenario, character, and persona editors with pending edits
+- Settings draft is preserved when detouring into the logit-bias editor and back
+- Delete confirmations for scenarios, characters, and personas now say how many chats reference them
+- Persistent banner when saving fails for good (storage quota exceeded or repeated write failures), instead of silently retrying forever
+- Inspector warns when a response was truncated at max_tokens
+- Server: `X-FictionPad-Auth: required` header distinguishes the server's own 401s from upstream LLM 401s passed through the proxy
+- vendor.mjs now fails the build if a `src/` fragment is missing from `SRC_FILES`
+
+**Changed**
+- The API key is now per-device like the server token - never uploaded to, or adopted from, server-synced settings
+- Rewind rolls memories, tool-written lore, and queued lore back by chat position (`atLen`) instead of timestamp, so regenerating a swipe no longer breaks rollback
+- Memory block renders chronologically; lore/memory/history token estimates now count the exact rendered text (headers, `- ` prefixes, substituted macros)
+- Saving is retried with bounded exponential backoff (5s → 60s, 5 attempts) before flagging failure
+- Modal dialogs: Escape closes, first field is auto-focused, ARIA dialog attributes added
+- Server requires Node.js ≥ 22.13; app file (compiled vs. source) is resolved per request, so a rebuild is served without restarting
+- htm dependency pinned to 3.1.1
+
+**Fixed**
+- Generation races: edits made mid-stream (memory pins, renames, chat options) were clobbered by per-token writes; everything now merges onto the current chat, and a chat deleted mid-generation is never resurrected
+- Edit, rewind, and delete-message are blocked while a generation is in flight; Stop during the async prep phase no longer leaks an empty swipe into the tree
+- `/continue` re-executed tool blocks from the base text; only newly generated text is parsed now, and tool-only replies keep a placeholder swipe instead of vanishing
+- Backends that reject more than 4 stop strings with a 400 now get one automatic retry with the list truncated
+- `/improve` and other async composer injections could land in the wrong chat after switching; injections are tagged per chat
+- Inspector aux-call log is filtered per chat instead of showing every chat's calls
+- Streaming performance: each token re-rendered and re-parsed the whole message list - messages are now memoized and markdown throttles to ~50ms while streaming
+- Renaming a chat or editing its options no longer bumps it to the top of the sidebar
+- Server: timing-safe credential comparison, 8MB request-body cap (413), 5-minute upstream timeout, redirects never followed past the proxy allowlist, the server's own Bearer token is no longer forwarded upstream, corrupted SQLite rows no longer crash `/load` or `/all`, and uncaught handler errors return 500 instead of killing the process
+- `{{user}}` names containing `$&`/`$$` now substitute literally; `{{var:name}}` lookup is case-insensitive
+- A literal ` ```tool ` inside a tool block's JSON string no longer truncates the displayed text
+- `register_character` no longer duplicates a character that exists in the scenario or globally - it shadows it via the chat overlay
+- Sidebar: the open chat stays visible when a filter would exclude it; long-press no longer also switches the chat; swipe-to-close no longer triggers from scrolling pane content
+- File import no longer hangs when the picker is cancelled; persona dropdowns are sorted; the new-chat modal no longer preselects a persona (which trapped the inline name field); message actions are keyboard-accessible; command hints no longer float over an open pane; larger touch targets on phones
+
+### v4.0.1
+
+**Fixed**
+
+- The chat no longer stops following new output (showing "Jump to latest")
+  when the layout shifts on its own - e.g. content shrinking after a
+  regenerate, dismissing the mobile keyboard, or the meta row collapsing.
+  Only a deliberate scroll-up by you now unpins the follow.
+
+**Changed**
+
+- Starting a generation (send, regenerate, continue) or sending your own
+  message now scrolls you to the bottom and keeps you there, even if you
+  had scrolled up.
+- The "Generate response" prompt is now a small, quiet pill button sitting
+  above the composer instead of a full-width bar that looked like a second
+  send button.
+
+### v4.0.2
+
+No changes to the app itself: the frontend, server, build and tests are identical to v4.0.1. This snapshot only touched internal tooling.
+
+### v4.0.3
+
+**Changed**
+- The API key is synced via server settings storage again, reverting the
+  per-device local-only behavior introduced in v4.0.2 - one key now works
+  across devices without re-entering it
+- On startup the server copy of the API key is adopted, falling back to the
+  locally stored one if the server doesn't have it yet
+- The server token stays per-device and is still never uploaded or adopted
+- The settings dialog now tells you where the API key lives: "synced via
+  server settings" with server storage, "stored locally in this browser"
+  otherwise
+- Default accent color is now pink instead of mauve
+
+**Fixed**
+- Internal: renamed the default theme id from `miku` to `defaultTheme`
+

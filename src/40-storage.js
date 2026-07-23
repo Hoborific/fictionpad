@@ -40,7 +40,7 @@ class AbstractStorage extends EventTarget {
     clearTimeout(this.retryTimer);
     const items = [...this.saveQueue.values()];
     this.saveQueue.clear();
-    let failed = false;
+    let failed = false, fatal = null;
     for (const item of items) {
       try {
         if (item.op === 'put') await this.persistPut(item.store, item.key, item.value);
@@ -52,14 +52,42 @@ class AbstractStorage extends EventTarget {
         // that was re-set while we were flushing never duplicates work.
         if (!this.saveQueue.has(`${item.store}/${item.key}`))
           this.saveQueue.set(`${item.store}/${item.key}`, item);
+        // A full disk never heals on a timer — surface it as a persistent
+        // failure instead of retrying (the next set()/flush retries anyway).
+        if (e?.name === 'QuotaExceededError')
+          fatal = 'Browser storage is full (quota exceeded) — changes are NOT being saved. Free up storage or export and prune data, then make any edit to retry.';
         failed = true;
       }
     }
-    if (failed !== (this._retrying ?? false)) {
-      this._retrying = failed;
-      this.dispatchEvent(new CustomEvent('savestate', { detail: { retrying: failed } }));
+    if (fatal) {
+      this._retries = 0;
+      this.#savestate({ retrying: false, failed: fatal });
+      return;
     }
-    if (failed) this.retryTimer = setTimeout(() => this.flush(), 5000); // backoff retry (also retried on 'online')
+    if (failed) {
+      // Bounded exponential backoff (5s → 10 → 20 → 40 → 60s), then give up
+      // and flag the failure rather than retrying a permanent error forever.
+      // A later set(), flush(), or 'online' event starts the cycle over.
+      this._retries = (this._retries ?? 0) + 1;
+      if (this._retries > 5) {
+        this._retries = 0;
+        this.#savestate({ retrying: false, failed: 'Saving keeps failing — recent changes may not persist. Check the server/connection, then make any edit to retry.' });
+        return;
+      }
+      this.#savestate({ retrying: true, failed: null });
+      this.retryTimer = setTimeout(() => this.flush(), Math.min(60000, 5000 * 2 ** (this._retries - 1)));
+      return;
+    }
+    this._retries = 0;
+    this.#savestate({ retrying: false, failed: null });
+  }
+  // Detail is { retrying, failed } — retrying = writes queued for another
+  // attempt; failed = a message when saving gave up (null while healthy).
+  #savestate(detail) {
+    const prev = this._savestate ?? {};
+    if (!!prev.retrying === !!detail.retrying && (prev.failed ?? null) === detail.failed) return;
+    this._savestate = detail;
+    this.dispatchEvent(new CustomEvent('savestate', { detail }));
   }
   async persistPut() {}
   async persistDelete() {}

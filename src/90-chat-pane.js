@@ -9,6 +9,27 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   const programmaticRef = useRef(false);
   const lastTopRef = useRef(0); // for detecting user-initiated upward scrolls
   const [pinned, setPinned] = useState(true);
+  // Real user scroll gestures (touch drag / wheel) — used to tell deliberate
+  // scrolls from layout-driven clamp events (content shrinking on regenerate,
+  // mobile keyboard dismiss, meta-row collapse all shift scrollTop without the
+  // user touching anything and must NOT unpin the follow).
+  const gestureRef = useRef(false);
+  const gestureTimer = useRef(0);
+  const noteGesture = () => {
+    gestureRef.current = true;
+    clearTimeout(gestureTimer.current);
+    gestureTimer.current = setTimeout(() => { gestureRef.current = false; }, 300);
+  };
+  // Programmatic scroll-to-bottom: flag the scroll listener, then clear the
+  // flag on the next frame regardless — when already at bottom no scroll event
+  // fires, and waiting for one would swallow the next genuine user scroll.
+  // (A real scroll event fires before rAF callbacks, so the listener still
+  // gets first crack at the flag.)
+  const scrollElToBottom = (el) => {
+    programmaticRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => { programmaticRef.current = false; });
+  };
   // "Jump to latest" is deliberately shy: it only appears once the latest
   // message (e.g. the one being generated) is entirely scrolled out of view —
   // not merely when the user nudges up a few px from the bottom.
@@ -25,8 +46,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   const scrollToBottom = () => {
     const el = logRef.current;
     if (!el) return;
-    programmaticRef.current = true;
-    el.scrollTop = el.scrollHeight;
+    scrollElToBottom(el);
     pinnedRef.current = true;
     setPinned(true);
     setShowJump(false);
@@ -38,9 +58,12 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
     if (programmaticRef.current) { programmaticRef.current = false; lastTopRef.current = top; return; }
     const dist = el.scrollHeight - top - el.clientHeight;
     let p = pinnedRef.current;
-    // Any user-initiated upward scroll unpins immediately — during streaming,
-    // an 80px threshold just snaps you back before you can escape it.
-    if (top < lastTopRef.current - 1) p = false;
+    // Unpin on upward scrolls only when they're user-driven (an active
+    // gesture) or land clearly away from the bottom. Layout-driven clamp
+    // events — content shrinking on regenerate, keyboard dismiss, meta-row
+    // collapse — move scrollTop up with no gesture and dist ≈ 0; those must
+    // not unpin, or generation stops following and "jump to latest" appears.
+    if (top < lastTopRef.current - 1 && (gestureRef.current || dist > 80)) p = false;
     else if (dist < 40) p = true; // deliberately scrolling to the bottom re-pins
     lastTopRef.current = top;
     if (p !== pinnedRef.current) { pinnedRef.current = p; setPinned(p); }
@@ -49,7 +72,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
   useEffect(() => { // follow growth only when pinned
     const el = logRef.current;
     if (pinnedRef.current) {
-      if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+      if (el) scrollElToBottom(el);
     } else computeJump(); // content grew while unpinned — jump may newly apply
   }, [chat, generating, suggestions]);
   useEffect(() => { // new chat → start pinned at the bottom
@@ -57,8 +80,25 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
     setPinned(true);
     setShowJump(false);
     const el = logRef.current;
-    if (el) { programmaticRef.current = true; el.scrollTop = el.scrollHeight; }
+    if (el) scrollElToBottom(el);
   }, [chat?.id]);
+  // Explicit intents = go to the bottom and stay there: starting a generation
+  // (send / regenerate / ▶⁺ / generate-response) and sending your own message
+  // (a fresh user-role leaf) both force-pin, even if you were scrolled up.
+  const wasGenRef = useRef(false);
+  useEffect(() => {
+    if (generating && !wasGenRef.current) scrollToBottom();
+    wasGenRef.current = !!generating;
+  }, [generating]);
+  const seenLeafRef = useRef(null);
+  useEffect(() => {
+    const leafId = path[path.length - 1]?.id;
+    const role = path[path.length - 1]?.role;
+    if (leafId && leafId !== seenLeafRef.current) {
+      if (role === 'user' && seenLeafRef.current !== null) scrollToBottom();
+      seenLeafRef.current = leafId;
+    }
+  }, [path]);
   if (!chat) return html`
     <div class="main"><div class="chatlog"><div class="empty">
       <div style=${{ fontSize: '22px' }}>FictionPad</div>
@@ -71,9 +111,9 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
     && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
   return html`
     <div class="main">
-      <div class="chatlog" ref=${logRef} onScroll=${onLogScroll}>
+      <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
         ${path.map((node, i) => html`
-          <${MessageItem} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+          <${MessageItemMemo} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
@@ -97,9 +137,9 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
       ${!generating && leaf?.role === 'user' && html`
         <div class="gen-reply">
-          <button class="btn primary" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
+          <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
     </div>`;
 }
 

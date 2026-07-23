@@ -9,11 +9,14 @@ const COMPOSER_COMMANDS = [
   ['/theme NAME', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject }) {
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId }) {
   const [text, setText] = useState('');
   const [hint, setHint] = useState(null);
   useEffect(() => {
     if (!inject) return;
+    // Async injects (e.g. /improve) resolve seconds later; if the user
+    // switched chats meanwhile, the text belongs to the other chat.
+    if (inject.chatId && chatId && inject.chatId !== chatId) return;
     if ('text' in inject) setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
   }, [inject]);
@@ -59,7 +62,9 @@ function Composer({ generating, busy, onSubmit, onStop, inject }) {
           placeholder="Type a message or /"
           onInput=${(e) => setText(e.target.value)}
           onKeyDown=${(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !coarseEnter) { e.preventDefault(); if (!generating && !busy) send(); }
+            // While generating/busy, Enter falls through to a newline instead
+            // of being swallowed with no effect.
+            if (e.key === 'Enter' && !e.shiftKey && !coarseEnter && !generating && !busy) { e.preventDefault(); send(); }
           }} />
         ${generating
           ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`

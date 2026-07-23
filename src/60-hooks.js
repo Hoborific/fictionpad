@@ -11,14 +11,13 @@ function usePersistentState(name, initialState) {
     } catch (e) { console.error(e); }
     return typeof initialState === 'function' ? initialState() : initialState;
   });
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    try { localStorage.setItem(name, JSON.stringify(value)); } catch (e) { console.error(e); }
+  }, [name, value]);
   const update = useCallback((next) => {
-    setValue(prev => {
-      const v = typeof next === 'function' ? next(prev) : next;
-      if (typeof localStorage !== 'undefined')
-        try { localStorage.setItem(name, JSON.stringify(v)); } catch (e) { console.error(e); }
-      return v;
-    });
-  }, [name]);
+    setValue(prev => (typeof next === 'function' ? next(prev) : next));
+  }, []);
   return [value, update];
 }
 

@@ -3,6 +3,19 @@
 // Literal strings are tokenized via /tokenize ("!==" + s, prefix tokens sliced
 // off to dodge the leading-space artifact); raw "/id,id/" syntax always works.
 // ============================================================================
+// Hoisted out of LogitBiasModal: defined inline it was a new component type
+// every render, remounting every row on each keystroke.
+function LogitBiasRow({ k, e, onRemove }) {
+  return html`
+    <div class="kv">
+      <span class="k" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '55%' }}
+        title=${(e.strings ?? []).join('')}>${k} <span class="hint">[${(e.ids ?? []).join(',')}]</span></span>
+      <span>${e.power > 0 ? '+' : ''}${e.power}
+        <button class="btn small ghost" style=${{ marginLeft: '6px' }} aria-label="Remove entry"
+          onClick=${() => onRemove(k)}>✕</button></span>
+    </div>`;
+}
+
 function LogitBiasModal({ logitBias, onChange, onTokenize, onClose }) {
   const [text, setText] = useState('');
   const [power, setPower] = useState(-10);
@@ -24,8 +37,10 @@ function LogitBiasModal({ logitBias, onChange, onTokenize, onClose }) {
       } else {
         const full = await onTokenize(`!==${s}`);
         const pre = await onTokenize('!==');
-        if (full?.ids) {
-          ids = full.ids.slice(pre?.ids?.length ?? 0);
+        // Both calls must succeed: without the "!=="-only baseline we can't
+        // tell where the prefix ends, so bias would land on the wrong token.
+        if (full?.ids && pre?.ids) {
+          ids = full.ids.slice(pre.ids.length);
           strings = full.strings ? full.strings.slice((full.strings.length ?? 0) - ids.length) : ids.map(String);
         }
         if (!ids?.length) {
@@ -40,13 +55,6 @@ function LogitBiasModal({ logitBias, onChange, onTokenize, onClose }) {
     } finally { setBusy(false); }
   };
 
-  const Row = ({ k, e }) => html`
-    <div class="kv" key=${k}>
-      <span class="k" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '55%' }}
-        title=${(e.strings ?? []).join('')}>${k} <span class="hint">[${(e.ids ?? []).join(',')}]</span></span>
-      <span>${e.power > 0 ? '+' : ''}${e.power}
-        <button class="btn small ghost" style=${{ marginLeft: '6px' }} onClick=${() => remove(k)}>✕</button></span>
-    </div>`;
   const pos = entries.filter(([, e]) => e.power > 0).sort((a, b) => b[1].power - a[1].power);
   const neg = entries.filter(([, e]) => e.power < 0).sort((a, b) => a[1].power - b[1].power);
 
@@ -65,8 +73,8 @@ function LogitBiasModal({ logitBias, onChange, onTokenize, onClose }) {
       </div>
       ${hint && html`<div class="hint warn">${hint}</div>`}
       ${entries.length === 0 && html`<div class="hint">No entries.</div>`}
-      ${pos.length > 0 && html`<h4>Encouraged</h4>${pos.map(([k, e]) => html`<${Row} k=${k} e=${e} />`)}`}
-      ${neg.length > 0 && html`<h4>Discouraged</h4>${neg.map(([k, e]) => html`<${Row} k=${k} e=${e} />`)}`}
+      ${pos.length > 0 && html`<h4>Encouraged</h4>${pos.map(([k, e]) => html`<${LogitBiasRow} key=${k} k=${k} e=${e} onRemove=${remove} />`)}`}
+      ${neg.length > 0 && html`<h4>Discouraged</h4>${neg.map(([k, e]) => html`<${LogitBiasRow} key=${k} k=${k} e=${e} onRemove=${remove} />`)}`}
     <//>`;
 }
 

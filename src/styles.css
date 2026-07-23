@@ -192,7 +192,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .meta .who { font-weight: 600; color: var(--c-dim); }
 .msg.user .meta .who { color: var(--c-user); }
 .msg .actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; flex-wrap: wrap; }
-.msg:hover .actions { opacity: 1; }
+.msg:hover .actions, .msg:focus-within .actions { opacity: 1; }
 .msg .actions.always { opacity: 1; }
 .msg .swipes { display: flex; align-items: center; gap: 2px; font-size: 12px; color: var(--c-dim); }
 .msg .swipes .used-dot { color: var(--c-accent); font-size: 9px; padding: 0 1px; }
@@ -248,7 +248,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .cmd-hints {
   position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
   width: min(var(--chat-w), calc(100% - 28px)); box-sizing: border-box;
-  margin-bottom: 4px; z-index: 45; /* above the side panes */
+  margin-bottom: 4px; z-index: 30; /* below the scrim (35) — an open pane covers the hints */
   background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
   padding: 4px; box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
   display: flex; flex-direction: column;
@@ -269,10 +269,16 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .composer textarea { flex: 1; min-height: 32px; max-height: 200px; }
 .composer .hint { max-width: var(--chat-w); margin: 4px auto 0; }
 .gen-reply {
-  display: flex; justify-content: center; padding: 8px 14px; width: 100%;
+  display: flex; justify-content: center; padding: 2px 14px 0; width: 100%;
   max-width: var(--chat-w); margin: 0 auto;
-  border-top: 1px solid var(--c-border); background: var(--c-chrome);
 }
+/* Quiet pill, not a second send bar — it sits above the composer and must not
+   compete with it visually. */
+.gen-reply .gen-pill {
+  border-radius: 14px; padding: 3px 14px; font-size: 12.5px;
+  color: var(--c-dim); border: 1px solid var(--c-border); background: var(--c-bg-1);
+}
+.gen-reply .gen-pill:hover { color: var(--c-text); border-color: var(--c-accent); }
 .sugg-row {
   display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
   max-width: var(--chat-w); margin: -6px auto 14px; padding: 0 4px;
@@ -303,6 +309,8 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   padding: 6px 10px; border-radius: 5px; color: var(--c-text); font-size: 13px; cursor: pointer;
 }
 .ctx-item:hover { background: var(--c-bg-3); }
+.ctx-item:disabled { opacity: 0.4; cursor: default; }
+.ctx-item:disabled:hover { background: none; }
 .ctx-item.danger { color: var(--c-danger); }
 .ctx-sep { border-top: 1px solid var(--c-border); margin: 4px 2px; }
 .scrim {
@@ -486,6 +494,8 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   .sugg-row { margin-bottom: 10px; }
   /* Chat row actions: no hover on touch — always visible, subtle. */
   .side-item .tools { display: flex; opacity: 0.55; }
+  /* Finger-sized targets (~33px tall): meta-row actions, swipe ◀▶, sidebar tools. */
+  .msg .meta .btn.small, .side-item .tools .btn.small { padding: 7px 10px; }
   /* Meta row collapses by FIT in per-item stages (JS adds t1–t6 as the row
      overflows, one step per pre-paint pass, until it fits): details leave the
      inline row from right to left — model, (edited), gen time, date, # — each

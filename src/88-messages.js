@@ -59,10 +59,14 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // then the action icons (t6). Never measured mid-stream (the row is widest
   // while generating); re-probes from t0 on swipe change and row resizes.
   // Pre-paint, so no flash.
+  // The t1–t6 hiding rules exist only inside `@media (max-width: 700px)`, so
+  // the whole fit-measurement is pointless (and wastes up to 6 renders per
+  // message) on wider viewports — gate every step on it.
+  const metaCollapseApplies = () => window.matchMedia('(max-width: 700px)').matches;
   const metaRef = useRef(null);
   const [metaLevel, setMetaLevel] = useState(0);
   useEffect(() => {
-    const el = metaRef.current; if (!el) return;
+    const el = metaRef.current; if (!el || !metaCollapseApplies()) return;
     let seen = false; // RO fires once on observe — skip that, react only to real resizes
     const ro = new ResizeObserver(() => { if (seen) setMetaLevel(0); seen = true; });
     ro.observe(el);
@@ -75,7 +79,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
       if (metaLevel) { setMetaLevel(0); return; }
     }
     const el = metaRef.current;
-    if (!el || streaming) return;
+    if (!el || streaming || !metaCollapseApplies()) return;
     if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
   }, [metaLevel, streaming, swipe]);
   const text = subUser(swipe.text, personaName);
@@ -214,7 +218,7 @@ ${showNav && html`
           ...${gestureHandlers}>
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
             style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
-          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${Markdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
+          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
         </div>`) : html`
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
@@ -233,23 +237,55 @@ ${showNav && html`
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${Markdown} text=${displayText} prose streaming=${streaming} /></div>`}
+            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`}
       </div>`}
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
             ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
-            { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); } },
+            { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); }, disabled: generating },
             isUser
               ? { label: 'Reply from here', fn: () => onReply(node.id) }
               : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id) },
             { label: 'Branch from here', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
-              { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id) },
-              { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true },
+              { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
+              { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true, disabled: generating },
             ] : []),
           ]} />`}
     </div>`;
 }
+
+// Streaming markdown throttle: re-parsing the whole accumulated reply with
+// marked on every token is O(n²) on the main thread. While `streaming`, the
+// rendered text flushes at most once per ~50ms (the latest text is always kept
+// in a ref); when streaming ends the exact full text renders immediately via
+// the direct path. Non-streaming messages are never throttled.
+function ThrottledMarkdown({ text, prose = false, streaming = false }) {
+  const [shown, setShown] = useState(text);
+  const latestRef = useRef(text);
+  latestRef.current = text;
+  useEffect(() => {
+    if (!streaming) return; // settled: the exact text renders via the direct path
+    setShown(latestRef.current); // stream (re)started: sync once, then tick
+    const iv = setInterval(() => setShown(s => (s === latestRef.current ? s : latestRef.current)), 50);
+    return () => clearInterval(iv);
+  }, [streaming]);
+  return html`<${Markdown} text=${streaming ? shown : text} prose=${prose} streaming=${streaming} />`;
+}
+
+// Memoized MessageItem: the chat pane re-renders the whole message list per
+// streamed token, but the other messages don't change. The action callbacks
+// from App get fresh identities every render — they are behaviourally stable
+// (they read live state via ref.current; the only render-scope capture is
+// ui.chatId, and a chat switch always changes the node identities as well), so
+// a props-equal that compares everything except functions is safe here.
+const MessageItemMemo = React.memo(MessageItem, (a, b) => {
+  for (const k in a) {
+    if (typeof a[k] === 'function' && typeof b[k] === 'function') continue;
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+});
 

@@ -7,7 +7,6 @@ function newLorePiece() {
     pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
     wholeWord: false, caseSensitive: false, // trigger key matching options
     smart: false, // semantic (embedding) activation — needs settings.embeddingModel
-    hidden: false, playable: false,
   };
 }
 
@@ -73,20 +72,16 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
           </label>
           <div class="grid3">
             <label class="field"><span>Weight</span>
-              <input type="number" value=${piece.weight ?? 0} onInput=${(e) => set({ weight: Number(e.target.value) })} /></label>
-            <label class="field"><span>Search depth (est. tokens)</span>
-              <input type="number" placeholder="2048" value=${piece.searchDepth ?? ''}
-                onInput=${(e) => set({ searchDepth: e.target.value === '' ? null : Number(e.target.value) })} /></label>
+              <${NumInput} value=${piece.weight ?? 0} step=${1} fallback=${0}
+                onCommit=${(n) => set({ weight: n })} /></label>
+            <label class="field"><span>Search depth (est. tokens; blank = global default)</span>
+              <${NumInput} value=${piece.searchDepth} min=${0} step=${128} fallback=${null} placeholder="2048"
+                onCommit=${(n) => set({ searchDepth: n })} /></label>
             <div class="field"><span>Flags</span>
               <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
               <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
             </div>
           </div>
-          ${piece.type === 'character' && html`
-            <div class="field"><span>Character flags</span>
-              <label class="check"><input type="checkbox" checked=${!!piece.hidden} onChange=${(e) => set({ hidden: e.target.checked })} /> hidden</label>
-              <label class="check"><input type="checkbox" checked=${!!piece.playable} onChange=${(e) => set({ playable: e.target.checked })} /> playable</label>
-            </div>`}
           ${others.length > 0 && html`
             <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
               <div class="links-list">
@@ -114,7 +109,9 @@ function newScenario() {
 
 function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const [draft, setDraft] = useState(() => deepClone(scenario));
-  const set = (patch) => setDraft(d => ({ ...d, ...patch }));
+  const [dirty, setDirty] = useState(false);
+  const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
+  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
   const setPiece = (id, next) =>
     set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
   const charList = Object.values(characters).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
@@ -122,7 +119,7 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const toggleChar = (id, on) =>
     set({ characterIds: on ? [...linkedIds, id] : linkedIds.filter(x => x !== id) });
   return html`
-    <${Modal} title="Scenario editor" wide onClose=${onClose}
+    <${Modal} title="Scenario editor" wide onClose=${guardClose}
       footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
@@ -146,7 +143,7 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
         </select></label>
       <div class="field">
         <span>Linked characters (${linkedIds.length})</span>
-        <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card edits apply live to all linked scenarios and chats. For scenario-only characters, use a character-type lore piece below.</div>
+        <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card content edits apply live to all linked scenarios and chats — but the opening greeting is snapshotted per chat at creation, so greeting edits only affect new chats. For scenario-only characters, use a character-type lore piece below.</div>
         ${charList.length === 0 && html`<div class="hint">No global characters yet — create them from the sidebar's Characters section.</div>`}
         ${charList.length > 0 && html`
           <div class="links-list">

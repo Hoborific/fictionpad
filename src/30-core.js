@@ -23,12 +23,21 @@ const toPreview = (text, max = 300) => String(text ?? '').replace(/\s+/g, ' ').t
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
 // {{user}} is the only supported macro (no {{char}} — ambiguous in multi-char scenes).
+// Function replacement: persona names containing $&, $$ etc. must substitute
+// literally, not as replacement-string patterns.
 const subUser = (text, personaName) =>
-  String(text ?? '').replace(/\{\{user\}\}/gi, personaName || 'User');
+  String(text ?? '').replace(/\{\{user\}\}/gi, () => personaName || 'User');
 // {{var:name}} story variables (v2.0d): per-chat key/value store written by the
-// set_var tool action; unknown variables substitute to empty.
+// set_var tool action; unknown variables substitute to empty. Lookup is
+// case-insensitive (the macro regex is); an exact-case key wins on collision.
 const subVars = (text, vars) =>
-  String(text ?? '').replace(/\{\{var:([^}]+)\}\}/gi, (_, k) => String(vars?.[k.trim()] ?? ''));
+  String(text ?? '').replace(/\{\{var:([^}]+)\}\}/gi, (_, k) => {
+    if (!vars) return '';
+    const key = k.trim();
+    if (Object.prototype.hasOwnProperty.call(vars, key)) return String(vars[key] ?? '');
+    const found = Object.keys(vars).find(vk => vk.toLowerCase() === key.toLowerCase());
+    return found === undefined ? '' : String(vars[found] ?? '');
+  });
 
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
@@ -101,9 +110,15 @@ function pruneInterrupted(chat) {
     };
   }
   if (!changed) return chat;
-  // Re-parent children of dropped nodes to the dropped node's parent.
-  for (const n of Object.values(out))
-    while (n.parentId && !out[n.parentId]) n.parentId = chat.messages[n.parentId]?.parentId ?? null;
+  // Re-parent children of dropped nodes to the dropped node's parent. Nodes
+  // whose parentId must change are CLONED first — `out` otherwise shares node
+  // objects by reference with the input chat, and mutating them would corrupt
+  // the caller's tree.
+  for (const [id, n] of Object.entries(out)) {
+    let cur = n.parentId;
+    while (cur && !out[cur]) cur = chat.messages[cur]?.parentId ?? null;
+    if (cur !== n.parentId) out[id] = { ...n, parentId: cur };
+  }
   let activeLeafId = chat.activeLeafId;
   while (activeLeafId && !out[activeLeafId]) activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
   return { ...chat, messages: out, activeLeafId };
@@ -122,21 +137,35 @@ function deleteSubtree(messages, nodeId) {
   return copy;
 }
 
-// Truncate the active branch at nodeId and roll the memory store back to it.
-// Tool-written lore (createdAt-tagged, v2.0b) rolls back with the same cutoff;
-// hand-authored pieces (no createdAt) always survive.
+// Re-point the active leaf at nodeId (nothing is truncated — sibling branches
+// are untouched) and roll the memory store back to it. The cutoff is
+// position-based: entries stamped with `atLen` (active-path message count at
+// creation) survive iff atLen <= the target's path length, so rollback is
+// immune to regenerate (a new swipe gets a fresh createdAt) and to legacy
+// swipes without createdAt. Entries lacking atLen fall back to the legacy
+// createdAt cutoff (target node's active-swipe createdAt). Tool-written lore
+// (createdAt/atLen-tagged, v2.0b) and loreQueue proposals (v2.0d) roll back
+// with the same rule; hand-authored pieces (no createdAt) always survive.
+// Deliberately rewind-EXEMPT: chat.vars and chat.authorsNote — they are world
+// state (set_var / note tool effects), not narrative state, so rewinding the
+// story does not un-write them.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
+  const pathLen = getActivePath(chat.messages, nodeId).length;
   const cutoff = node.swipes[node.activeSwipe]?.createdAt ?? Date.now();
-  const memories = (chat.memoryStore?.memories ?? []).filter(m => m.createdAt <= cutoff);
+  const keep = (e) => Number.isFinite(e?.atLen) ? e.atLen <= pathLen : (e?.createdAt ?? 0) <= cutoff;
+  const memories = (chat.memoryStore?.memories ?? []).filter(keep);
   const lorePieces = Array.isArray(chat.lorePieces)
-    ? chat.lorePieces.filter(p => (p.createdAt ?? 0) <= cutoff) : chat.lorePieces;
+    ? chat.lorePieces.filter(keep) : chat.lorePieces;
+  const loreQueue = Array.isArray(chat.loreQueue)
+    ? chat.loreQueue.filter(keep) : chat.loreQueue;
   const next = {
     ...chat, activeLeafId: nodeId, memoryStore: { memories, cursor: 0 },
     ...(lorePieces !== chat.lorePieces ? { lorePieces } : {}),
+    ...(loreQueue !== chat.loreQueue ? { loreQueue } : {}),
   };
-  next.memoryStore.cursor = getActivePath(next.messages, nodeId).length;
+  next.memoryStore.cursor = pathLen;
   next.emergentCursor = next.memoryStore.cursor; // extraction cadence rolls back too
   return next;
 }
@@ -203,8 +232,12 @@ function scanLore(lorePieces, conversationText, preActivated = null,
 }
 
 // Sort candidates by effective weight desc and fill the lore budget.
+// opts.scanned: a precomputed scanLore result (assemblePrompt scans once and
+// passes it in) — omitted, selectLore scans itself. Per-piece cost includes
+// the `[title]\n` header exactly as rendered into the World Info block.
 function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
-  const candidates = [...scanLore(lorePieces, conversationText, preActivated, opts).values()].map(a => ({
+  const scan = opts.scanned ?? scanLore(lorePieces, conversationText, preActivated, opts);
+  const candidates = [...scan.values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
     content: a.piece.content ?? '',
@@ -212,7 +245,7 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
     reason: a.reason,
     boost: a.boost,
     effWeight: (Number(a.piece.weight) || 0) + a.boost,
-    tokens: estimateTokens(`${a.piece.title ?? ''}\n${a.piece.content ?? ''}`, opts.chars),
+    tokens: estimateTokens(`[${a.piece.title ?? ''}]\n${a.piece.content ?? ''}`, opts.chars),
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
@@ -350,6 +383,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     manifest.warnings.push('Backstory truncated to fit the static-layer budget.');
   }
   const staticTokens = est(staticText);
+  if (staticTokens > staticCap)
+    manifest.warnings.push('Static layer exceeds its budget cap (platform prompt, instructions, persona, or author\'s note too long).');
   manifest.layers.static = { tokens: staticTokens, cap: staticCap };
 
   // 2. conversation: root assistant node doubles as the scenario greeting.
@@ -371,10 +406,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const lorePieces = mergedLorePieces(scenario, chat, characters);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
-  // Resolved global-character ids — selectLore strips extra piece fields, so
-  // origin is recovered by id, not from the selected candidate. A chat overlay
-  // piece shadowing a global character still reports 'chat'.
-  const charPieceIds = new Set(resolveCharacters(scenario, chat, characters).map(p => p.id));
+  // Resolved global characters carry origin: 'character' from resolveCharacters
+  // (via mergedLorePieces). selectLore strips extra piece fields, so origin is
+  // recovered by id, not from the selected candidate. A chat overlay piece
+  // shadowing a global character replaces it in the merge and thus reports
+  // 'chat'.
+  const charPieceIds = new Set(
+    lorePieces.filter(p => p?.origin === 'character' && !chatPieceIds.has(p.id)).map(p => p.id));
   const originOf = (p) => chatPieceIds.has(p.id) ? 'chat' : (charPieceIds.has(p.id) ? 'character' : 'scenario');
   // /pov forces the named character's piece in (reason 'pov') alongside any
   // semantic pre-activations.
@@ -385,8 +423,10 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     else if (preActivated) for (const id of preActivated) preAct.set(id, 'semantic');
     preAct.set(pov.pieceId, 'pov');
   }
+  // Scan once: the same result drives both budget selection and the
+  // inactive-list reasons below.
   const loreScanned = scanLore(lorePieces, conversationText, preAct, loreOpts);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, loreOpts);
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, { ...loreOpts, scanned: loreScanned });
   const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
   // Count the full block as sent (incl. the literal [World Info] header) so the
   // layer estimate matches the exact /tokenize count and the history headroom.
@@ -400,7 +440,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
       origin: originOf(p),
-      tokens: est(`${p.title ?? ''}\n${p.content ?? ''}`),
+      tokens: est(`[${p.title ?? ''}]\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
   }
@@ -413,7 +453,11 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     inactive,
   };
 
-  // 4. memory layer: pinned first (oldest→newest), then recent unpinned
+  // 4. memory layer: pinned first (oldest→newest), then recent unpinned.
+  //    That ordering is only the budget-fill PRIORITY; the selected memories
+  //    are rendered chronologically (createdAt asc) so the model reads the
+  //    memory block forwards in time. Per-memory cost counts the `- ` prefix
+  //    exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
   const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
   const memOrdered = [
@@ -423,24 +467,26 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const memSel = [];
   let memUsed = 0;
   for (const m of memOrdered) {
-    const cost = est(m.text);
+    const cost = est(`- ${m.text}`);
     if (memUsed + cost > memCap) continue;
     memSel.push(m);
     memUsed += cost;
   }
-  const memText = memSel.length ? `[Memories]\n${memSel.map(m => `- ${m.text}`).join('\n')}` : '';
+  const memRender = [...memSel].sort((a, b) => a.createdAt - b.createdAt);
+  const memText = memRender.length ? `[Memories]\n${memRender.map(m => `- ${m.text}`).join('\n')}` : '';
   const memTokens = memText ? est(memText) : 0;
   manifest.layers.memory = {
     tokens: memTokens, cap: memCap,
-    memories: memSel.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: est(m.text), preview: toPreview(m.text), text: m.text ?? '' })),
+    memories: memRender.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
   };
 
-  // 5. history fills the remainder; oldest messages dropped first
+  // 5. history fills the remainder; oldest messages dropped first.
+  //    Estimates run on the macro-SUBSTITUTED text — that's what gets sent.
   const historyCap = Math.max(0, budget - staticTokens - loreTokens - memTokens - greetingTokens);
   const kept = [];
   let histUsed = 0;
   for (let i = historyNodes.length - 1; i >= 0; i--) {
-    const cost = est(activeText(historyNodes[i]));
+    const cost = est(sub(activeText(historyNodes[i])));
     if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
     kept.unshift(historyNodes[i]);
     histUsed += cost;
@@ -518,14 +564,14 @@ function stripToolBlocksMapped(text) {
   TOOL_BLOCK_RE.lastIndex = 0;
   let m;
   while ((m = TOOL_BLOCK_RE.exec(s))) removed.push([m.index, m.index + m[0].length]);
-  // Trailing unterminated fence: last ```tool occurrence that doesn't start a
-  // complete (removed) block.
+  // Trailing unterminated fence: a ```tool occurrence at/after the END of the
+  // last complete block. Scanning the whole string over-matches — a literal
+  // ```tool inside a complete block's JSON string is content, not a fence, and
+  // must never truncate the display text that follows the block.
+  const scanFrom = removed.length ? removed[removed.length - 1][1] : 0;
   let cut = s.length;
-  let p = s.lastIndexOf('```tool');
-  while (p !== -1) {
-    if (!removed.some(([a]) => a === p)) { cut = p; break; }
-    p = p > 0 ? s.lastIndexOf('```tool', p - 1) : -1;
-  }
+  const p = s.lastIndexOf('```tool');
+  if (p >= scanFrom) cut = p;
   const map = []; // keptIdx -> rawIdx
   let pos = 0;
   const take = (a, b) => { for (let i = a; i < b; i++) map.push(i); };
@@ -572,21 +618,25 @@ function stripToolBlocks(text) {
 // Execute parsed calls against the chat's lore overlay. Returns
 // { chat, results: [{ name, args, ok, note }] }; same chat object when
 // nothing applied. Unknown tools / validation failures are notes, not throws.
-// New pieces are tagged { createdAt: now, createdBy: nodeId } — provenance for
-// rewind rollback (timestamp cutoff, like memories) and regenerate pruning
-// (pruneToolPieces). Updates keep the original piece's provenance.
+// New pieces are tagged { createdAt: now, createdBy: nodeId } (plus atLen when
+// the caller supplies it) — provenance for rewind rollback and regenerate
+// pruning (pruneToolPieces). Updates keep the original piece's provenance.
 // opts.queueLore: add_lore calls for NEW titles go to the review queue
 // (emergent-lore 'queue' mode) instead of straight into lorePieces.
 // opts.customTools: user-defined tools (Settings) — action aliases for the
 // built-ins plus 'note' (author's note) and 'set_var' (story variable).
-function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}) {
+// allPieces (optional): the full merged piece list (scenario + global
+// characters + chat overlay) — used ONLY for register_character dedupe, so a
+// name that exists outside the chat overlay is shadowed via the overlay
+// instead of duplicated. Omit it and dedupe stays overlay-local (old shape).
+function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}, allPieces = null) {
   let work = chat;
   const results = [];
   let applied = 0;
   for (const c of calls ?? []) {
     if (c.error) { results.push({ name: '(unparsed)', args: {}, ok: false, note: `${c.error}: ${c.raw ?? ''}` }); continue; }
     if (applied >= cap) { results.push({ name: c.name, args: c.args, ok: false, note: 'call cap reached' }); continue; }
-    const r = applyToolCall(work, c, opts);
+    const r = applyToolCall(work, c, { ...opts, allPieces });
     results.push({ name: c.name, args: c.args, ok: r.ok, note: r.note });
     if (r.ok) { work = r.chat; applied++; }
   }
@@ -618,7 +668,7 @@ function acceptQueuedLore(chat, queueId) {
   if (!q) return chat;
   const piece = {
     pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
-    wholeWord: false, caseSensitive: false, smart: false, hidden: false, playable: false,
+    wholeWord: false, caseSensitive: false, smart: false,
     id: q.id, type: q.type ?? 'lore', title: q.title ?? '', content: q.content ?? '', keys: q.keys ?? [],
   };
   return { ...chat,
@@ -631,25 +681,35 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
-function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, customTools = [] } = {}) {
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, customTools = [], allPieces = null, atLen = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
   const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
   const base = {
     pinned: false, weight: 0, links: [], enabled: true, searchDepth: null,
-    wholeWord: false, caseSensitive: false, smart: false, hidden: false, playable: false,
+    wholeWord: false, caseSensitive: false, smart: false,
   };
   const save = (lorePieces, note) => ({ ok: true, note, chat: { ...chat, lorePieces } });
-  const provenance = { createdAt: now, createdBy: nodeId };
+  const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId };
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
     const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
     if (!cname) return fail('register_character: name required');
     if (!desc) return fail('register_character: description required');
-    const existing = pieces.find(p => p.type === 'character'
+    // Dedupe by title across EVERYTHING the caller can see (allPieces =
+    // scenario + global + chat overlay); without it only the overlay is
+    // checked and a same-named scenario character would be duplicated.
+    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
+    const existing = haystack.find(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
-    if (existing)
+    if (existing && pieces.some(p => p.id === existing.id))
       return save(pieces.map(p => p.id === existing.id ? { ...p, content: desc } : p),
+        `updated character "${cname}"`);
+    if (existing)
+      // Match lives outside the chat overlay (scenario/global): shadow it via
+      // the overlay instead of duplicating the name (characterNamesOf would
+      // report it twice). Fresh provenance → rewind drops the shadow again.
+      return save([...pieces, { ...existing, ...provenance, content: desc }],
         `updated character "${cname}"`);
     return save([...pieces, { ...base, ...provenance, id: uid(), type: 'character', title: cname, content: desc, keys: [cname] }],
       `registered character "${cname}"`);
@@ -669,7 +729,8 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
       return { ok: true, note: `queued lore "${title}" for review`,
-        chat: queueLorePiece(chat, { title, content, keys, source: 'tool', createdAt: now }) };
+        chat: queueLorePiece(chat, { title, content, keys, source: 'tool', createdAt: now,
+          ...(Number.isFinite(atLen) ? { atLen } : {}) }) };
     return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
       `added lore "${title}"`);
   }
@@ -678,7 +739,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   const def = customTools.find(t => t?.name?.trim() === call.name);
   if (def) {
     if (def.action === 'register_character' || def.action === 'add_lore')
-      return applyToolCall(chat, { name: def.action, args: call.args }, { nodeId, now, queueLore, customTools });
+      return applyToolCall(chat, { name: def.action, args: call.args }, { nodeId, now, queueLore, customTools, allPieces, atLen });
     if (def.action === 'note') {
       const text = String(args.text ?? '').trim().slice(0, TOOL_TEXT_MAX);
       if (!text) return fail(`${def.name}: text required`);
@@ -728,7 +789,7 @@ function splitSpeakerSegments(text, names) {
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
-  const re = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const re = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
   const segments = [];
   let cur = { speaker: null, text: '' };
   const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };

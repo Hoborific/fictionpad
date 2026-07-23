@@ -28,6 +28,13 @@ const {
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore,
 } = core;
 
+// detectSpeaker lives in src/20-prose.js, outside the pure-core region —
+// extract its (dependency-free) function source from fictionpad.html and
+// eval it standalone.
+const speakerMatch = html.match(/function detectSpeaker\([\s\S]*?\n\}/);
+if (!speakerMatch) throw new Error('detectSpeaker not found in fictionpad.html');
+const detectSpeaker = new Function(`${speakerMatch[0]}\nreturn detectSpeaker;`)();
+
 // ---- tiny test runner ----
 let failures = 0;
 function ok(cond, name) {
@@ -123,10 +130,11 @@ section('lore engine');
   ok(!optScan.has('ww'), 'piece wholeWord flag respected by scanLore');
 
   // weight ordering under budget pressure: budget fits exactly one piece
+  // (per-piece cost includes the rendered `[title]\n` header)
   const sel = selectLore([
     lore({ id: 'low', pinned: true, weight: 1, content: 'x'.repeat(30) }),
     lore({ id: 'high', keys: ['aa'], weight: 9, content: 'x'.repeat(30) }),
-  ], 'aa', estimateTokens('x'.repeat(33)));
+  ], 'aa', estimateTokens('x'.repeat(36)));
   ok(sel.length === 1 && sel[0].id === 'high', 'higher weight wins under budget pressure');
 
   // link boost: T (w5, triggered, links L) boosts L (w4) past U (w7, triggered)? no —
@@ -135,7 +143,7 @@ section('lore engine');
     lore({ id: 'T', keys: ['go'], weight: 5, links: ['L'], content: 't'.repeat(30) }),
     lore({ id: 'L', weight: 4, content: 'l'.repeat(30) }),
     lore({ id: 'U', keys: ['go'], weight: 7, content: 'u'.repeat(30) }),
-  ], 'go', estimateTokens('x'.repeat(66))); // budget fits exactly 2 pieces
+  ], 'go', estimateTokens('x'.repeat(72))); // budget fits exactly 2 pieces
   const ids = boosted.map(s => s.id);
   ok(ids.includes('U') && ids.includes('L') && !ids.includes('T'),
     'link boost raises effective weight for budget contention');
@@ -287,6 +295,7 @@ section('tool calls');
       'a ```tool\n{"tool":"x"}\n```\n\n\n\nb',
       'story text ```tool\n{"tool":"register_character","args":{"na',
       'one ```tool\n{"tool":"a"}\n``` two ```tool\n{"tool":"b"}\n``` three ```tool\n{"unterminated"',
+      'a ```tool\n{"tool":"x","args":{"content":"a literal ```tool inside"}}\n``` b',
       '\n\n  ```tool\n{"tool":"x"}\n```\n\n',
     ];
     for (const f of fixtures) {
@@ -843,6 +852,180 @@ section('pruneInterrupted');
     'root greeting untouched');
   ok(pruneInterrupted(pruned) === pruned, 'prune is a no-op (same object) when clean');
   ok(pruneInterrupted(baseChat) === baseChat, 'clean chat passes through unchanged');
+}
+
+// ---- macro substitution edge cases ----
+section('macro edge cases');
+{
+  ok(subUser('Hi {{user}}!', 'A$&B') === 'Hi A$&B!', 'persona name with $& substitutes literally');
+  ok(subUser('{{user}} x {{user}}', '$$') === '$$ x $$', 'persona name with $$ substitutes literally');
+  ok(subVars('{{var:Score}}', { score: '5' }) === '5', 'var lookup is case-insensitive');
+  ok(subVars('{{var:hp}}', { HP: '1', hp: '2' }) === '2', 'exact-case key wins on collision');
+  ok(subVars('{{var:Missing}}', { score: '5' }) === '', 'unknown var still substitutes empty');
+}
+
+// ---- rewind: position-based (atLen) cutoff ----
+section('rewind atLen cutoff');
+{
+  // root(1) → m1(2) → m2(3); m1's active swipe is a REGENERATE with a fresh
+  // createdAt (9000) — wall-clock cutoffs break here, position cutoffs don't.
+  // Each entry's createdAt is arranged to contradict its atLen outcome, so the
+  // test only passes if atLen takes precedence:
+  //   kept  entries have createdAt AFTER  the fallback cutoff (9000)
+  //   dropped entries have createdAt BEFORE the fallback cutoff
+  const m1 = { id: 'm1', parentId: 'root', role: 'user', activeSwipe: 1, edited: false,
+    swipes: [{ text: 'v1', createdAt: 10, modelId: null }, { text: 'v2', createdAt: 9000, modelId: null }] };
+  const chat = {
+    ...baseChat,
+    messages: {
+      root: node('root', null, 'assistant', 'hi', 1),
+      m1,
+      m2: node('m2', 'm1', 'assistant', 'there', 9500),
+    },
+    activeLeafId: 'm2',
+    memoryStore: { memories: [
+      { id: 'memOld', text: 'old', pinned: false, createdAt: 9500, atLen: 2 },
+      { id: 'memNew', text: 'new', pinned: false, createdAt: 8000, atLen: 3 },
+    ], cursor: 3 },
+    lorePieces: [
+      lore({ id: 'M', title: 'Manual' }), // hand-authored: no provenance
+      { ...lore({ id: 'T1', title: 'ToolEarly' }), createdAt: 9600, createdBy: 'm1', atLen: 2 },
+      { ...lore({ id: 'T2', title: 'ToolLate' }), createdAt: 8000, createdBy: 'm2', atLen: 3 },
+    ],
+    loreQueue: [
+      { id: 'q1', title: 'QEarly', content: 'x', keys: [], source: 'tool', createdAt: 9700, atLen: 2 },
+      { id: 'q2', title: 'QLate', content: 'x', keys: [], source: 'tool', createdAt: 8000, atLen: 3 },
+    ],
+  };
+  const rw = rewindChat(chat, 'm1'); // pathLen = 2
+  ok(rw.memoryStore.memories.map(m => m.id).join(',') === 'memOld',
+    'atLen memories: regenerate-safe position cutoff (new swipe createdAt irrelevant)');
+  ok(rw.lorePieces.map(p => p.id).join(',') === 'M,T1',
+    'atLen tool lore rolls back by position; hand-authored pieces survive');
+  ok(rw.loreQueue.map(q => q.id).join(',') === 'q1',
+    'loreQueue proposals roll back with the same rule');
+  ok(rw.memoryStore.cursor === 2 && rw.emergentCursor === 2, 'cursors reset to path length');
+  // legacy entries WITHOUT atLen still fall back to the createdAt cutoff
+  const legacy = { ...baseChat,
+    memoryStore: { memories: [
+      { id: 'a', text: 'a', pinned: false, createdAt: 0 },
+      { id: 'b', text: 'b', pinned: false, createdAt: Date.now() + 100000 },
+    ], cursor: 0 },
+    loreQueue: [{ id: 'q', title: 'Q', content: 'x', keys: [], source: 'tool', createdAt: Date.now() + 100000 }] };
+  const rw2 = rewindChat(legacy, 'root');
+  ok(rw2.memoryStore.memories.length === 1 && rw2.memoryStore.memories[0].id === 'a',
+    'entries without atLen fall back to the createdAt cutoff');
+  ok(rw2.loreQueue.length === 0, 'loreQueue entries without atLen fall back too');
+}
+
+// ---- pruneInterrupted purity ----
+section('pruneInterrupted purity');
+{
+  let chat = baseChat;
+  chat = appendMessage(chat, 'root', 'user', 'hi').chat;
+  const u1 = chat.activeLeafId;
+  chat = appendMessage(chat, u1, 'assistant', '').chat; // placeholder, dropped by prune
+  const a1 = chat.activeLeafId;
+  chat = appendMessage(chat, a1, 'user', 'again').chat;
+  const u2 = chat.activeLeafId;
+  const pruned = pruneInterrupted(chat);
+  ok(pruned.messages[u2].parentId === u1, 'child of dropped node re-parented to grandparent');
+  ok(chat.messages[u2].parentId === a1, 'input chat nodes not mutated by prune');
+  ok(pruned.messages[u2] !== chat.messages[u2], 're-parented node is a clone');
+}
+
+// ---- digit-named speakers ----
+section('digit-named speakers');
+{
+  const names = ['R2-D2', 'Agent 47'];
+  const s = splitSpeakerSegments('R2-D2: beep boop\nNarrator: The droid rolls off.\nAgent 47: Target down.', names);
+  ok(s.length === 3
+    && s[0].speaker === 'R2-D2' && s[0].text === 'beep boop'
+    && s[1].speaker === null && s[1].text === 'The droid rolls off.'
+    && s[2].speaker === 'Agent 47' && s[2].text === 'Target down.',
+    'splitSpeakerSegments splits digit-named speakers');
+  ok(detectSpeaker('R2-D2: beep boop', names) === 'R2-D2', 'detectSpeaker matches a digit-named speaker');
+  ok(detectSpeaker('Agent 47: Target down.', names) === 'Agent 47', 'detectSpeaker matches a space+digit name');
+  ok(detectSpeaker('R2-D2: beep', ['C-3PO']) === null, 'unknown digit name still not attributed');
+}
+
+// ---- register_character dedupe across all pieces ----
+section('register_character cross-origin dedupe');
+{
+  const scenPiece = lore({ id: 'SC1', title: 'Vex', type: 'character', content: 'scenario desc', keys: ['vex'] });
+  const chat = { ...baseChat, lorePieces: [] };
+  const allPieces = [scenPiece]; // merged scenario + global + chat list from the caller
+  const r = applyToolCalls(chat, [{ name: 'register_character', args: { name: 'vex', description: 'new desc' } }], {}, allPieces);
+  ok(r.results[0].ok && r.results[0].note.startsWith('updated'), 'scenario-level match reported as an update');
+  ok(r.chat.lorePieces.length === 1 && r.chat.lorePieces[0].id === 'SC1' && r.chat.lorePieces[0].content === 'new desc',
+    'scenario piece shadowed via the chat overlay — no duplicate');
+  const merged = mergedLorePieces({ ...baseScenario, lorePieces: [scenPiece] }, r.chat);
+  ok(merged.filter(p => p.type === 'character' && p.title.trim().toLowerCase() === 'vex').length === 1,
+    'merged view keeps a single piece for the name');
+  ok(Number.isFinite(r.chat.lorePieces[0].createdAt) && 'createdBy' in r.chat.lorePieces[0],
+    'shadow copy carries fresh provenance so rewind drops it again');
+  // old call shape (no allPieces) still dedupes within the overlay
+  const r2 = applyToolCalls(r.chat, [{ name: 'register_character', args: { name: 'VEX', description: 'third' } }]);
+  ok(r2.chat.lorePieces.length === 1 && r2.chat.lorePieces[0].content === 'third',
+    'old call shape still dedupes inside the overlay');
+}
+
+// ---- memory render order ----
+section('memory render order');
+{
+  const chat = { ...baseChat, memoryStore: { memories: [
+    { id: 'mPin', text: 'PINNED fact', pinned: true, createdAt: 5 },
+    { id: 'mOld', text: 'OLD event', pinned: false, createdAt: 1 },
+    { id: 'mNew', text: 'NEW event', pinned: false, createdAt: 10 },
+  ], cursor: 0 } };
+  const { messages, manifest } = assemblePrompt({
+    scenario: baseScenario, persona, chat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '' });
+  const memMsg = messages.find(m => m.role === 'system' && m.content.startsWith('[Memories]'));
+  const iOld = memMsg.content.indexOf('OLD event');
+  const iPin = memMsg.content.indexOf('PINNED fact');
+  const iNew = memMsg.content.indexOf('NEW event');
+  ok(iOld !== -1 && iOld < iPin && iPin < iNew,
+    'selected memories render oldest→newest regardless of pin/fill priority');
+  ok(manifest.layers.memory.memories.map(m => m.id).join(',') === 'mOld,mPin,mNew',
+    'manifest memory list matches render order');
+}
+
+// ---- static layer cap warning ----
+section('static layer cap warning');
+{
+  // budget 600, staticCap 180; a huge platform prompt with NO backstory means
+  // nothing is truncated — the layer simply exceeds its cap.
+  const { manifest } = assemblePrompt({
+    scenario: { ...baseScenario, backstory: '' },
+    persona, chat: baseChat,
+    settings: { contextLength: 1000, maxTokens: 400 },
+    platformPrompt: 'x'.repeat(2000),
+  });
+  ok(manifest.layers.static.tokens > manifest.layers.static.cap, 'oversized static layer reported over cap');
+  ok(manifest.warnings.some(w => /Static layer exceeds its budget cap/.test(w)),
+    'manifest warns when non-backstory static text exceeds the cap');
+  const fine = assemblePrompt({
+    scenario: { ...baseScenario, backstory: '' }, persona, chat: baseChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '' });
+  ok(!fine.manifest.warnings.some(w => /Static layer exceeds its budget cap/.test(w)),
+    'no warning when the static layer is within its cap');
+}
+
+// ---- tool fence edge cases ----
+section('tool fence edge cases');
+{
+  const t = 'Intro ```tool\n{"tool":"add_lore","args":{"title":"X","content":"a literal ```tool inside"}}\n``` outro';
+  const p = parseToolCalls(t);
+  // The fence regex ends the block at the inner literal, so the call is
+  // malformed — the point is that the trailing-fence scan must NOT treat that
+  // inner literal as an unterminated fence and truncate the text after it.
+  ok(p.calls.length === 1 && p.calls[0].error === 'malformed JSON',
+    'literal ```tool in JSON: block reported malformed, still stripped');
+  ok(p.text.includes('Intro') && p.text.includes('outro'),
+    'display text after the block survives the trailing-fence scan');
+  const q = parseToolCalls('a ```tool\n{"tool":"x"}\n``` b ```tool\n{"partial"');
+  ok(q.text === 'a  b', 'real trailing unterminated fence still hidden');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

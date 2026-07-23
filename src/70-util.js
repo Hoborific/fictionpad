@@ -21,6 +21,9 @@ function pickJSONFile() {
       try { resolve(JSON.parse(await file.text())); }
       catch (e) { resolve({ __error: String(e) }); }
     };
+    // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+);
+    // without this the promise never settles and imports silently hang.
+    input.oncancel = () => resolve(null);
     input.click();
   });
 }

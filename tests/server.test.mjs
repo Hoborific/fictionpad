@@ -48,6 +48,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'fp-server-test-'));
 const dbPath = join(tmp, 'test.db');
 const portA = 18931, portB = 18932, portC = 18933, portU = 18934, portD = 18935;
 let a = null, b = null, c = null, d = null, upstream = null;
+let hangClosed = false;
 
 try {
   a = startServer(portA, { FICTIONPAD_DB: dbPath });
@@ -65,6 +66,11 @@ try {
   ok(loadRes.ok, '/load existing → 200');
   ok(JSON.stringify((await loadRes.json()).data) === JSON.stringify(entity), '/load roundtrips the entity');
   ok((await post(portA, '/load', { store: 'Scenarios', key: 'missing' })).status === 404, '/load missing → 404');
+
+  // /save requires a key — a missing/empty key must not store a literal
+  // "undefined"/"" row.
+  ok((await post(portA, '/save', { store: 'Scenarios', data: { id: 'x' } })).status === 400, '/save without key → 400');
+  ok((await post(portA, '/save', { store: 'Scenarios', key: '', data: { id: 'x' } })).status === 400, '/save with empty key → 400');
 
   // /all + /list + /delete
   await post(portA, '/save', { store: 'Scenarios', key: 'def', data: { id: 'def' } });
@@ -85,8 +91,28 @@ try {
   ok((await post(portA, '/save', { store: 'Nope', key: 'x', data: {} })).status === 400, 'unknown store → 400');
   ok((await post(portA, '/all', { store: 'Nope' })).status === 400, 'unknown store on /all → 400');
 
+  // corrupted kv blob: one bad row must not crash the server or kill /all.
+  {
+    const raw = new DatabaseSync(dbPath);
+    raw.exec('PRAGMA busy_timeout=5000;');
+    raw.prepare('INSERT OR REPLACE INTO kv (store, key, data) VALUES (?, ?, ?)')
+      .run('Scenarios', 'bogus', Buffer.from('not-a-gzip-blob'));
+    raw.close();
+  }
+  const allCorrupt = await post(portA, '/all', { store: 'Scenarios' });
+  ok(allCorrupt.ok, 'corrupted row: /all → 200');
+  const allCorruptEntries = (await allCorrupt.json()).entries;
+  ok(!('bogus' in (allCorruptEntries ?? {})) && 'abc' in (allCorruptEntries ?? {}),
+    'corrupted row: /all skips the bad row, keeps the good ones');
+  ok((await post(portA, '/load', { store: 'Scenarios', key: 'bogus' })).status === 500,
+    'corrupted row: /load of the bad key → 500');
+  ok((await fetch(`http://127.0.0.1:${portA}/health`)).ok, 'server survives corrupted kv rows');
+
   // auth (server B has FICTIONPAD_TOKEN)
-  ok((await fetch(`http://127.0.0.1:${portB}/version`)).status === 401, 'token: /version without header → 401');
+  const unauthVersion = await fetch(`http://127.0.0.1:${portB}/version`);
+  ok(unauthVersion.status === 401, 'token: /version without header → 401');
+  ok(unauthVersion.headers.get('x-fictionpad-auth') === 'required',
+    'own 401 carries X-FictionPad-Auth: required');
   ok((await post(portB, '/save', { store: 'Chats', key: 'x', data: {} })).status === 401, 'token: /save without header → 401');
   ok((await post(portB, '/list', {})).status === 401, 'token: /list without header → 401');
   const auth = { Authorization: 'Bearer secret-tok' };
@@ -109,6 +135,8 @@ try {
   ok(noCreds.status === 401, 'basic: / without creds → 401');
   ok((noCreds.headers.get('www-authenticate') ?? '').includes('Basic realm="fictionpad"'),
     'basic: 401 carries WWW-Authenticate challenge');
+  ok(noCreds.headers.get('x-fictionpad-auth') === 'required',
+    'basic: own 401 carries X-FictionPad-Auth: required');
   ok((await fetch(`http://127.0.0.1:${portC}/version`)).status === 401, 'basic: storage route without creds → 401');
   ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basicWrong })).status === 401, 'basic: wrong creds → 401');
   ok((await fetch(`http://127.0.0.1:${portC}/`, { headers: basic })).ok, 'basic: correct creds → 200 on /');
@@ -128,9 +156,42 @@ try {
   ok(badBearer.status === 401, 'basic+bearer: wrong Bearer → 401');
   ok(badBearer.headers.get('www-authenticate') === null,
     'basic+bearer: Bearer 401 carries no WWW-Authenticate (no password-sheet loop)');
+  ok(badBearer.headers.get('x-fictionpad-auth') === 'required',
+    'basic+bearer: Bearer 401 still carries X-FictionPad-Auth: required');
+
+  // CORS preflight must allow the X-Real-Authorization header the app sends.
+  const preflight = await fetch(`http://127.0.0.1:${portA}/proxy/x`, { method: 'OPTIONS' });
+  ok((preflight.headers.get('access-control-allow-headers') ?? '').includes('X-Real-Authorization'),
+    'CORS preflight allows X-Real-Authorization');
 
   // ---- proxy credential hygiene (mock upstream echoes headers) ----
   upstream = http.createServer((req, res) => {
+    if (req.url === '/redirect') {
+      // 302 to a host OFF the allowlist — the proxy must not follow it.
+      res.writeHead(302, { Location: `http://localhost:${portU}/echo` });
+      return res.end();
+    }
+    if (req.url === '/unauthorized') {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'upstream says no' }));
+    }
+    if (req.url === '/stream') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const chunks = ['data: one\n\n', 'data: two\n\n', 'data: three\n\n'];
+      let i = 0;
+      const tick = () => {
+        if (i < chunks.length) { res.write(chunks[i++]); setTimeout(tick, 50); }
+        else res.end();
+      };
+      tick();
+      return;
+    }
+    if (req.url === '/hang') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: hi\n\n');
+      req.on('close', () => { hangClosed = true; });
+      return; // never ends — the client disconnect must tear this down
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(req.headers));
   });
@@ -144,6 +205,11 @@ try {
   const echoed2 = await (await viaProxy({ ...basic, 'X-Real-Authorization': 'Bearer llm-key-123' })).json();
   ok(echoed2.authorization === 'Bearer llm-key-123', 'proxy: X-Real-Authorization mapped to upstream Authorization');
   ok(!('x-real-authorization' in echoed2), 'proxy: X-Real-Authorization itself NOT forwarded upstream');
+
+  // Token-only deployment (server B, no X-Real-Authorization): the server
+  // Bearer token must not leak upstream either.
+  const echoedB = await (await fetch(`http://127.0.0.1:${portB}/proxy/http://127.0.0.1:${portU}/echo`, { headers: auth })).json();
+  ok(!('authorization' in echoedB), 'proxy: server Bearer token NOT forwarded upstream (token-only deployment)');
 
   // ---- proxy access policy (P3) ----
   const proxyTo = (port, target, headers = {}) =>
@@ -175,6 +241,48 @@ try {
   ok((await proxyTo(portD, loop, auth)).ok, 'proxy policy: allowlisted host → 200');
   const offList = await proxyTo(portD, `http://localhost:${portU}/echo`, auth);
   ok(offList.status === 403, 'proxy policy: non-allowlisted host (even loopback alias) → 403');
+
+  // An allowlisted host 302-ing elsewhere must not be followed past the
+  // policy — the 3xx passes through to the client as-is.
+  const redir = await fetch(`http://127.0.0.1:${portD}/proxy/http://127.0.0.1:${portU}/redirect`,
+    { headers: auth, redirect: 'manual' });
+  ok(redir.status === 302, 'proxy: upstream redirect NOT followed (3xx passed through)');
+
+  // Malformed proxy target (bad percent-encoding) → 400, not a crashed worker.
+  const malformed = await fetch(`http://127.0.0.1:${portA}/proxy/http%zz`);
+  ok(malformed.status === 400, 'proxy: malformed target encoding → 400');
+  ok((await fetch(`http://127.0.0.1:${portA}/health`)).ok, 'server survives malformed proxy target');
+
+  // Upstream 401 passes through WITHOUT the server's own X-FictionPad-Auth tag.
+  const upstream401 = await fetch(`http://127.0.0.1:${portA}/proxy/http://127.0.0.1:${portU}/unauthorized`);
+  ok(upstream401.status === 401, 'proxy: upstream 401 passes through');
+  ok(upstream401.headers.get('x-fictionpad-auth') === null,
+    'proxy: upstream 401 NOT tagged with X-FictionPad-Auth');
+
+  // SSE-style streaming: multi-chunk body arrives complete, in order, with
+  // the upstream Content-Type preserved.
+  const sse = await fetch(`http://127.0.0.1:${portA}/proxy/http://127.0.0.1:${portU}/stream`);
+  ok((sse.headers.get('content-type') ?? '').includes('text/event-stream'),
+    'proxy SSE: Content-Type preserved');
+  ok((await sse.text()) === 'data: one\n\ndata: two\n\ndata: three\n\n',
+    'proxy SSE: all chunks received in order');
+
+  // Client disconnect mid-stream aborts the upstream request.
+  {
+    const acClient = new AbortController();
+    const hangRes = await fetch(`http://127.0.0.1:${portA}/proxy/http://127.0.0.1:${portU}/hang`,
+      { signal: acClient.signal });
+    const reader = hangRes.body.getReader();
+    await reader.read(); // first chunk arrived, stream is live
+    acClient.abort();
+    await reader.read().catch(() => {});
+    let waited = 0;
+    while (!hangClosed && waited < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+      waited += 100;
+    }
+    ok(hangClosed, 'proxy: client disconnect aborts the upstream request');
+  }
 } finally {
   await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d)]);
   upstream?.close();

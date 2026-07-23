@@ -18,7 +18,7 @@
 // the new hash, paste it into `sha256`, delete the vendor/ cache file, re-run.
 
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,6 +62,12 @@ const SRC_FILES = [
 
 async function assemble() {
   let template = await readFile(TEMPLATE, 'utf8');
+  // Drift guard: every src/*.js fragment must be registered in SRC_FILES —
+  // an unregistered file would otherwise be silently omitted from the build.
+  const onDisk = (await readdir(SRC_DIR)).filter(f => f.endsWith('.js'));
+  const unregistered = onDisk.filter(f => !SRC_FILES.includes(f));
+  if (unregistered.length)
+    throw new Error(`src fragment(s) missing from SRC_FILES in vendor.mjs: ${unregistered.join(', ')}`);
   const css = (await readFile(join(SRC_DIR, 'styles.css'), 'utf8')).replace(/\n$/, '');
   const parts = [];
   for (const f of SRC_FILES)

@@ -30,13 +30,18 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   ].filter(id => characters?.[id]));
   const shownScenarios = sideCollapsed.scenarios ? scenarioList.filter(s => s.id === pinScenarioId) : scenarioList;
   const shownCharacters = sideCollapsed.characters ? characterList.filter(c => pinCharIds.has(c.id)) : characterList;
-  const shownChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
+  // The open chat is always pinned into the list — even when the scenario/
+  // character filter would exclude it (chat opened first, filter changed after).
+  const baseChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
+  const shownChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
+  const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
   const lpStart = (e, id) => {
     if (e.pointerType === 'mouse') return;
+    lpMenuRef.current = false; // a fresh press supersedes any stale swallow flag
     const { clientX: x, clientY: y } = e;
-    lp.current = { x, y, timer: setTimeout(() => { lp.current = null; onChatContextMenu(id, x, y); }, 500) };
+    lp.current = { x, y, timer: setTimeout(() => { lp.current = null; lpMenuRef.current = true; onChatContextMenu(id, x, y); }, 500) };
   };
   const lpCancel = (e) => {
     if (!lp.current) return;
@@ -73,7 +78,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                 <button class="btn small ghost" title="Export JSON"
                   onClick=${(e) => { e.stopPropagation(); onExportScenario(s.id); }}>⤓</button>
                 <button class="btn small ghost" title="Delete"
-                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete scenario "${s.name}"? Its chats are NOT deleted.`) && onDeleteScenario(s.id); }}>✕</button>
+                  onClick=${(e) => { e.stopPropagation(); onDeleteScenario(s.id); }}>✕</button>
               </span>
             </div>`)}
         </div>
@@ -93,7 +98,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                 <button class="btn small ghost" title="Export JSON"
                   onClick=${(e) => { e.stopPropagation(); onExportCharacter(c.id); }}>⤓</button>
                 <button class="btn small ghost" title="Delete"
-                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete character "${c.name}"? Scenario/chat links become inert.`) && onDeleteCharacter(c.id); }}>✕</button>
+                  onClick=${(e) => { e.stopPropagation(); onDeleteCharacter(c.id); }}>✕</button>
               </span>
             </div>`)}
         </div>
@@ -102,7 +107,12 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
           ${shownChats.length === 0 && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
           ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
-              onClick=${() => onSelectChat(c.id)}
+              onClick=${() => {
+                // A long-press already opened the context menu — don't also
+                // switch the chat out from underneath it.
+                if (lpMenuRef.current) { lpMenuRef.current = false; return; }
+                onSelectChat(c.id);
+              }}
               onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>

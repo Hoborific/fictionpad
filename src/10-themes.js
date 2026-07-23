@@ -5,7 +5,7 @@
 // these, so adding a theme is just a new entry here.
 // ============================================================================
 const THEMES = {
-  miku: {
+  defaultTheme: {
     name: 'Dark (default)',
     vars: {
       'color-scheme': 'dark',
@@ -103,10 +103,10 @@ const CTP_ACCENTS = {
     blue: '#8caaee', lavender: '#babbf1',
   },
 };
-const DEFAULT_ACCENT = 'mauve';
+const DEFAULT_ACCENT = 'pink';
 
 function applyTheme(id, accentId = DEFAULT_ACCENT) {
-  const theme = THEMES[id] ?? THEMES.miku;
+  const theme = THEMES[id] ?? THEMES.defaultTheme;
   const style = document.documentElement.style;
   for (const [k, v] of Object.entries(theme.vars)) style.setProperty(k, v);
   if (theme.accentable) {

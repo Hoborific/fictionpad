@@ -58,8 +58,8 @@ function autoCloseProse(text) {
 // Unreliable when the model doesn't prefix names — purely cosmetic.
 function detectSpeaker(text, names) {
   if (!text || !names?.length) return null;
-  const m = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{0,2}\s*:/u.exec(text)
-        ?? /^\s*\*{1,2}\s*([\p{L}][\p{L}\p{M}'. \-]{0,39}?)\s*\*{1,2}/u.exec(text);
+  const m = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:/u.exec(text)
+        ?? /^\s*\*{1,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{1,2}/u.exec(text);
   if (!m) return null;
   const candidate = m[1].trim().toLowerCase();
   return names.find(n => n.toLowerCase() === candidate) ?? null;

@@ -81,8 +81,10 @@ const SETTINGS_TABS = [
 ];
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
-                        storageKind, onUpload, onDownload }) {
+                        storageKind, onUpload, onDownload, initialDraft }) {
   const [draft, setDraft] = useState(() => {
+    // initialDraft restores the in-progress draft after the logit-bias detour.
+    if (initialDraft) return initialDraft;
     const d = deepClone(settings);
     // Pre-fill from the active preset so saving an untouched form keeps the
     // current directive instead of blanking it.
@@ -90,15 +92,18 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     return d;
   });
   const [tab, setTab] = useState('appearance');
+  const [dirty, setDirty] = useState(false);
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
   const [migBusy, setMigBusy] = useState(null);
   const [migNote, setMigNote] = useState(null);
-  const set = (patch) => setDraft(d => ({ ...d, ...patch }));
-  const setSampler = (k, v) => setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } }));
-  const setCap = (k, pct) => setDraft(d => ({
+  const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
+  const setSampler = (k, v) => { setDirty(true); setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } })); };
+  const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
-  }));
+  })); };
+  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const lbCount = Object.keys(draft.logitBias ?? {}).length;
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
@@ -133,8 +138,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         onCommit=${(n) => set({ [key]: n })} /></label>`;
 
   return html`
-    <${Modal} title="Settings" wide onClose=${onClose}
-      footer=${html`<button class="btn ghost" onClick=${onClose}>Cancel</button>
+    <${Modal} title="Settings" wide onClose=${guardClose}
+      footer=${html`<button class="btn ghost" onClick=${guardClose}>Cancel</button>
         <button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
       <div class="m-tabs">
         ${SETTINGS_TABS.map(([id, label]) => html`
@@ -171,7 +176,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
               <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
           </label>
-          <label class="field"><span>API key (sent as Bearer token; stored in localStorage)</span>
+          <label class="field"><span>API key (sent as Bearer token; ${storageKind === 'server' ? 'synced via server settings' : 'stored locally in this browser'})</span>
             <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
         </div>
         ${storageKind === 'server' && html`
@@ -282,8 +287,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <div class="hint">Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.</div>
         </div>
         <div style=${{ marginTop: '4px' }}>
-          <button class="btn small" onClick=${onOpenLogitBias}>Edit logit bias…</button>
-          <span class="hint" style=${{ marginLeft: '8px' }}>${Object.keys(draft.logitBias ?? {}).length} entr(ies)</span>
+          <button class="btn small" onClick=${() => onOpenLogitBias(draft)}>Edit logit bias…</button>
+          <span class="hint" style=${{ marginLeft: '8px' }}>${lbCount} ${lbCount === 1 ? 'entry' : 'entries'}</span>
         </div>`}
 
       ${tab === 'features' && html`

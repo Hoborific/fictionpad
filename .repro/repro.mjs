@@ -1,8 +1,12 @@
-// Repro harness for Bug 1 (Context Inspector preview blanks the page).
-// Transforms fictionpad.html's module script for Node, then exercises the
-// exact "Preview current context" path: assemblePrompt(...) -> render
-// <ContextInspector> with react-dom/server. Any render throw is fatal here,
-// just like it is to the React root in the browser (no error boundary).
+// General SSR/streaming regression harness for fictionpad.html.
+// Extracts the app's module script, neutralizes the browser boot line, exports
+// the internals, and imports them in Node. Trials cover: Context Inspector
+// preview + SSR render (incl. hostile data shapes), message/prose markdown
+// rendering (dialogue pairing, streaming auto-close), settings/sidebar/editor
+// SSR smoke, ProbsView, the openaiChatStream normalizer (content/lp split,
+// logit_bias, choices-less chunks), alignTokensToSpans / alignStrippedToolSpans
+// tiling, tokenize/embed parsing, and proxy auth-header mapping. Any throw
+// fails the trial; run `node .repro/repro.mjs` (deps: npm install in .repro/).
 import { readFileSync, writeFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 

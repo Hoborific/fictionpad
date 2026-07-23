@@ -3,3 +3,5 @@ fictionpad.db
 fictionpad.html
 fictionpad.compiled.html
 .DS_Store
+.repro/node_modules/
+.repro/fp-module.mjs

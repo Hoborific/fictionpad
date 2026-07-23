@@ -14,43 +14,47 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, onUpsert, onClose }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose }) {
   const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
+  const [dirty, setDirty] = useState(false);
+  const edit = (next) => { setDirty(true); setEditing(next); };
+  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
   const linkCount = (id) => Object.values(scenarios).filter(s => (s.characterIds ?? []).includes(id)).length;
+  const totalLinks = linkCount(editing.id) + chatLinkCount;
   return html`
-    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide onClose=${onClose}>
+    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide onClose=${guardClose}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
-        <input type="text" value=${editing.name} onInput=${(e) => setEditing({ ...editing, name: e.target.value })} /></label>
+        <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
-        <textarea rows=${6} value=${editing.content} onInput=${(e) => setEditing({ ...editing, content: e.target.value })} /></label>
+        <textarea rows=${6} value=${editing.content} onInput=${(e) => edit({ ...editing, content: e.target.value })} /></label>
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
         <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${editing.keys}
-          onChange=${(keys) => setEditing({ ...editing, keys })} /></label>
+          onChange=${(keys) => edit({ ...editing, keys })} /></label>
       <label class="field"><span>Greeting — first message of chats started directly with this character</span>
         <textarea rows=${4} value=${editing.greeting ?? ''}
-          onInput=${(e) => setEditing({ ...editing, greeting: e.target.value })} /></label>
+          onInput=${(e) => edit({ ...editing, greeting: e.target.value })} /></label>
       <div class="grid2">
         <label class="field"><span>Weight — higher wins when the lore budget is tight</span>
-          <input type="number" value=${editing.weight ?? 0}
-            onInput=${(e) => setEditing({ ...editing, weight: Number(e.target.value) })} /></label>
+          <${NumInput} value=${editing.weight ?? 0} step=${1} fallback=${0}
+            onCommit=${(n) => edit({ ...editing, weight: n })} /></label>
         <div class="field"><span>Activation</span>
           <label class="check" title="Always injected while linked">
             <input type="checkbox" checked=${!!editing.pinned}
-              onChange=${(e) => setEditing({ ...editing, pinned: e.target.checked })} /> pinned</label>
+              onChange=${(e) => edit({ ...editing, pinned: e.target.checked })} /> pinned</label>
           <label class="check" title="Semantic activation — requires an embeddings model in Settings">
             <input type="checkbox" checked=${!!editing.smart}
-              onChange=${(e) => setEditing({ ...editing, smart: e.target.checked })} /> smart</label>
+              onChange=${(e) => edit({ ...editing, smart: e.target.checked })} /> smart</label>
           <label class="check">
             <input type="checkbox" checked=${editing.enabled !== false}
-              onChange=${(e) => setEditing({ ...editing, enabled: e.target.checked })} /> enabled</label>
+              onChange=${(e) => edit({ ...editing, enabled: e.target.checked })} /> enabled</label>
         </div>
       </div>
-      ${linkCount(editing.id) > 0 && html`
-        <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) — edits apply live to their chats.</div>`}
+      ${totalLinks > 0 && html`
+        <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
       <div style=${{ display: 'flex', gap: '8px' }}>
         <button class="btn primary" disabled=${!editing.name.trim()}
           onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save</button>
-        <button class="btn" onClick=${onClose}>Cancel</button>
+        <button class="btn" onClick=${guardClose}>Cancel</button>
       </div>
     <//>`;
 }

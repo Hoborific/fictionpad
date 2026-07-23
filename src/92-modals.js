@@ -2,8 +2,10 @@
 // COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
 function NewChatModal({ scenario, character, personas, onCreate, onClose }) {
-  const list = Object.values(personas);
-  const [personaId, setPersonaId] = useState(list[0]?.id ?? '');
+  const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
+  // Default '' (none), not list[0]: the inline name field below only applies
+  // when no persona is selected, so preselecting one silently trapped it.
+  const [personaId, setPersonaId] = useState('');
   const [newName, setNewName] = useState('');
   return html`
     <${Modal} title=${`New chat — ${scenario?.name ?? character?.name ?? ''}`} onClose=${onClose}
@@ -64,8 +66,8 @@ function ContextMenu({ x, y, items, onClose }) {
     <div class="ctx-menu" ref=${ref} style=${style}>
       ${items.map((it, i) => it === '-'
         ? html`<div key=${i} class="ctx-sep" />`
-        : html`<button key=${i} class="ctx-item ${it.danger ? 'danger' : ''}"
-            onClick=${() => { onClose(); it.fn(); }}>${it.label}</button>`)}
+        : html`<button key=${i} class="ctx-item ${it.danger ? 'danger' : ''}" disabled=${!!it.disabled}
+            onClick=${() => { if (it.disabled) return; onClose(); it.fn(); }}>${it.label}</button>`)}
     </div>`;
 }
 

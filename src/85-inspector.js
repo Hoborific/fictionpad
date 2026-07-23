@@ -70,7 +70,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
   if (!manifest?.layers) return html`
     <div>
       <div class="hint">No generation recorded yet. Send a message, or preview the context that would be sent right now.</div>
-      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Preview current context</button>`}
+      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${() => onPreview()}>Preview current context</button>`}
       ${auxSection}
     </div>`;
   const L = manifest.layers;
@@ -174,7 +174,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
               title=${t.name || '(unparsed)'} meta=${t.note}
               preview=${t.args} content=${t.args} />`)}
         <//>`}
-      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${onPreview}>Re-run assembler on current chat</button>`}
+      ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${() => onPreview()}>Re-run assembler on current chat</button>`}
     </div>`;
 }
 

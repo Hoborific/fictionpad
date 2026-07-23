@@ -49,11 +49,15 @@ const authHeaders = (apiKey, endpoint, serverToken = '') => {
 
 // Same-origin /proxy requests carry the serverToken as Bearer; on a
 // Basic-auth deployment (or with a stale token) that Bearer 401s — retry
-// once without it so the browser's cached Basic creds take over. Direct
-// (non-proxy) endpoints never retry: their Authorization is the LLM key.
+// once without it so the browser's cached Basic creds take over. Only OUR
+// server's own 401s (tagged X-FictionPad-Auth) trigger the bare retry: an
+// upstream LLM 401 passed through the proxy is a real credential failure
+// whose error body must surface to the caller, not be retried bare.
+// Direct (non-proxy) endpoints never retry: their Authorization is the LLM key.
 async function fetchAPI(endpoint, url, opts = {}) {
   let res = await fetch(url, opts);
-  if (res.status === 401 && isServerProxy(endpoint) && opts.headers?.Authorization) {
+  if (res.status === 401 && isServerProxy(endpoint) && opts.headers?.Authorization
+      && res.headers.get('X-FictionPad-Auth')) {
     const headers = { ...opts.headers };
     delete headers.Authorization;
     res = await fetch(url, { ...opts, headers });
@@ -125,7 +129,9 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       const json = await res.json();
       msg = json?.error?.message ?? json?.message ?? msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status; // lets callers special-case e.g. a 400 about stop strings
+    throw err;
   }
   for await (const json of parseEventStream(res.body)) {
     const choice = json.choices?.[0];
@@ -257,10 +263,13 @@ function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
 
 // ---- /tokenize (vLLM; degrade to null when unavailable) ----
 // Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
-// count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text.
+// count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text
+// (keyed by textHash — full prompt text must never sit in the cache key).
+// Aborts (generation Stop) return null WITHOUT caching — a canceled count
+// isn't a "tokenize unavailable" verdict.
 const tokenizeCache = new Map();
-async function tokenize({ endpoint, apiKey, serverToken, model, prompt }) {
-  const key = `${endpoint}|${model}|${prompt}`;
+async function tokenize({ endpoint, apiKey, serverToken, model, prompt, signal }) {
+  const key = `${endpoint}|${model}|${textHash(prompt)}`;
   if (tokenizeCache.has(key)) return tokenizeCache.get(key);
   if (tokenizeCache.size > 500) tokenizeCache.clear();
   let out = null;
@@ -269,6 +278,7 @@ async function tokenize({ endpoint, apiKey, serverToken, model, prompt }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
       body: JSON.stringify({ model, prompt }),
+      signal,
     });
     if (res.ok) {
       const json = await res.json();
@@ -282,13 +292,15 @@ async function tokenize({ endpoint, apiKey, serverToken, model, prompt }) {
       if (Number.isFinite(json?.count)) count = json.count;
       if (count != null || ids || strings) out = { ids, strings, count };
     }
-  } catch {}
+  } catch (e) {
+    if (e?.name === 'AbortError') return null;
+  }
   tokenizeCache.set(key, out);
   return out;
 }
 
-async function getTokenCount({ endpoint, apiKey, serverToken, model, text }) {
-  const r = await tokenize({ endpoint, apiKey, serverToken, model, prompt: text });
+async function getTokenCount({ endpoint, apiKey, serverToken, model, text, signal }) {
+  const r = await tokenize({ endpoint, apiKey, serverToken, model, prompt: text, signal });
   return r?.count ?? null;
 }
 
@@ -303,11 +315,12 @@ const textHash = (s) => {
   return h.toString(36);
 };
 
-async function embed({ endpoint, apiKey, serverToken, model, inputs }) {
+async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
   const res = await fetchAPI(endpoint, `${normalizeEndpoint(endpoint)}/v1/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({ model, input: inputs }),
+    signal,
   });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
@@ -323,11 +336,11 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs }) {
 }
 
 // Cached single-text embedding (piece match texts change rarely).
-async function embedCached({ endpoint, apiKey, serverToken, model, text }) {
+async function embedCached({ endpoint, apiKey, serverToken, model, text, signal }) {
   const key = `${model}|${textHash(text)}`;
   if (embedCache.has(key)) return embedCache.get(key);
   if (embedCache.size > 500) embedCache.clear();
-  const [vec] = await embed({ endpoint, apiKey, serverToken, model, inputs: [text] });
+  const [vec] = await embed({ endpoint, apiKey, serverToken, model, inputs: [text], signal });
   embedCache.set(key, vec);
   return vec;
 }
