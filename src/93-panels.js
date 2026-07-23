@@ -5,7 +5,7 @@
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario,
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
@@ -19,21 +19,22 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         ${tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
         ${tab === 'chat' && html`
-          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
       </div>
     <//>`;
 }
 
 // ============================================================================
-// COMPONENTS: RIGHT DRAWER — docked Inspector/Memory pane (the per-chat modal
-// above remains for chat-row/context-menu entry; Chat settings stays
-// modal-only). Fixed overlay on the right like the left sidebar, drag-resizable
-// on desktop, slide-in overlay on phones.
+// COMPONENTS: RIGHT DRAWER — docked Inspector/Memory/Chat pane (the per-chat
+// modal above remains for chat-row/context-menu entry). Fixed overlay on the
+// right like the left sidebar, drag-resizable on desktop, slide-in overlay on
+// phones.
 // ============================================================================
-const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
+const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
 function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog,
+                      personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery }) {
   return html`
@@ -52,6 +53,9 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
           <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${chat && tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
+        ${chat && tab === 'chat' && html`
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
+            onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} />`}
       </div>
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}

@@ -503,3 +503,76 @@ No other changes - this is a cosmetic patch on top of v3.6.
 - Lore layer token estimate now includes the literal `[World Info]` header, matching the exact /tokenize count and history headroom.
 - Inspector History card now counts the pinned greeting toward both tokens and cap, so its percentage is accurate.
 
+
+## v3.9 - Character cards & UI polish
+
+### v3.9
+
+**Added**
+- Global character cards: a new **Characters** store and Character Manager modal for reusable characters (name, card text, trigger keys, greeting, weight, pinned/smart/enabled). Cards live once and can be linked into any number of scenarios or chats.
+- Link characters into a scenario from the scenario editor - linked cards join the normal lore pipeline (keyword/semantic activation, budgets, /pov, speaker colours), and edits to a card apply live everywhere it's linked.
+- Direct chats with a character: ✉ on a sidebar character starts a chat with no scenario, opened by the character's greeting.
+- Characters can be exported/imported as JSON, like scenarios and chats.
+- Sidebar sections (Scenarios / Characters / Chats) are now collapsible; collapsed sections still show whatever the open chat is built from, and collapse state persists.
+
+**Changed**
+- Context inspector marks globally-linked character pieces with a 'character' origin pill (alongside 'chat' and scenario).
+- Chat options panel lists the chat's linked global characters.
+- Local-storage database upgraded to version 2 to add the Characters store; existing data upgrades cleanly.
+
+**Fixed**
+- Nothing beyond the above - this release is feature work.
+
+### v3.9.1
+
+**Added**
+- The right drawer gains a **Chat** tab with the chat options (persona, scenario/characters, export, delete), next to Inspector and Memory.
+- New setting (Settings → Features) to show suggestion calls in the Inspector's Aux calls log.
+
+**Changed**
+- Chat-row ▦ button and the context-menu entry open the chat panel on the Chat tab (renamed "Chat panel"); Inspector is one tab over.
+- Topbar collapses the separate Inspector/Memory buttons into a single panel toggle that reopens the last-used tab.
+- Sidebar ＋ / ✎ now open a direct character editor modal; the old character list manager is gone - Save upserts and closes.
+- Suggestion calls (which fire after every swipe) are hidden from the aux log by default to reduce noise.
+
+**Fixed**
+- Inspector data is now cached per chat: opening another chat's panel shows that chat's last recorded manifest (or the empty state) instead of the wrong chat's data.
+- Opening a chat panel no longer switches the open chat underneath, so the main pane and drawer no longer jump while the modal is up.
+
+### v3.9.2
+
+**Changed**
+- On phones, a message's number, date and generation time now collapse behind the › info toggle together with the edited flag and model name, instead of sitting inline in the header row where they could push speaker names off the bubble. Desktop is unchanged - all details still show inline.
+
+**Fixed**
+- Message text, plain text and the token-probabilities view now wrap long unbroken strings instead of overflowing the bubble.
+- The chat log can no longer be scrolled sideways.
+- The context-preview button in the side drawer no longer passes its click event as the chat id - previously this made the preview silently fail to open.
+
+### v3.9.3
+
+**Added**
+- New Appearance setting to show pane toggles as «/» edge arrows on desktop instead of the FictionPad brand / Inspector buttons (phones already always use arrows)
+
+**Changed**
+- The topbar's "FictionPad" brand text is now the sidebar toggle button, subtly outlined while the sidebar is open
+- Chat title, scenario/character subtitle and close ✕ now float centered over the chat column rather than sitting left-aligned in the topbar flow; a long title can no longer block the toggle buttons
+- Sidebar header removed: Personas and Settings buttons moved to the sidebar footer next to Import JSON, and the in-sidebar collapse button was dropped in favor of the topbar toggle
+
+### v3.9.4
+
+**Changed**
+
+- Top ribbon pane toggles on phones no longer always show «/» arrows - the FictionPad and Inspector labels stay as long as they fit, degrading by viewport width: the FictionPad label collapses to an arrow first (below 400px), both become arrows only under 330px. The Appearance setting still forces arrows on desktop.
+- The centered chat title now measures the actual widths of the ribbon toggle buttons, so long chat names ellipsize instead of sliding underneath them.
+- The sidebar-toggle (FictionPad) button uses the same active-state styling as the Inspector button; its custom brand styling was removed.
+- The tool-call pill on messages is restyled to blend into the dim meta row (transparent and faint, with a hover highlight) instead of looking like a green chat pill.
+- Sidebar footer buttons regrouped and relabeled: "Import JSON" is now a ghost "Import" button, and the gear icon is replaced by a "Settings" text label.
+
+### v3.9.5
+
+**Changed**
+- On phones, the message meta row (name, #, date, gen time, model, actions) now collapses by measured fit instead of hiding everything behind › toggles: it renders fully and drops details one at a time - model, edited flag, gen time, date, then # - until it fits the screen, with everything still reachable in the › popover. On the tightest screens the action icons collapse behind › as well.
+- The collapse is measured pre-paint (no flash), re-checked when you switch swipes or the row resizes, and never measured while a reply is streaming.
+- Phones now always show the «/» edge arrows as ribbon pane toggles, replacing the previous width-tiered behavior that kept the FictionPad/Inspector labels until space ran out. Desktop is unchanged - arrows remain opt-in via Settings → Appearance.
+

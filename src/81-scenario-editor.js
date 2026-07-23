@@ -112,11 +112,15 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, onSave, onClose }) {
+function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const [draft, setDraft] = useState(() => deepClone(scenario));
   const set = (patch) => setDraft(d => ({ ...d, ...patch }));
   const setPiece = (id, next) =>
     set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
+  const charList = Object.values(characters).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  const linkedIds = Array.isArray(draft.characterIds) ? draft.characterIds : [];
+  const toggleChar = (id, on) =>
+    set({ characterIds: on ? [...linkedIds, id] : linkedIds.filter(x => x !== id) });
   return html`
     <${Modal} title="Scenario editor" wide onClose=${onClose}
       footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
@@ -140,6 +144,20 @@ function ScenarioEditor({ scenario, onSave, onClose }) {
           <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
           <option value="auto">auto-add — proposals go straight into chat lore</option>
         </select></label>
+      <div class="field">
+        <span>Linked characters (${linkedIds.length})</span>
+        <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card edits apply live to all linked scenarios and chats. For scenario-only characters, use a character-type lore piece below.</div>
+        ${charList.length === 0 && html`<div class="hint">No global characters yet — create them from the sidebar's Characters section.</div>`}
+        ${charList.length > 0 && html`
+          <div class="links-list">
+            ${charList.map(c => html`
+              <label class="check" key=${c.id}>
+                <input type="checkbox" checked=${linkedIds.includes(c.id)}
+                  onChange=${(e) => toggleChar(c.id, e.target.checked)} />
+                ${c.name}
+              </label>`)}
+          </div>`}
+      </div>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}

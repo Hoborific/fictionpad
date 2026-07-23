@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
   embeddingModel: '', // semantic lore activation; empty = disabled
   semanticThreshold: 0.55, // cosine similarity needed for a smart piece to inject
   dateFormat: 'dd/mm/yyyy', // date order for stamps and chat names
+  sidebarArrows: false, // desktop: «/» edge arrows instead of the brand/Inspector buttons as pane toggles (phones always use arrows)
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
   responseLength: 'medium',
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS = {
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
+  auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
@@ -156,7 +158,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Date format — message stamps, memories, chat names</span>
           <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
             ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-          </select></label>`}
+          </select></label>
+        <label class="check">
+          <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
+          Pane toggles as «/» edge arrows instead of the FictionPad brand / Inspector buttons (desktop — phones always use arrows)
+        </label>`}
 
       ${tab === 'connection' && html`
         <div class="grid2">
@@ -314,6 +320,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               ${numField('suggestionsDepth', 'Context messages sent', 6, { min: 1, max: 30 })}
             </div>
             <div class="hint">Uses the aux model; the prompt is editable in the Prompts tab.</div>
+            <label class="check">
+              <input type="checkbox" checked=${!!draft.auxShowSuggestions} onChange=${(e) => set({ auxShowSuggestions: e.target.checked })} />
+              Show suggestion calls in the Inspector's Aux calls log
+            </label>
           </div>`}
         <div class="field"><span>Memory</span>
           <label class="field"><span>Auto-summarize every N messages (also the lore-extraction cadence)</span>

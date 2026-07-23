@@ -12,7 +12,8 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS };`);
+  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
+  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -123,6 +124,50 @@ trial('settings modal renders tab bar + appearance tab (SSR smoke)', () => {
     if (!out.includes(label)) throw new Error(`missing settings tab: ${label}`);
 });
 
+// v2.1 smoke: the sidebar's Characters section, and collapsed sections pinning
+// the open chat's related entries (its scenario, linked characters, the chat).
+trial('sidebar renders characters + collapsed sections pin open-chat entries (SSR smoke)', () => {
+  const noop = () => {};
+  const characters = { CH1: { id: 'CH1', name: 'Mira', content: 'x', keys: [], enabled: true } };
+  const scenarios = { S: { id: 'S', name: 'Veyra', characterIds: ['CH1'], lorePieces: [] } };
+  const chats = { C: { id: 'C', scenarioId: 'S', name: 'Veyra — 01/01/2026', createdAt: 1 } };
+  const out = renderToStaticMarkup(html`
+    <${fp.Sidebar} scenarios=${scenarios} chats=${chats} characters=${characters}
+      selectedScenarioId=${null} selectedCharacterId=${null} selectedChatId=${'C'}
+      onSelectScenario=${noop} onSelectCharacter=${noop} onSelectChat=${noop}
+      onNewScenario=${noop} onEditScenario=${noop} onDeleteScenario=${noop} onNewChat=${noop}
+      onNewCharacter=${noop} onEditCharacter=${noop} onDeleteCharacter=${noop} onNewCharacterChat=${noop}
+      onExportScenario=${noop} onExportCharacter=${noop} onImport=${noop}
+      onOpenPersonas=${noop} onOpenSettings=${noop} collapsed=${false} onToggleCollapse=${noop}
+      onDeleteChat=${noop} sideCollapsed=${{ scenarios: true, characters: true, chats: true }}
+      onToggleSection=${noop} storageKind="local" saveRetrying=${false}
+      width=${300} onDragStart=${noop} onResetWidth=${noop} onChatAction=${noop} onChatContextMenu=${noop} />`);
+  if (!out.includes('Characters')) throw new Error('characters section missing: ' + out);
+  // All three sections collapsed → only the open chat's scenario, its linked
+  // character, and the chat itself stay visible.
+  if (!out.includes('Veyra')) throw new Error('pinned scenario missing: ' + out);
+  if (!out.includes('Mira')) throw new Error('pinned linked character missing: ' + out);
+});
+
+// v2.1 smoke: character editor, scenario-editor link section, and the
+// direct-character new-chat modal.
+trial('character editor + scenario editor + character new-chat modal render (SSR smoke)', () => {
+  const noop = () => {};
+  const characters = { CH1: { id: 'CH1', name: 'Mira', content: 'card', keys: [], enabled: true, greeting: 'Hi.' } };
+  const scenarios = { S: { id: 'S', name: 'Veyra', characterIds: ['CH1'], lorePieces: [] } };
+  const mgr = renderToStaticMarkup(html`
+    <${fp.CharacterEditor} character=${characters.CH1} scenarios=${scenarios}
+      onUpsert=${noop} onClose=${noop} />`);
+  if (!mgr.includes('Linked into 1 scenario')) throw new Error('link count missing: ' + mgr);
+  const ed = renderToStaticMarkup(html`
+    <${fp.ScenarioEditor} scenario=${scenarios.S} characters=${characters} onSave=${noop} onClose=${noop} />`);
+  if (!ed.includes('Linked characters')) throw new Error('link section missing: ' + ed);
+  const nc = renderToStaticMarkup(html`
+    <${fp.NewChatModal} scenario=${null} character=${characters.CH1} personas=${{}}
+      onCreate=${noop} onClose=${noop} />`);
+  if (!nc.includes('Direct chat with Mira')) throw new Error('character new-chat hint missing: ' + nc);
+});
+
 // Regression: `Mia:\n*actions here*` — the prefix strip must not cross the
 // newline and eat the action's opening star (leaves `actions here*` unpaired).
 trial('speaker prefix strip keeps action stars across a newline', () => {
@@ -144,7 +189,7 @@ trial('multi-speaker header lists all speakers in order', () => {
       streaming=${false} generating=${false}
       onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
       onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
-  const meta = out.match(/<div class="meta">[\s\S]*?<\/div>/)?.[0] ?? '';
+  const meta = out.match(/<div class="meta[^"]*"[\s\S]*?<\/div>/)?.[0] ?? '';
   const mi = meta.indexOf('>Mia<'), ni = meta.indexOf('>Narrator<'), si = meta.indexOf('>Samantha<');
   if (mi < 0 || ni < 0 || si < 0) throw new Error('header missing a speaker: ' + meta);
   if (!(mi < ni && ni < si)) throw new Error('speakers out of order: ' + meta);

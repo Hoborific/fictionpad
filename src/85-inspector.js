@@ -139,6 +139,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
           <${InspectorRow} key=${p.id}
             pills=${[{ text: p.reason, cls: p.reason },
               ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
+              ...(p.origin === 'character' ? [{ text: 'character', cls: 'character' }] : []),
               ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : []),
               ...semPill(p.id, true)]}
             title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
@@ -151,6 +152,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
             <${InspectorRow} key=${p.id ?? i} dimmed
               pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' },
                 ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
+                ...(p.origin === 'character' ? [{ text: 'character', cls: 'character' }] : []),
                 ...semPill(p.id, false)]}
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}

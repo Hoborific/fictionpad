@@ -1,16 +1,22 @@
 // ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
-function newChat(scenario, personaId, dateFormat) {
+// Chat factory. Scenario chats snapshot the scenario greeting; direct
+// character chats (scenarioId null, chat.characterIds set) snapshot the
+// character's greeting — possibly empty: the root node is parentless, so
+// pruneInterrupted never drops it.
+function newChat({ scenario = null, character = null, personaId = null, dateFormat } = {}) {
   const rootId = uid();
+  const baseName = scenario?.name ?? (character ? `Chat with ${character.name}` : 'Chat');
   return {
-    id: uid(), scenarioId: scenario.id, personaId: personaId ?? null,
-    name: `${scenario.name} — ${fmtDate(Date.now(), dateFormat)}`,
+    id: uid(), scenarioId: scenario?.id ?? null, personaId,
+    ...(character ? { characterIds: [character.id] } : {}),
+    name: `${baseName} — ${fmtDate(Date.now(), dateFormat)}`,
     customInstructions: '',
     rootMessageId: rootId, activeLeafId: rootId,
     messages: {
       [rootId]: { id: rootId, parentId: null, role: 'assistant', edited: false, activeSwipe: 0,
-        swipes: [{ text: scenario.greeting ?? '', createdAt: Date.now(), modelId: null }] },
+        swipes: [{ text: scenario?.greeting ?? character?.greeting ?? '', createdAt: Date.now(), modelId: null }] },
     },
     memoryStore: { memories: [], cursor: 0 },
     settings: {},
@@ -51,6 +57,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
+  const [characters, upsertCharacter, removeCharacter] = useStoredMap(storage, 'Characters');
   const [settingsRaw, setSettings] = usePersistentState('fictionpad.settings', DEFAULT_SETTINGS);
   const settings = useMemo(() => ({
     ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
@@ -85,8 +92,13 @@ function Main({ storage, storageKind, storageFailed }) {
   const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
   useEffect(() => applyTheme(theme, accent), [theme, accent]);
-  const [manifest, setManifest] = useState(null);
-  const [lastMessages, setLastMessages] = useState(null); // chat-completions array behind manifest
+  // Inspector data is cached per chat: opening another chat's panel shows ITS
+  // last recorded manifest (or the empty state), never the wrong chat's.
+  const [manifests, setManifests] = useState({}); // chatId -> { manifest, lastMessages }
+  const setManifestFor = (chatId, man, msgs) =>
+    setManifests(m => (chatId ? { ...m, [chatId]: { manifest: man, lastMessages: msgs } } : m));
+  const manifest = manifests[ui.chatId]?.manifest ?? null;
+  const lastMessages = manifests[ui.chatId]?.lastMessages ?? null; // chat-completions array behind manifest
   const [realCounts, setRealCounts] = useState(null); // /tokenize counts {static,lore,memory,total} | null
   const [modal, setModal] = useState(null);
   const [generating, setGenerating] = useState(null); // { chatId, nodeId }
@@ -116,7 +128,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
-  ref.current = { scenarios, personas, chats, settings };
+  ref.current = { scenarios, personas, chats, characters, settings };
 
   useEffect(() => {
     if (!error) return;
@@ -167,11 +179,11 @@ function Main({ storage, storageKind, storageFailed }) {
   const persona = chat?.personaId ? personas[chat.personaId] : null;
   const personaName = persona?.name?.trim() || 'User';
   const characterNames = useMemo(
-    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat),
-    [chat, scenarios]);
+    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat, characters),
+    [chat, scenarios, characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
-  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory') or null.
+  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory' | 'chat') or null.
   const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
   const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
   const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
@@ -278,15 +290,14 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- chat row actions + context menu ----
   const [ctxMenu, setCtxMenu] = useState(null); // { chatId, x, y }
-  const openChatPanel = (chatId, tab) => {
-    setUi(u => ({ ...u, chatId }));
-    setModal({ kind: 'chatPanel', chatId, tab });
-  };
+  // The panel is a modal view into a chat — it must NOT switch the open chat,
+  // or the main pane and the right drawer would jump to it under the modal.
+  const openChatPanel = (chatId, tab) => setModal({ kind: 'chatPanel', chatId, tab });
   const chatAction = (chatId, action) => {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
-      case 'inspector': return openChatPanel(chatId, 'inspector');
+      case 'inspector': return openChatPanel(chatId, 'chat'); // panel opens on the Chat tab; Inspector is one tab over
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat');
       case 'rename': {
@@ -392,7 +403,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
-    const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
+    const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -432,7 +443,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
-    const { scenarios: sc, personas: pe, settings: st } = ref.current;
+    const { scenarios: sc, personas: pe, characters: gchars, settings: st } = ref.current;
     const model = chatObj.settings?.model || st.model; // per-chat override wins
     if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
     // Claim the generation slot immediately — the async prep below (semantic
@@ -457,7 +468,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     if (st.embeddingModel) {
-      const smartPieces = mergedLorePieces(scen, chatObj).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
+      const smartPieces = mergedLorePieces(scen, chatObj, gchars).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
@@ -482,7 +493,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let { messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
       platformPrompt: buildPlatformPrompt(st),
-      preActivated, pov,
+      preActivated, pov, characters: gchars,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
@@ -523,8 +534,7 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     // Stopped during the async prep (embeddings/tokenize)? Bail before streaming.
     if (abort.signal.aborted) { genRef.current = null; setGenerating(null); return; }
-    setManifest(man);
-    setLastMessages(messages);
+    setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
     // Logit bias: OpenAI shape {token_id: bias}, first token of each entry.
     const logitBias = {};
@@ -658,7 +668,7 @@ function Main({ storage, storageKind, storageFailed }) {
           const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
           if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
           if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
-          setManifest({ ...man });
+          setManifestFor(chatObj.id, { ...man }, messages);
         }
       }
       if (!acc) discardEmptySwipe();
@@ -669,7 +679,7 @@ function Main({ storage, storageKind, storageFailed }) {
         attachProbs();
         // Attribute the finished swipe to a character (or "Narrator"), and
         // record how long the generation took.
-        const names = characterNamesOf(scen, work);
+        const names = characterNamesOf(scen, work, gchars);
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
@@ -770,7 +780,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // the model sees that definition; otherwise the directive alone stands.
         const scen = ref.current.scenarios[c.scenarioId];
         const q = arg.toLowerCase();
-        const chars = mergedLorePieces(scen, c).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
@@ -956,18 +966,28 @@ function Main({ storage, storageKind, storageFailed }) {
     removeScenario(id);
     if (ui.scenarioId === id) setUi(u => ({ ...u, scenarioId: null }));
   };
-  const createChat = (scenarioId, personaId, newPersonaName) => {
+  // New chat from a scenario (scenarioId) or directly with a global character
+  // (characterId). Selecting the matching sidebar filter keeps the new chat
+  // visible — a scenario filter would hide a character chat and vice versa.
+  const createChat = ({ scenarioId = null, characterId = null }, personaId, newPersonaName) => {
     let pid = personaId || null;
     if (!pid && newPersonaName.trim()) {
       pid = uid();
       upsertPersona(pid, { id: pid, name: newPersonaName.trim(), description: '' });
     }
-    const scen = ref.current.scenarios[scenarioId];
-    if (!scen) return;
-    const c = newChat(scen, pid, settings?.dateFormat);
+    const scen = scenarioId ? ref.current.scenarios[scenarioId] : null;
+    const char = characterId ? ref.current.characters[characterId] : null;
+    if (!scen && !char) return;
+    const c = newChat({ scenario: scen, character: char, personaId: pid, dateFormat: settings?.dateFormat });
     upsertChat(c.id, c);
-    setUi(u => ({ ...u, chatId: c.id, scenarioId }));
+    setUi(u => (scen
+      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null }
+      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id }));
     setModal(null);
+  };
+  const onDeleteCharacter = (id) => {
+    removeCharacter(id); // links dangle in scenarios/chats — resolveCharacters skips them
+    if (ui.characterId === id) setUi(u => ({ ...u, characterId: null }));
   };
   const onDeleteChat = (id) => {
     // Abort generation in flight for this chat before removing it.
@@ -994,6 +1014,8 @@ function Main({ storage, storageKind, storageFailed }) {
     downloadJSON(`fictionpad-scenario-${scenarios[id]?.name ?? id}.json`, { type: 'fictionpad-scenario', version: 1, data: scenarios[id] });
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  const onExportCharacter = (id) =>
+    downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
     const obj = await pickJSONFile();
     if (!obj) return;
@@ -1002,19 +1024,23 @@ function Main({ storage, storageKind, storageFailed }) {
       const s = { ...obj.data, id: uid() };
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
+    } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
+      const ch = { ...obj.data, id: uid() };
+      upsertCharacter(ch.id, ch);
+      setUi(u => ({ ...u, characterId: ch.id, scenarioId: null }));
     } else if (obj.type === 'fictionpad-chat' && obj.data?.messages) {
       const c = { ...obj.data, id: uid() };
       upsertChat(c.id, c);
-      setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId }));
-      if (!ref.current.scenarios[c.scenarioId])
+      setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId ?? null }));
+      if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario or chat export.');
+      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export.');
     }
   };
 
-  const onPreview = () => {
-    const c = ref.current.chats[ui.chatId];
+  const onPreview = (chatId = ui.chatId) => {
+    const c = ref.current.chats[chatId];
     if (!c) return;
     const st = ref.current.settings;
     // Same platform-prompt composition as runGeneration so the preview counts
@@ -1024,14 +1050,30 @@ function Main({ storage, storageKind, storageFailed }) {
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
       chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
+      characters: ref.current.characters,
     });
     // Surface the keyword-only caveat when smart pieces could have fired.
-    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c)
+    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c, ref.current.characters)
         .some(p => p && p.enabled !== false && !p.pinned && p.smart))
       man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
-    setManifest(man);
-    setLastMessages(messages);
+    setManifestFor(c.id, man, messages);
   };
+
+  // Suggestions fire after every swipe and would flood the aux list — hidden
+  // unless the user opts in (Settings → Features).
+  const shownAuxLog = settings.auxShowSuggestions ? auxLog : auxLog.filter(a => a.kind !== 'suggestions');
+
+  // Ribbon pane toggles: «/» edge arrows on phones always, and on desktop when
+  // the Appearance setting asks for them; otherwise the brand/Inspector labels.
+  const ribbonTier = (isMobile || settings.sidebarArrows) ? 2 : 0;
+  // Inset the centered title by the actual toggle-button widths so a long chat
+  // name ellipsizes instead of sliding under them.
+  const leftBtnRef = useRef(null), rightBtnRef = useRef(null);
+  const [btnW, setBtnW] = useState({ l: 0, r: 0 });
+  useEffect(() => {
+    const l = leftBtnRef.current?.offsetWidth ?? 0, r = rightBtnRef.current?.offsetWidth ?? 0;
+    if (l !== btnW.l || r !== btnW.r) setBtnW({ l, r });
+  }, [viewportW, ribbonTier]);
 
   return html`
     <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
@@ -1039,36 +1081,57 @@ function Main({ storage, storageKind, storageFailed }) {
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
         <div class="topbar-inner">
-          ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
-          <span class="title">${chat ? chat.name : 'FictionPad'}</span>
-          ${chat && html`<button class="btn small ghost" title="Close chat"
-            onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>`}
-          ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
+          <span ref=${leftBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
+            ${ribbonTier >= 1
+              ? html`<button class="btn small ghost ${sidebarCollapsed ? '' : 'active'}" title=${sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+                  onClick=${toggleSidebar}>${sidebarCollapsed ? '»' : '«'}</button>`
+              : html`<button class="btn small ghost ${sidebarCollapsed ? '' : 'active'}"
+                  title=${sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick=${toggleSidebar}>FictionPad</button>`}
+          </span>
+          ${chat && html`<div class="mid"
+            style=${{ left: `${(isMobile ? 8 : 14) + padL + btnW.l + 6}px`, right: `${(isMobile ? 8 : 14) + padR + btnW.r + 6}px` }}>
+            <span class="title">${chat.name}</span>
+            <button class="btn small ghost" title="Close chat"
+              onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>
+            <span class="sub">${chat.scenarioId
+              ? (scenarios[chat.scenarioId]?.name ?? '(missing scenario)')
+              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · {{user}} = ${personaName}</span>
+          </div>`}
           <span class="spacer"></span>
-          <button class="btn small ghost wide-only ${ui.drawer === 'inspector' ? 'active' : ''}"
-            title="Context inspector" onClick=${() => toggleDrawer('inspector')}>Inspector</button>
-          <button class="btn small ghost wide-only ${ui.drawer === 'memory' ? 'active' : ''}"
-            title="Memories" onClick=${() => toggleDrawer('memory')}>Memory</button>
-          <button class="btn small ghost narrow-only ${ui.drawer ? 'active' : ''}"
-            title="Inspector / Memory panel"
-            onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>«</button>
+          <span ref=${rightBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
+            ${ribbonTier === 2
+              ? html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
+                  title="Inspector / Memory / Chat panel"
+                  onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>${ui.drawer ? '»' : '«'}</button>`
+              : html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
+                  title="Inspector panel (Inspector / Memory / Chat tabs)"
+                  onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>Inspector</button>`}
+          </span>
         </div>
       </div>
       <div class="app-body">
       <${Sidebar}
-        scenarios=${scenarios} chats=${chats}
-        selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
-        onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id }))}
+        scenarios=${scenarios} chats=${chats} characters=${characters}
+        selectedScenarioId=${ui.scenarioId} selectedCharacterId=${ui.characterId ?? null} selectedChatId=${ui.chatId}
+        onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
+        onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
         onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
         onNewChat=${(scenarioId) => setModal({ kind: 'newChat', scenarioId })}
+        onNewCharacter=${() => setModal({ kind: 'character', character: null })}
+        onEditCharacter=${(id) => setModal({ kind: 'character', character: characters[id] ?? null })}
+        onDeleteCharacter=${onDeleteCharacter}
+        onNewCharacterChat=${(characterId) => setModal({ kind: 'newChat', characterId })}
+        onExportCharacter=${onExportCharacter}
         onExportScenario=${onExportScenario}
         onImport=${onImport}
         onOpenPersonas=${() => setModal({ kind: 'personas' })}
         onOpenSettings=${() => setModal({ kind: 'settings' })}
-        collapsed=${sidebarCollapsed} onToggleCollapse=${toggleSidebar}
+        sideCollapsed=${ui.sideCollapsed ?? {}}
+        onToggleSection=${(key) => setUi(u => ({ ...u, sideCollapsed: { ...(u.sideCollapsed ?? {}), [key]: !(u.sideCollapsed ?? {})[key] } }))}
+        collapsed=${sidebarCollapsed}
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
@@ -1098,7 +1161,10 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
       <${RightDrawer}
         chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${() => onPreview()} auxLog=${shownAuxLog}
+        personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
+        onExport=${() => chat && onExportChat(chat)}
+        onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
@@ -1107,7 +1173,10 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'character' && html`
+      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
+        onUpsert=${upsertCharacter} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona} onRemove=${removePersona} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'settings' && html`
@@ -1123,9 +1192,10 @@ function Main({ storage, storageKind, storageFailed }) {
         onChange=${(map) => setSettings(s => ({ ...(s ?? {}), logitBias: map }))}
         onTokenize=${(prompt) => tokenize({ endpoint: effectiveEndpoint(settings, storageKind === 'server'), apiKey: settings.apiKey, serverToken: settings.serverToken, model: settings.model, prompt })}
         onClose=${() => setModal(null)} /><//>`}
-    ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
-      <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}
-        onCreate=${(pid, newName) => createChat(modal.scenarioId, pid, newName)}
+    ${modal?.kind === 'newChat' && (scenarios[modal.scenarioId] || characters[modal.characterId]) && html`
+      <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId] ?? null}
+        character=${characters[modal.characterId] ?? null} personas=${personas}
+        onCreate=${(pid, newName) => createChat({ scenarioId: modal.scenarioId ?? null, characterId: modal.characterId ?? null }, pid, newName)}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'recap' && html`
       <${ErrorBoundary} name="recap"><${RecapModal} text=${modal.text} onClose=${() => setModal(null)}
@@ -1140,8 +1210,10 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="chat panel"><${ChatPanelModal}
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
-        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
+        manifest=${manifests[modal.chatId]?.manifest ?? null}
+        realCounts=${modal.chatId === ui.chatId ? realCounts : null}
+        onPreview=${() => onPreview(modal.chatId)} auxLog=${shownAuxLog}
+        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} characters=${characters} onUpdateChat=${saveChat}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
@@ -1150,7 +1222,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${[
-          { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

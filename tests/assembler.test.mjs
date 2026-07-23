@@ -15,7 +15,7 @@ const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  keyMatches, scanLore, selectLore, mergedLorePieces, addMemory, assemblePrompt,
+  keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
@@ -23,7 +23,7 @@ const core = await import('data:text/javascript;charset=utf-8,' + encodeURICompo
 const {
   MEMORY_CAP, LINK_BOOST, LAYER_CAPS, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  keyMatches, scanLore, selectLore, mergedLorePieces, addMemory, assemblePrompt,
+  keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore,
 } = core;
@@ -185,6 +185,56 @@ section('chat lore overlay');
   ok(manifest.layers.lore.pieces.every(p => p.origin === 'chat'), 'manifest marks chat origin');
   ok(manifest.layers.lore.inactive.every(p => p.origin === 'scenario' || p.origin === 'chat'),
     'manifest marks origin on inactive pieces too');
+}
+
+// ---- global characters (v2.1) ----
+section('global characters');
+{
+  const chars = {
+    CH1: { id: 'CH1', name: 'Mira', content: 'Mira is a tide-witch.', keys: [], pinned: true },
+    CH2: { id: 'CH2', name: 'Dax', content: 'Dax is a dock brawler.', keys: ['brawler'], enabled: false },
+  };
+  // resolution: scenario links, chat links, union dedupe, dangling ids skipped
+  const scenLink = { ...baseScenario, characterIds: ['CH1', 'GONE'] };
+  ok(resolveCharacters(scenLink, null, chars).map(p => p.id).join() === 'CH1',
+    'resolveCharacters: scenario link resolves, dangling id skipped');
+  ok(resolveCharacters(null, { characterIds: ['CH2'] }, chars).map(p => p.id).join() === 'CH2',
+    'resolveCharacters: chat link resolves without a scenario');
+  ok(resolveCharacters(scenLink, { characterIds: ['CH1'] }, chars).length === 1,
+    'resolveCharacters: scenario ∪ chat dedupes');
+  const mira = resolveCharacters(scenLink, null, chars)[0];
+  ok(mira.type === 'character' && mira.title === 'Mira' && mira.origin === 'character',
+    'resolved piece is a character-type lore piece with character origin');
+  ok(mira.keys.length === 1 && mira.keys[0] === 'Mira', 'empty keys default to [name]');
+  ok(resolveCharacters(scenLink, null, null).length === 0
+    && mergedLorePieces(scenLink, null, null) === scenLink.lorePieces,
+    'no characters map → scenario pieces returned unchanged');
+  // merge order: global pieces after scenario pieces; scenario wins on id; chat wins overall
+  const scen = { ...baseScenario, characterIds: ['CH1', 'CH2'],
+    lorePieces: [lore({ id: 'CH1', title: 'MiraLocal', content: 'scenario copy', keys: ['mira'] })] };
+  const merged = mergedLorePieces(scen, baseChat, chars);
+  ok(merged.length === 2 && merged.find(p => p.id === 'CH1')?.title === 'MiraLocal',
+    'scenario piece wins over global character on id collision');
+  ok(merged.some(p => p.id === 'CH2'), 'non-colliding global character appended');
+  const chatOver = { ...baseChat, lorePieces: [lore({ id: 'CH1', title: 'MiraChat', content: 'chat copy', keys: ['mira'] })] };
+  ok(mergedLorePieces(scen, chatOver, chars).find(p => p.id === 'CH1')?.title === 'MiraChat',
+    'chat overlay beats both scenario and global');
+  // assembler: pinned global character injected with 'character' origin; disabled one is not
+  const { manifest } = assemblePrompt({ scenario: scenLink, persona, chat: baseChat, settings, platformPrompt: '', characters: chars });
+  const injected = manifest.layers.lore.pieces;
+  ok(injected.some(p => p.id === 'CH1' && p.origin === 'character'),
+    'assembler: pinned global character injected with character origin');
+  const scenBoth = { ...baseScenario, characterIds: ['CH1', 'CH2'] };
+  const m2 = assemblePrompt({ scenario: scenBoth, persona, chat: baseChat, settings, platformPrompt: '', characters: chars }).manifest;
+  ok(!m2.layers.lore.pieces.some(p => p.id === 'CH2'), 'assembler: disabled global character not injected');
+  // keyword trigger via the default [name] key: mention the character in chat
+  const chatMention = { ...baseChat, messages: { root: node('root', null, 'assistant', 'Welcome to Veyra.', 1),
+    u1: node('u1', 'root', 'user', 'Have you seen Mira down by the docks?', 2) }, activeLeafId: 'u1' };
+  const scenKw = { ...baseScenario, characterIds: ['CH2'] };
+  const charsKw = { CH2: { id: 'CH2', name: 'Mira', content: 'Mira is a tide-witch.', keys: [], enabled: true } };
+  const m3 = assemblePrompt({ scenario: scenKw, persona, chat: chatMention, settings, platformPrompt: '', characters: charsKw }).manifest;
+  ok(m3.layers.lore.pieces.some(p => p.id === 'CH2' && p.reason === 'triggered'),
+    'assembler: global character keyword-triggers on its name');
 }
 
 // ---- tool calls (v2.0b) ----

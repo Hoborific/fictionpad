@@ -1,10 +1,11 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, onUpdateChat, onExport, onDelete }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete }) {
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
-  const allPieces = mergedLorePieces(scenario, chat);
+  const allPieces = mergedLorePieces(scenario, chat, characters);
+  const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => onUpdateChat({ ...chat, lorePieces });
   return html`
     <div>
@@ -18,6 +19,8 @@ function ChatOptions({ chat, personas, scenario, onUpdateChat, onExport, onDelet
       <label class="field"><span>Model override (this chat only; blank = global chat model)</span>
         <input type="text" value=${chat.settings?.model ?? ''} placeholder="(global)"
           onInput=${(e) => onUpdateChat({ ...chat, settings: { ...(chat.settings ?? {}), model: e.target.value.trim() || undefined } })} /></label>
+      ${linkedChars.length > 0 && html`
+        <div class="hint">Linked characters (global cards — edits apply live everywhere): ${linkedChars.map(p => p.title).join(', ')}</div>`}
       <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
         <textarea rows=${4} value=${chat.customInstructions ?? ''}
           onInput=${(e) => onUpdateChat({ ...chat, customInstructions: e.target.value })} /></label>

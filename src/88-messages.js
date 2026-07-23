@@ -53,6 +53,31 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   }, [actionsOpen, metaOpen, toolsOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
+  // Fit-based meta collapse (phones): the row renders fully expanded and steps
+  // down one level at a time until it fits — each level drops one more detail
+  // from the inline row, right to left (model, edited, gen time, date, #),
+  // then the action icons (t6). Never measured mid-stream (the row is widest
+  // while generating); re-probes from t0 on swipe change and row resizes.
+  // Pre-paint, so no flash.
+  const metaRef = useRef(null);
+  const [metaLevel, setMetaLevel] = useState(0);
+  useEffect(() => {
+    const el = metaRef.current; if (!el) return;
+    let seen = false; // RO fires once on observe — skip that, react only to real resizes
+    const ro = new ResizeObserver(() => { if (seen) setMetaLevel(0); seen = true; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const prevSwipeRef = useRef(swipe);
+  useLayoutEffect(() => {
+    if (prevSwipeRef.current !== swipe) { // swipe switched → re-probe from t0
+      prevSwipeRef.current = swipe;
+      if (metaLevel) { setMetaLevel(0); return; }
+    }
+    const el = metaRef.current;
+    if (!el || streaming) return;
+    if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
+  }, [metaLevel, streaming, swipe]);
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());
@@ -106,6 +131,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // Multi-speaker swipe: the header names everyone who spoke, in speaking
   // order (first appearance), each with its own colour.
   const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
+  // #, date, gen time, edited, model collapse behind the › toggle on phones
+  // (desktop shows them inline via .meta-details { display: contents }).
+  const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
   return html`
     <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
       onContextMenu=${(e) => {
@@ -114,19 +142,16 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         e.preventDefault();
         setCtxMenu({ x: e.clientX, y: e.clientY });
       }}>
-      <div class="meta">
+      <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
               class="who ${name !== 'Narrator' ? 'speaker' : ''}"
               style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
           : html`<span class="who ${isCharacter ? 'speaker' : ''}"
               style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
-        ${index != null && html`<span>#${index}</span>`}
-        ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
-        ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
-          <button class="pill chat tools-toggle" title="Tool calls made during this generation — click to view"
+          <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
             onClick=${() => setToolsOpen(!toolsOpen)}>⚙\uFE0E ${swipe.toolCalls.length}</button>
           ${toolsOpen && html`
             <span class="tools-pop">
@@ -136,14 +161,17 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
                   ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
                 </span>`)}
             </span>`}`}
-        ${(node.edited || swipe.modelId) && html`
+        ${hasMetaDetails && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
         <span class="meta-details ${metaOpen ? 'open' : ''}" onClick=${() => setMetaOpen(false)}>
-          ${node.edited && html`<span>(edited)</span>`}
-          ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
+          ${index != null && html`<span class="md-index">#${index}</span>`}
+          ${swipe.createdAt && html`<span class="md-date">${fmtDate(swipe.createdAt, dateFormat)}</span>`}
+          ${Number.isFinite(swipe.genMs) && html`<span class="md-gentime" title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
+          ${node.edited && html`<span class="md-edited">(edited)</span>`}
+          ${swipe.modelId && html`<span class="md-model">${swipe.modelId}</span>`}
         </span>
-        <span style=${{ flex: 1 }}></span>
+        <span class="grow" style=${{ flex: 1 }}></span>
         <span class="actions ${streaming ? 'always' : ''} ${actionsOpen ? 'open' : ''}"
           onClick=${() => setActionsOpen(false)}>
           ${hasProbs && html`<button class="btn small ghost ${showProbs ? 'primary' : ''}" title="Token probabilities"

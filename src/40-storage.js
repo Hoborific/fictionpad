@@ -3,7 +3,7 @@
 // an IndexedDB adapter. Entities are stored one-key-per-entity; the adapter
 // keeps an in-memory cache that React reads synchronously.
 // ============================================================================
-const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta'];
+const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
 
 class AbstractStorage extends EventTarget {
   constructor() {
@@ -73,7 +73,9 @@ class IndexedDBAdapter extends AbstractStorage {
   }
   async init() {
     this.db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open(this.dbName, 1);
+      // v2 added the Characters store; onupgradeneeded creates any missing
+      // store idempotently, so old v1 databases upgrade cleanly.
+      const req = indexedDB.open(this.dbName, 2);
       req.onerror = () => reject(req.error);
       req.onsuccess = () => resolve(req.result);
       req.onupgradeneeded = (e) => {

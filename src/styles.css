@@ -89,11 +89,6 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pane-handle:hover { background: color-mix(in oklch, var(--c-accent) 35%, transparent); }
 .app.dragging, .app.dragging .sidebar, .app.dragging .drawer, .app.dragging .center-col { transition: none; }
 .app.dragging { user-select: none; }
-.sidebar .head {
-  display: flex; align-items: center; gap: 6px; padding: 10px 12px;
-  border-bottom: 1px solid var(--c-border);
-}
-.sidebar .head h1 { font-size: 17px; margin: 0; flex: 1; letter-spacing: 0.5px; }
 .sidebar .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 .sidebar .foot { border-top: 1px solid var(--c-border); padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: flex; flex-wrap: wrap; gap: 4px; }
 .side-section { margin-bottom: 10px; }
@@ -101,6 +96,8 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
   color: var(--c-faint); padding: 4px 6px; display: flex; justify-content: space-between; align-items: center;
 }
+.side-section > .title .t-toggle { cursor: pointer; user-select: none; }
+.side-section > .title .t-toggle:hover { color: var(--c-text); }
 .side-item {
   display: flex; align-items: center; gap: 4px; padding: 5px 8px;
   border-radius: 6px; cursor: pointer; color: var(--c-text);
@@ -156,11 +153,19 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   display: flex; align-items: center; gap: 8px;
   width: 100%; padding: 0 14px; box-sizing: border-box;
 }
-.topbar .narrow-only { display: none; }
 .topbar .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .sub { color: var(--c-faint); font-size: 12.5px; }
 .topbar .spacer { flex: 1; }
-.chatlog { flex: 1; overflow-y: auto; padding: 18px 22px; }
+/* Chat title floats centered over the chat column (JS insets it by the same
+   padL/padR as .center-col). pointer-events: none so a long title can't block
+   the brand/Inspector buttons; the close ✕ re-enables them. */
+.topbar .mid {
+  position: absolute; top: 0; bottom: 0; display: flex; align-items: center;
+  justify-content: center; gap: 6px; min-width: 0; pointer-events: none;
+}
+.topbar .mid .title { max-width: min(56vw, var(--chat-w)); }
+.topbar .mid button { pointer-events: auto; }
+.chatlog { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 18px 22px; }
 .empty { color: var(--c-faint); text-align: center; margin-top: 15vh; line-height: 2; }
 
 .msg { max-width: var(--chat-w); margin: 0 auto 14px; position: relative; }
@@ -197,8 +202,8 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
 
 /* ---------- RP prose formatting ---------- */
-.msg .md { line-height: 1.65; font-family: var(--font-prose); }
-.msg .plain { white-space: pre-wrap; font-family: var(--font-prose); }
+.msg .md { line-height: 1.65; font-family: var(--font-prose); overflow-wrap: break-word; }
+.msg .plain { white-space: pre-wrap; font-family: var(--font-prose); overflow-wrap: break-word; }
 .msg .md em { color: var(--c-action); }
 .msg .md .dialogue { color: var(--c-dialogue); }
 /* Emphasis inside speech ("I *am* listening") stays speech-coloured, just italic. */
@@ -210,7 +215,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg.ooc .plain { color: var(--c-ooc); font-style: italic; }
 
 /* ---------- token probabilities view ---------- */
-.probs-view { white-space: pre-wrap; line-height: 1.65; font-family: var(--font-prose); }
+.probs-view { white-space: pre-wrap; line-height: 1.65; font-family: var(--font-prose); overflow-wrap: break-word; }
 .probs-view .tok { position: relative; border-radius: 3px; }
 .probs-view .tok:hover { outline: 1px solid var(--c-accent); }
 .probs-view .pop {
@@ -318,8 +323,14 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pill.triggered { border-color: var(--c-accent); color: var(--c-accent); }
 .pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
 .pill.chat { border-color: var(--c-good); color: var(--c-good); }
-/* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative). */
-button.pill.tools-toggle { cursor: pointer; font: inherit; font-size: 11px; }
+.pill.character { border-color: var(--c-dialogue); color: var(--c-dialogue); }
+/* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative).
+   Styled like the dim meta row around it, not the inspector's colored reason pills. */
+button.pill.tools-toggle {
+  cursor: pointer; font: inherit; font-size: 11px;
+  border-color: transparent; background: transparent; color: var(--c-faint);
+}
+button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-border); }
 .msg .tools-pop {
   display: flex; flex-direction: column; gap: 6px;
   position: absolute; left: 0; top: 1.6em; z-index: 25; margin-top: 2px;
@@ -465,9 +476,6 @@ button.pill.tools-toggle { cursor: pointer; font: inherit; font-size: 11px; }
   .chatlog { padding: 12px 10px; }
   .topbar-inner { padding: 0 8px; gap: 6px; }
   .topbar .sub { display: none; } /* keep buttons reachable on narrow screens */
-  /* Mobile: the two drawer tabs collapse into one « edge button (mirrors »). */
-  .topbar .wide-only { display: none; }
-  .topbar .narrow-only { display: inline-block; }
   /* Stop iOS auto-zoom on focus. */
   input[type=text], input[type=number], input[type=password], select, textarea { font-size: 16px; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
@@ -478,25 +486,36 @@ button.pill.tools-toggle { cursor: pointer; font: inherit; font-size: 11px; }
   .sugg-row { margin-bottom: 10px; }
   /* Chat row actions: no hover on touch — always visible, subtle. */
   .side-item .tools { display: flex; opacity: 0.55; }
-  /* Message actions collapse behind a › toggle so the meta row never wraps;
-     they open as a popover below the row. Swipe nav stays inline (rightmost). */
-  .msg .actions { display: none; }
-  .msg .actions.open {
+  /* Meta row collapses by FIT in per-item stages (JS adds t1–t6 as the row
+     overflows, one step per pre-paint pass, until it fits): details leave the
+     inline row from right to left — model, (edited), gen time, date, # — each
+     still reachable in the › popover (the toggle appears at t1); t6 also
+     collapses the action icons behind ›. flex-shrink: 0 + nowrap keep every
+     item at natural width so the overflow is measurable — without them the
+     spans shrink and wrap (two-line rows) and the row looks "fine" to the
+     measurement. Note .meta-details is display:contents, so its children are
+     matched separately (they are not DOM children of .meta). */
+  .msg .meta > *, .msg .meta .meta-details:not(.open) > * { flex-shrink: 0; white-space: nowrap; }
+  .msg .meta > .grow { flex-shrink: 1; }
+  .msg .meta:is(.t1, .t2, .t3, .t4, .t5, .t6) .meta-toggle { display: inline-block; }
+  .msg .meta.t1 .meta-details:not(.open) .md-model { display: none; }
+  .msg .meta.t2 .meta-details:not(.open) :is(.md-model, .md-edited) { display: none; }
+  .msg .meta.t3 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gentime) { display: none; }
+  .msg .meta.t4 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gentime, .md-date) { display: none; }
+  .msg .meta:is(.t5, .t6) .meta-details:not(.open) { display: none; }
+  .msg .meta.t6 .actions { display: none; }
+  .msg .meta.t6 .actions-toggle { display: inline-block; }
+  .msg .meta .actions.open {
     display: flex; opacity: 1; position: absolute; right: 0; top: 1.6em; z-index: 25; margin-top: 2px;
     background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
     padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
   }
-  .msg .actions-toggle { display: inline-block; }
-  /* Meta details (#, date, gen time, model) collapse behind a › toggle too,
-     opening as a left-anchored popover so long model names can't crowd the row. */
-  .msg .meta-details { display: none; }
-  .msg .meta-details.open {
+  .msg .meta .meta-details.open {
     display: flex; flex-direction: column; gap: 2px;
     position: absolute; left: 0; top: 1.6em; z-index: 25; margin-top: 2px;
     background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
     padding: 6px 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
   }
-  .msg .meta-toggle { display: inline-block; }
 }
 @media (hover: none) {
   /* No hover on touch: message actions stay visible (dimmed). */

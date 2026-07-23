@@ -65,8 +65,8 @@ function detectSpeaker(text, names) {
   return names.find(n => n.toLowerCase() === candidate) ?? null;
 }
 
-const characterNamesOf = (scenario, chat = null) =>
-  mergedLorePieces(scenario, chat)
+const characterNamesOf = (scenario, chat = null, characters = null) =>
+  mergedLorePieces(scenario, chat, characters)
     .filter(p => p.type === 'character' && p.enabled !== false)
     .map(p => p.title?.trim())
     .filter(Boolean);

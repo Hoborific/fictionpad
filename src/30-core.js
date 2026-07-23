@@ -225,19 +225,54 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
   return selected;
 }
 
+// Global characters (Characters store) linked into a scenario
+// (scenario.characterIds) or directly into a chat (chat.characterIds) resolve
+// to character-type lore pieces at assembly time: the card is stored once and
+// edits propagate live everywhere it's linked. They flow through the normal
+// lore pipeline (pinned/keyword/semantic activation, budgets, /pov, speaker
+// detection) — no separate prompt path. Missing ids are skipped (deleted
+// characters, imported scenarios with dangling links).
+function resolveCharacters(scenario, chat, charactersById) {
+  if (!charactersById) return [];
+  const ids = [
+    ...(Array.isArray(scenario?.characterIds) ? scenario.characterIds : []),
+    ...(Array.isArray(chat?.characterIds) ? chat.characterIds : []),
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const c = charactersById[id];
+    if (!c) continue;
+    out.push({
+      id: c.id, type: 'character', title: c.name ?? '', content: c.content ?? '',
+      keys: Array.isArray(c.keys) && c.keys.length ? c.keys : (c.name ? [c.name] : []),
+      pinned: !!c.pinned, weight: c.weight ?? 0, links: [],
+      enabled: c.enabled !== false, smart: !!c.smart,
+      origin: 'character',
+    });
+  }
+  return out;
+}
+
 // Per-chat scenario overlay (v2.0a): chat.lorePieces merge over the
 // scenario's by id — the chat wins, including enabled:false to switch a
 // scenario piece off for one chat only; chat-only pieces append after the
 // scenario's. This is where model-generated characters/lore land (v2.0b+)
 // and the "edit the scenario of this chat" surface. Branches inherit a copy
-// via branchChat's deepClone.
-function mergedLorePieces(scenario, chat) {
+// via branchChat's deepClone. Linked global characters (v2.1) slot in after
+// the scenario pieces — scenario wins on id collision, chat wins overall.
+function mergedLorePieces(scenario, chat, charactersById = null) {
   const base = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
+  const chars = resolveCharacters(scenario, chat, charactersById);
   const over = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
-  if (!over.length) return base;
+  const seenIds = new Set(base.map(p => p?.id));
+  const baseAll = chars.length ? [...base, ...chars.filter(p => !seenIds.has(p.id))] : base;
+  if (!over.length) return baseAll;
   const byId = new Map(over.filter(p => p?.id).map(p => [p.id, p]));
-  const merged = base.map(p => (p && byId.has(p.id) ? byId.get(p.id) : p));
-  const baseIds = new Set(base.map(p => p?.id));
+  const merged = baseAll.map(p => (p && byId.has(p.id) ? byId.get(p.id) : p));
+  const baseIds = new Set(baseAll.map(p => p?.id));
   for (const p of over) if (p && !baseIds.has(p.id)) merged.push(p);
   return merged;
 }
@@ -258,7 +293,7 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
-function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null }) {
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null }) {
   const personaName = persona?.name?.trim() || 'User';
   const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
   const contextLength = Number(settings.contextLength) || 8192;
@@ -330,11 +365,17 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
-  // 3. lore layer (scenario pieces + per-chat overlay, chat wins on id)
+  // 3. lore layer (scenario pieces + linked global characters + per-chat
+  //    overlay, chat wins on id)
   const loreCap = Math.floor(budget * caps.lore);
-  const lorePieces = mergedLorePieces(scenario, chat);
+  const lorePieces = mergedLorePieces(scenario, chat, characters);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
+  // Resolved global-character ids — selectLore strips extra piece fields, so
+  // origin is recovered by id, not from the selected candidate. A chat overlay
+  // piece shadowing a global character still reports 'chat'.
+  const charPieceIds = new Set(resolveCharacters(scenario, chat, characters).map(p => p.id));
+  const originOf = (p) => chatPieceIds.has(p.id) ? 'chat' : (charPieceIds.has(p.id) ? 'character' : 'scenario');
   // /pov forces the named character's piece in (reason 'pov') alongside any
   // semantic pre-activations.
   let preAct = preActivated;
@@ -358,7 +399,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     inactive.push({
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
-      origin: chatPieceIds.has(p.id) ? 'chat' : 'scenario',
+      origin: originOf(p),
       tokens: est(`${p.title ?? ''}\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
@@ -368,7 +409,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
   manifest.layers.lore = {
     tokens: loreTokens, cap: loreCap,
-    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: chatPieceIds.has(s.id) ? 'chat' : 'scenario', tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
+    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: originOf(s), tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
     inactive,
   };
 

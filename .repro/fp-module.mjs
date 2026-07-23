@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { html } from 'htm/react';
 import { marked } from 'marked';
@@ -196,8 +196,8 @@ function detectSpeaker(text, names) {
   return names.find(n => n.toLowerCase() === candidate) ?? null;
 }
 
-const characterNamesOf = (scenario, chat = null) =>
-  mergedLorePieces(scenario, chat)
+const characterNamesOf = (scenario, chat = null, characters = null) =>
+  mergedLorePieces(scenario, chat, characters)
     .filter(p => p.type === 'character' && p.enabled !== false)
     .map(p => p.title?.trim())
     .filter(Boolean);
@@ -450,19 +450,54 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
   return selected;
 }
 
+// Global characters (Characters store) linked into a scenario
+// (scenario.characterIds) or directly into a chat (chat.characterIds) resolve
+// to character-type lore pieces at assembly time: the card is stored once and
+// edits propagate live everywhere it's linked. They flow through the normal
+// lore pipeline (pinned/keyword/semantic activation, budgets, /pov, speaker
+// detection) — no separate prompt path. Missing ids are skipped (deleted
+// characters, imported scenarios with dangling links).
+function resolveCharacters(scenario, chat, charactersById) {
+  if (!charactersById) return [];
+  const ids = [
+    ...(Array.isArray(scenario?.characterIds) ? scenario.characterIds : []),
+    ...(Array.isArray(chat?.characterIds) ? chat.characterIds : []),
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const c = charactersById[id];
+    if (!c) continue;
+    out.push({
+      id: c.id, type: 'character', title: c.name ?? '', content: c.content ?? '',
+      keys: Array.isArray(c.keys) && c.keys.length ? c.keys : (c.name ? [c.name] : []),
+      pinned: !!c.pinned, weight: c.weight ?? 0, links: [],
+      enabled: c.enabled !== false, smart: !!c.smart,
+      origin: 'character',
+    });
+  }
+  return out;
+}
+
 // Per-chat scenario overlay (v2.0a): chat.lorePieces merge over the
 // scenario's by id — the chat wins, including enabled:false to switch a
 // scenario piece off for one chat only; chat-only pieces append after the
 // scenario's. This is where model-generated characters/lore land (v2.0b+)
 // and the "edit the scenario of this chat" surface. Branches inherit a copy
-// via branchChat's deepClone.
-function mergedLorePieces(scenario, chat) {
+// via branchChat's deepClone. Linked global characters (v2.1) slot in after
+// the scenario pieces — scenario wins on id collision, chat wins overall.
+function mergedLorePieces(scenario, chat, charactersById = null) {
   const base = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
+  const chars = resolveCharacters(scenario, chat, charactersById);
   const over = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
-  if (!over.length) return base;
+  const seenIds = new Set(base.map(p => p?.id));
+  const baseAll = chars.length ? [...base, ...chars.filter(p => !seenIds.has(p.id))] : base;
+  if (!over.length) return baseAll;
   const byId = new Map(over.filter(p => p?.id).map(p => [p.id, p]));
-  const merged = base.map(p => (p && byId.has(p.id) ? byId.get(p.id) : p));
-  const baseIds = new Set(base.map(p => p?.id));
+  const merged = baseAll.map(p => (p && byId.has(p.id) ? byId.get(p.id) : p));
+  const baseIds = new Set(baseAll.map(p => p?.id));
   for (const p of over) if (p && !baseIds.has(p.id)) merged.push(p);
   return merged;
 }
@@ -483,7 +518,7 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
-function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null }) {
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null }) {
   const personaName = persona?.name?.trim() || 'User';
   const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
   const contextLength = Number(settings.contextLength) || 8192;
@@ -555,11 +590,17 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
-  // 3. lore layer (scenario pieces + per-chat overlay, chat wins on id)
+  // 3. lore layer (scenario pieces + linked global characters + per-chat
+  //    overlay, chat wins on id)
   const loreCap = Math.floor(budget * caps.lore);
-  const lorePieces = mergedLorePieces(scenario, chat);
+  const lorePieces = mergedLorePieces(scenario, chat, characters);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
+  // Resolved global-character ids — selectLore strips extra piece fields, so
+  // origin is recovered by id, not from the selected candidate. A chat overlay
+  // piece shadowing a global character still reports 'chat'.
+  const charPieceIds = new Set(resolveCharacters(scenario, chat, characters).map(p => p.id));
+  const originOf = (p) => chatPieceIds.has(p.id) ? 'chat' : (charPieceIds.has(p.id) ? 'character' : 'scenario');
   // /pov forces the named character's piece in (reason 'pov') alongside any
   // semantic pre-activations.
   let preAct = preActivated;
@@ -583,7 +624,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     inactive.push({
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
-      origin: chatPieceIds.has(p.id) ? 'chat' : 'scenario',
+      origin: originOf(p),
       tokens: est(`${p.title ?? ''}\n${p.content ?? ''}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
@@ -593,7 +634,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
   manifest.layers.lore = {
     tokens: loreTokens, cap: loreCap,
-    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: chatPieceIds.has(s.id) ? 'chat' : 'scenario', tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
+    pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: originOf(s), tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
     inactive,
   };
 
@@ -951,7 +992,7 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 // an IndexedDB adapter. Entities are stored one-key-per-entity; the adapter
 // keeps an in-memory cache that React reads synchronously.
 // ============================================================================
-const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta'];
+const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
 
 class AbstractStorage extends EventTarget {
   constructor() {
@@ -1021,7 +1062,9 @@ class IndexedDBAdapter extends AbstractStorage {
   }
   async init() {
     this.db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open(this.dbName, 1);
+      // v2 added the Characters store; onupgradeneeded creates any missing
+      // store idempotently, so old v1 databases upgrade cleanly.
+      const req = indexedDB.open(this.dbName, 2);
       req.onerror = () => reject(req.error);
       req.onsuccess = () => resolve(req.result);
       req.onupgradeneeded = (e) => {
@@ -1760,11 +1803,15 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, onSave, onClose }) {
+function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const [draft, setDraft] = useState(() => deepClone(scenario));
   const set = (patch) => setDraft(d => ({ ...d, ...patch }));
   const setPiece = (id, next) =>
     set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
+  const charList = Object.values(characters).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  const linkedIds = Array.isArray(draft.characterIds) ? draft.characterIds : [];
+  const toggleChar = (id, on) =>
+    set({ characterIds: on ? [...linkedIds, id] : linkedIds.filter(x => x !== id) });
   return html`
     <${Modal} title="Scenario editor" wide onClose=${onClose}
       footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
@@ -1788,6 +1835,20 @@ function ScenarioEditor({ scenario, onSave, onClose }) {
           <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
           <option value="auto">auto-add — proposals go straight into chat lore</option>
         </select></label>
+      <div class="field">
+        <span>Linked characters (${linkedIds.length})</span>
+        <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card edits apply live to all linked scenarios and chats. For scenario-only characters, use a character-type lore piece below.</div>
+        ${charList.length === 0 && html`<div class="hint">No global characters yet — create them from the sidebar's Characters section.</div>`}
+        ${charList.length > 0 && html`
+          <div class="links-list">
+            ${charList.map(c => html`
+              <label class="check" key=${c.id}>
+                <input type="checkbox" checked=${linkedIds.includes(c.id)}
+                  onChange=${(e) => toggleChar(c.id, e.target.checked)} />
+                ${c.name}
+              </label>`)}
+          </div>`}
+      </div>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
@@ -1857,6 +1918,7 @@ const DEFAULT_SETTINGS = {
   embeddingModel: '', // semantic lore activation; empty = disabled
   semanticThreshold: 0.55, // cosine similarity needed for a smart piece to inject
   dateFormat: 'dd/mm/yyyy', // date order for stamps and chat names
+  sidebarArrows: false, // desktop: «/» edge arrows instead of the brand/Inspector buttons as pane toggles (phones always use arrows)
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
   responseLength: 'medium',
@@ -1873,6 +1935,7 @@ const DEFAULT_SETTINGS = {
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
+  auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
@@ -1992,7 +2055,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Date format — message stamps, memories, chat names</span>
           <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
             ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-          </select></label>`}
+          </select></label>
+        <label class="check">
+          <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
+          Pane toggles as «/» edge arrows instead of the FictionPad brand / Inspector buttons (desktop — phones always use arrows)
+        </label>`}
 
       ${tab === 'connection' && html`
         <div class="grid2">
@@ -2150,6 +2217,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               ${numField('suggestionsDepth', 'Context messages sent', 6, { min: 1, max: 30 })}
             </div>
             <div class="hint">Uses the aux model; the prompt is editable in the Prompts tab.</div>
+            <label class="check">
+              <input type="checkbox" checked=${!!draft.auxShowSuggestions} onChange=${(e) => set({ auxShowSuggestions: e.target.checked })} />
+              Show suggestion calls in the Inspector's Aux calls log
+            </label>
           </div>`}
         <div class="field"><span>Memory</span>
           <label class="field"><span>Auto-summarize every N messages (also the lore-extraction cadence)</span>
@@ -2453,6 +2524,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
           <${InspectorRow} key=${p.id}
             pills=${[{ text: p.reason, cls: p.reason },
               ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
+              ...(p.origin === 'character' ? [{ text: 'character', cls: 'character' }] : []),
               ...(p.boost > 0 && p.reason !== 'link-boosted' ? [{ text: `+${p.boost} boost`, cls: 'link-boosted' }] : []),
               ...semPill(p.id, true)]}
             title=${p.title} meta=${`w${p.weight} · ${p.tokens}t`}
@@ -2465,6 +2537,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
             <${InspectorRow} key=${p.id ?? i} dimmed
               pills=${[{ text: p.reason, cls: p.reason === 'over-budget' ? 'pinned' : '' },
                 ...(p.origin === 'chat' ? [{ text: 'chat', cls: 'chat' }] : []),
+                ...(p.origin === 'character' ? [{ text: 'character', cls: 'character' }] : []),
                 ...semPill(p.id, false)]}
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}
@@ -2524,10 +2597,11 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, onUpdateChat, onExport, onDelete }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete }) {
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
-  const allPieces = mergedLorePieces(scenario, chat);
+  const allPieces = mergedLorePieces(scenario, chat, characters);
+  const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => onUpdateChat({ ...chat, lorePieces });
   return html`
     <div>
@@ -2541,6 +2615,8 @@ function ChatOptions({ chat, personas, scenario, onUpdateChat, onExport, onDelet
       <label class="field"><span>Model override (this chat only; blank = global chat model)</span>
         <input type="text" value=${chat.settings?.model ?? ''} placeholder="(global)"
           onInput=${(e) => onUpdateChat({ ...chat, settings: { ...(chat.settings ?? {}), model: e.target.value.trim() || undefined } })} /></label>
+      ${linkedChars.length > 0 && html`
+        <div class="hint">Linked characters (global cards — edits apply live everywhere): ${linkedChars.map(p => p.title).join(', ')}</div>`}
       <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
         <textarea rows=${4} value=${chat.customInstructions ?? ''}
           onInput=${(e) => onUpdateChat({ ...chat, customInstructions: e.target.value })} /></label>
@@ -2637,6 +2713,31 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   }, [actionsOpen, metaOpen, toolsOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
+  // Fit-based meta collapse (phones): the row renders fully expanded and steps
+  // down one level at a time until it fits — each level drops one more detail
+  // from the inline row, right to left (model, edited, gen time, date, #),
+  // then the action icons (t6). Never measured mid-stream (the row is widest
+  // while generating); re-probes from t0 on swipe change and row resizes.
+  // Pre-paint, so no flash.
+  const metaRef = useRef(null);
+  const [metaLevel, setMetaLevel] = useState(0);
+  useEffect(() => {
+    const el = metaRef.current; if (!el) return;
+    let seen = false; // RO fires once on observe — skip that, react only to real resizes
+    const ro = new ResizeObserver(() => { if (seen) setMetaLevel(0); seen = true; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const prevSwipeRef = useRef(swipe);
+  useLayoutEffect(() => {
+    if (prevSwipeRef.current !== swipe) { // swipe switched → re-probe from t0
+      prevSwipeRef.current = swipe;
+      if (metaLevel) { setMetaLevel(0); return; }
+    }
+    const el = metaRef.current;
+    if (!el || streaming) return;
+    if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
+  }, [metaLevel, streaming, swipe]);
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());
@@ -2690,6 +2791,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // Multi-speaker swipe: the header names everyone who spoke, in speaking
   // order (first appearance), each with its own colour.
   const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
+  // #, date, gen time, edited, model collapse behind the › toggle on phones
+  // (desktop shows them inline via .meta-details { display: contents }).
+  const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
   return html`
     <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
       onContextMenu=${(e) => {
@@ -2698,19 +2802,16 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         e.preventDefault();
         setCtxMenu({ x: e.clientX, y: e.clientY });
       }}>
-      <div class="meta">
+      <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
               class="who ${name !== 'Narrator' ? 'speaker' : ''}"
               style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
           : html`<span class="who ${isCharacter ? 'speaker' : ''}"
               style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
-        ${index != null && html`<span>#${index}</span>`}
-        ${swipe.createdAt && html`<span>${fmtDate(swipe.createdAt, dateFormat)}</span>`}
-        ${Number.isFinite(swipe.genMs) && html`<span title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
-          <button class="pill chat tools-toggle" title="Tool calls made during this generation — click to view"
+          <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
             onClick=${() => setToolsOpen(!toolsOpen)}>⚙\uFE0E ${swipe.toolCalls.length}</button>
           ${toolsOpen && html`
             <span class="tools-pop">
@@ -2720,14 +2821,17 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
                   ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
                 </span>`)}
             </span>`}`}
-        ${(node.edited || swipe.modelId) && html`
+        ${hasMetaDetails && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}
         <span class="meta-details ${metaOpen ? 'open' : ''}" onClick=${() => setMetaOpen(false)}>
-          ${node.edited && html`<span>(edited)</span>`}
-          ${swipe.modelId && html`<span>${swipe.modelId}</span>`}
+          ${index != null && html`<span class="md-index">#${index}</span>`}
+          ${swipe.createdAt && html`<span class="md-date">${fmtDate(swipe.createdAt, dateFormat)}</span>`}
+          ${Number.isFinite(swipe.genMs) && html`<span class="md-gentime" title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
+          ${node.edited && html`<span class="md-edited">(edited)</span>`}
+          ${swipe.modelId && html`<span class="md-model">${swipe.modelId}</span>`}
         </span>
-        <span style=${{ flex: 1 }}></span>
+        <span class="grow" style=${{ flex: 1 }}></span>
         <span class="actions ${streaming ? 'always' : ''} ${actionsOpen ? 'open' : ''}"
           onClick=${() => setActionsOpen(false)}>
           ${hasProbs && html`<button class="btn small ghost ${showProbs ? 'primary' : ''}" title="Token probabilities"
@@ -2986,17 +3090,38 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
 }
 
 // ============================================================================
-// COMPONENTS: SIDEBAR
+// COMPONENTS: SIDEBAR — collapsible Scenarios / Characters / Chats sections.
+// A collapsed section still shows the entries tied to the open chat (its
+// scenario, its linked global characters, the chat itself) so the current
+// context never vanishes. Collapse state persists in fictionpad.ui.
 // ============================================================================
-function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelectScenario, onSelectChat,
-                  onNewScenario, onEditScenario, onDeleteScenario, onNewChat, onExportScenario, onImport,
-                  onOpenPersonas, onOpenSettings, collapsed, onToggleCollapse, onDeleteChat,
+function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCharacterId, selectedChatId,
+                  onSelectScenario, onSelectCharacter, onSelectChat,
+                  onNewScenario, onEditScenario, onDeleteScenario, onNewChat,
+                  onNewCharacter, onEditCharacter, onDeleteCharacter, onNewCharacterChat,
+                  onExportScenario, onExportCharacter, onImport,
+                  onOpenPersonas, onOpenSettings, collapsed, onDeleteChat,
+                  sideCollapsed, onToggleSection,
                   storageKind, saveRetrying,
                   width, onDragStart, onResetWidth, onChatAction, onChatContextMenu }) {
+  const openChat = chats[selectedChatId] ?? null;
   const chatList = Object.values(chats)
-    .filter(c => !selectedScenarioId || c.scenarioId === selectedScenarioId)
+    .filter(c => selectedScenarioId ? c.scenarioId === selectedScenarioId
+      : selectedCharacterId ? (c.characterIds ?? []).includes(selectedCharacterId)
+      : true)
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
   const scenarioList = Object.values(scenarios).sort((a, b) => a.name.localeCompare(b.name));
+  const characterList = Object.values(characters ?? {}).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  // Entries that stay visible while their section is collapsed: whatever the
+  // open chat is built from.
+  const pinScenarioId = openChat?.scenarioId ?? null;
+  const pinCharIds = new Set([
+    ...(scenarios[openChat?.scenarioId]?.characterIds ?? []),
+    ...(openChat?.characterIds ?? []),
+  ].filter(id => characters?.[id]));
+  const shownScenarios = sideCollapsed.scenarios ? scenarioList.filter(s => s.id === pinScenarioId) : scenarioList;
+  const shownCharacters = sideCollapsed.characters ? characterList.filter(c => pinCharIds.has(c.id)) : characterList;
+  const shownChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
   const lpStart = (e, id) => {
@@ -3012,22 +3137,22 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
     lp.current = null;
   };
   const act = (e, id, action) => { e.stopPropagation(); onChatAction(id, action); };
+  const sectionTitle = (key, label, onAdd, addTitle) => html`
+    <div class="title">
+      <span class="t-toggle" onClick=${() => onToggleSection(key)}>
+        ${sideCollapsed[key] ? '▸' : '▾'} ${label}
+      </span>
+      ${onAdd && html`<button class="btn small ghost" title=${addTitle} onClick=${onAdd}>＋</button>`}
+    </div>`;
   return html`
     <div class="sidebar ${collapsed ? 'collapsed' : ''}"
       style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
-      <div class="head">
-        <h1>FictionPad</h1>
-        <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
-        <button class="btn small ghost" title="Settings" onClick=${onOpenSettings}>⚙\uFE0E</button>
-        <button class="btn small ghost" title="Collapse sidebar" onClick=${onToggleCollapse}>«</button>
-      </div>
       <div class="scroll">
         <div class="side-section">
-          <div class="title">Scenarios
-            <button class="btn small ghost" title="New scenario" onClick=${onNewScenario}>＋</button>
-          </div>
-          ${scenarioList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No scenarios yet.</div>`}
-          ${scenarioList.map(s => html`
+          ${sectionTitle('scenarios', 'Scenarios', onNewScenario, 'New scenario')}
+          ${shownScenarios.length === 0 && !sideCollapsed.scenarios
+            && html`<div class="hint" style=${{ padding: '0 6px' }}>No scenarios yet.</div>`}
+          ${shownScenarios.map(s => html`
             <div class="side-item ${s.id === selectedScenarioId ? 'selected' : ''}" key=${s.id}
               onClick=${() => onSelectScenario(s.id === selectedScenarioId ? null : s.id)}>
               <span class="name">${s.name}</span>
@@ -3044,9 +3169,29 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
             </div>`)}
         </div>
         <div class="side-section">
-          <div class="title">Chats${selectedScenarioId ? '' : ' (all)'}</div>
-          ${chatList.length === 0 && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario.</div>`}
-          ${chatList.map(c => html`
+          ${sectionTitle('characters', 'Characters', onNewCharacter, 'New character')}
+          ${shownCharacters.length === 0 && !sideCollapsed.characters
+            && html`<div class="hint" style=${{ padding: '0 6px' }}>No characters yet.</div>`}
+          ${shownCharacters.map(c => html`
+            <div class="side-item ${c.id === selectedCharacterId ? 'selected' : ''}" key=${c.id}
+              onClick=${() => onSelectCharacter(c.id === selectedCharacterId ? null : c.id)}>
+              <span class="name">${c.name}</span>
+              <span class="tools">
+                <button class="btn small ghost" title="New chat with this character"
+                  onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✉\uFE0E</button>
+                <button class="btn small ghost" title="Edit"
+                  onClick=${(e) => { e.stopPropagation(); onEditCharacter(c.id); }}>✎</button>
+                <button class="btn small ghost" title="Export JSON"
+                  onClick=${(e) => { e.stopPropagation(); onExportCharacter(c.id); }}>⤓</button>
+                <button class="btn small ghost" title="Delete"
+                  onClick=${(e) => { e.stopPropagation(); confirm(`Delete character "${c.name}"? Scenario/chat links become inert.`) && onDeleteCharacter(c.id); }}>✕</button>
+              </span>
+            </div>`)}
+        </div>
+        <div class="side-section">
+          ${sectionTitle('chats', `Chats${(selectedScenarioId || selectedCharacterId) ? '' : ' (all)'}`, null, null)}
+          ${shownChats.length === 0 && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
+          ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => onSelectChat(c.id)}
               onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
@@ -3054,7 +3199,7 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               <span class="name">${c.name}</span>
               <span class="tools">
-                <button class="btn small ghost" title="Inspector"
+                <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
                   onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
                 <button class="btn small ghost" title="Rename"
                   onClick=${(e) => act(e, c.id, 'rename')}>✎</button>
@@ -3067,12 +3212,14 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
         </div>
       </div>
       <div class="foot">
-        <button class="btn small" onClick=${onImport}>Import JSON</button>
+        <button class="btn small ghost" onClick=${onImport}>Import</button>
+        <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
+        <button class="btn small ghost" onClick=${onOpenSettings}>Settings</button>
         <span class="hint ${saveRetrying ? 'warn' : ''}" style=${{ marginLeft: 'auto', alignSelf: 'center' }}
           title=${saveRetrying
             ? 'Some edits could not be saved (server unreachable) — they are queued and retried automatically.'
             : storageKind === 'server'
-              ? 'Scenarios, personas and chats are stored on this server (shared).'
+              ? 'Scenarios, personas, characters and chats are stored on this server (shared).'
               : 'Data is stored locally in this browser.'}>
           ${saveRetrying ? '⚠\uFE0E saving…' : storageKind === 'server' ? 'server storage' : 'local storage'}</span>
       </div>
@@ -3081,17 +3228,18 @@ function Sidebar({ scenarios, chats, selectedScenarioId, selectedChatId, onSelec
         onDoubleClick=${onResetWidth} />`}
     </div>`;
 }
-
 // ============================================================================
-// COMPONENTS: NEW CHAT MODAL (scenario → pick persona)
+// COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
-function NewChatModal({ scenario, personas, onCreate, onClose }) {
+function NewChatModal({ scenario, character, personas, onCreate, onClose }) {
   const list = Object.values(personas);
   const [personaId, setPersonaId] = useState(list[0]?.id ?? '');
   const [newName, setNewName] = useState('');
   return html`
-    <${Modal} title=${`New chat — ${scenario.name}`} onClose=${onClose}
+    <${Modal} title=${`New chat — ${scenario?.name ?? character?.name ?? ''}`} onClose=${onClose}
       footer=${html`<button class="btn primary" onClick=${() => onCreate(personaId, newName)}>Start chat</button>`}>
+      ${character && !scenario && html`
+        <div class="hint">Direct chat with ${character.name} — no scenario. The character's greeting opens the chat; its card behaves like a linked character (edits apply live).</div>`}
       <label class="field"><span>Persona ({{user}})</span>
         <select value=${personaId} onChange=${(e) => setPersonaId(e.target.value)}>
           <option value="">— none ({{user}} → "User") —</option>
@@ -3158,7 +3306,7 @@ function ContextMenu({ x, y, items, onClose }) {
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
-function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario,
+function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
@@ -3172,21 +3320,22 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         ${tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
         ${tab === 'chat' && html`
-          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} onUpdateChat=${onUpdateChat}
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters} onUpdateChat=${onUpdateChat}
             onExport=${onExport} onDelete=${onDelete} />`}
       </div>
     <//>`;
 }
 
 // ============================================================================
-// COMPONENTS: RIGHT DRAWER — docked Inspector/Memory pane (the per-chat modal
-// above remains for chat-row/context-menu entry; Chat settings stays
-// modal-only). Fixed overlay on the right like the left sidebar, drag-resizable
-// on desktop, slide-in overlay on phones.
+// COMPONENTS: RIGHT DRAWER — docked Inspector/Memory/Chat pane (the per-chat
+// modal above remains for chat-row/context-menu entry). Fixed overlay on the
+// right like the left sidebar, drag-resizable on desktop, slide-in overlay on
+// phones.
 // ============================================================================
-const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory' };
+const DRAWER_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
 
 function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog,
+                      personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery }) {
   return html`
@@ -3205,6 +3354,9 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
           <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
         ${chat && tab === 'memory' && html`
           <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} />`}
+        ${chat && tab === 'chat' && html`
+          <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
+            onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} />`}
       </div>
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
@@ -3213,18 +3365,80 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
 }
 
 // ============================================================================
+// COMPONENTS: CHARACTER EDITOR — global reusable character cards. A character
+// resolves to a character-type lore piece wherever it's linked (scenarios via
+// scenario.characterIds, chats via chat.characterIds) and flows through the
+// normal lore pipeline — edits to the card apply live everywhere it's linked.
+// The sidebar's ＋ / ✎ open this editor directly; Save upserts and closes.
+// ============================================================================
+function newCharacter() {
+  return {
+    id: uid(), name: '', content: '', keys: [],
+    pinned: false, weight: 0, smart: false, enabled: true,
+    greeting: '', // first assistant message of chats started directly with this character
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+}
+
+function CharacterEditor({ character, scenarios, onUpsert, onClose }) {
+  const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
+  const linkCount = (id) => Object.values(scenarios).filter(s => (s.characterIds ?? []).includes(id)).length;
+  return html`
+    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide onClose=${onClose}>
+      <label class="field"><span>Name — speaker name; also the default trigger key</span>
+        <input type="text" value=${editing.name} onInput=${(e) => setEditing({ ...editing, name: e.target.value })} /></label>
+      <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
+        <textarea rows=${6} value=${editing.content} onInput=${(e) => setEditing({ ...editing, content: e.target.value })} /></label>
+      <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
+        <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${editing.keys}
+          onChange=${(keys) => setEditing({ ...editing, keys })} /></label>
+      <label class="field"><span>Greeting — first message of chats started directly with this character</span>
+        <textarea rows=${4} value=${editing.greeting ?? ''}
+          onInput=${(e) => setEditing({ ...editing, greeting: e.target.value })} /></label>
+      <div class="grid2">
+        <label class="field"><span>Weight — higher wins when the lore budget is tight</span>
+          <input type="number" value=${editing.weight ?? 0}
+            onInput=${(e) => setEditing({ ...editing, weight: Number(e.target.value) })} /></label>
+        <div class="field"><span>Activation</span>
+          <label class="check" title="Always injected while linked">
+            <input type="checkbox" checked=${!!editing.pinned}
+              onChange=${(e) => setEditing({ ...editing, pinned: e.target.checked })} /> pinned</label>
+          <label class="check" title="Semantic activation — requires an embeddings model in Settings">
+            <input type="checkbox" checked=${!!editing.smart}
+              onChange=${(e) => setEditing({ ...editing, smart: e.target.checked })} /> smart</label>
+          <label class="check">
+            <input type="checkbox" checked=${editing.enabled !== false}
+              onChange=${(e) => setEditing({ ...editing, enabled: e.target.checked })} /> enabled</label>
+        </div>
+      </div>
+      ${linkCount(editing.id) > 0 && html`
+        <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) — edits apply live to their chats.</div>`}
+      <div style=${{ display: 'flex', gap: '8px' }}>
+        <button class="btn primary" disabled=${!editing.name.trim()}
+          onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save</button>
+        <button class="btn" onClick=${onClose}>Cancel</button>
+      </div>
+    <//>`;
+}
+// ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
-function newChat(scenario, personaId, dateFormat) {
+// Chat factory. Scenario chats snapshot the scenario greeting; direct
+// character chats (scenarioId null, chat.characterIds set) snapshot the
+// character's greeting — possibly empty: the root node is parentless, so
+// pruneInterrupted never drops it.
+function newChat({ scenario = null, character = null, personaId = null, dateFormat } = {}) {
   const rootId = uid();
+  const baseName = scenario?.name ?? (character ? `Chat with ${character.name}` : 'Chat');
   return {
-    id: uid(), scenarioId: scenario.id, personaId: personaId ?? null,
-    name: `${scenario.name} — ${fmtDate(Date.now(), dateFormat)}`,
+    id: uid(), scenarioId: scenario?.id ?? null, personaId,
+    ...(character ? { characterIds: [character.id] } : {}),
+    name: `${baseName} — ${fmtDate(Date.now(), dateFormat)}`,
     customInstructions: '',
     rootMessageId: rootId, activeLeafId: rootId,
     messages: {
       [rootId]: { id: rootId, parentId: null, role: 'assistant', edited: false, activeSwipe: 0,
-        swipes: [{ text: scenario.greeting ?? '', createdAt: Date.now(), modelId: null }] },
+        swipes: [{ text: scenario?.greeting ?? character?.greeting ?? '', createdAt: Date.now(), modelId: null }] },
     },
     memoryStore: { memories: [], cursor: 0 },
     settings: {},
@@ -3265,6 +3479,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
+  const [characters, upsertCharacter, removeCharacter] = useStoredMap(storage, 'Characters');
   const [settingsRaw, setSettings] = usePersistentState('fictionpad.settings', DEFAULT_SETTINGS);
   const settings = useMemo(() => ({
     ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
@@ -3299,8 +3514,13 @@ function Main({ storage, storageKind, storageFailed }) {
   const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
   useEffect(() => applyTheme(theme, accent), [theme, accent]);
-  const [manifest, setManifest] = useState(null);
-  const [lastMessages, setLastMessages] = useState(null); // chat-completions array behind manifest
+  // Inspector data is cached per chat: opening another chat's panel shows ITS
+  // last recorded manifest (or the empty state), never the wrong chat's.
+  const [manifests, setManifests] = useState({}); // chatId -> { manifest, lastMessages }
+  const setManifestFor = (chatId, man, msgs) =>
+    setManifests(m => (chatId ? { ...m, [chatId]: { manifest: man, lastMessages: msgs } } : m));
+  const manifest = manifests[ui.chatId]?.manifest ?? null;
+  const lastMessages = manifests[ui.chatId]?.lastMessages ?? null; // chat-completions array behind manifest
   const [realCounts, setRealCounts] = useState(null); // /tokenize counts {static,lore,memory,total} | null
   const [modal, setModal] = useState(null);
   const [generating, setGenerating] = useState(null); // { chatId, nodeId }
@@ -3330,7 +3550,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
-  ref.current = { scenarios, personas, chats, settings };
+  ref.current = { scenarios, personas, chats, characters, settings };
 
   useEffect(() => {
     if (!error) return;
@@ -3381,11 +3601,11 @@ function Main({ storage, storageKind, storageFailed }) {
   const persona = chat?.personaId ? personas[chat.personaId] : null;
   const personaName = persona?.name?.trim() || 'User';
   const characterNames = useMemo(
-    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat),
-    [chat, scenarios]);
+    () => characterNamesOf(chat ? scenarios[chat.scenarioId] : null, chat, characters),
+    [chat, scenarios, characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
-  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory') or null.
+  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory' | 'chat') or null.
   const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
   const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
   const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
@@ -3492,15 +3712,14 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- chat row actions + context menu ----
   const [ctxMenu, setCtxMenu] = useState(null); // { chatId, x, y }
-  const openChatPanel = (chatId, tab) => {
-    setUi(u => ({ ...u, chatId }));
-    setModal({ kind: 'chatPanel', chatId, tab });
-  };
+  // The panel is a modal view into a chat — it must NOT switch the open chat,
+  // or the main pane and the right drawer would jump to it under the modal.
+  const openChatPanel = (chatId, tab) => setModal({ kind: 'chatPanel', chatId, tab });
   const chatAction = (chatId, action) => {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
-      case 'inspector': return openChatPanel(chatId, 'inspector');
+      case 'inspector': return openChatPanel(chatId, 'chat'); // panel opens on the Chat tab; Inspector is one tab over
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat');
       case 'rename': {
@@ -3606,7 +3825,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
-    const titles = mergedLorePieces(scen, chatObj).map(p => (p.title ?? '').trim()).filter(Boolean);
+    const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -3646,7 +3865,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
-    const { scenarios: sc, personas: pe, settings: st } = ref.current;
+    const { scenarios: sc, personas: pe, characters: gchars, settings: st } = ref.current;
     const model = chatObj.settings?.model || st.model; // per-chat override wins
     if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
     // Claim the generation slot immediately — the async prep below (semantic
@@ -3671,7 +3890,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     if (st.embeddingModel) {
-      const smartPieces = mergedLorePieces(scen, chatObj).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
+      const smartPieces = mergedLorePieces(scen, chatObj, gchars).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
         .map(activeText).join('\n').slice(-1500);
       if (smartPieces.length && queryText.trim()) {
@@ -3696,7 +3915,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let { messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
       platformPrompt: buildPlatformPrompt(st),
-      preActivated, pov,
+      preActivated, pov, characters: gchars,
     });
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
@@ -3737,8 +3956,7 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     // Stopped during the async prep (embeddings/tokenize)? Bail before streaming.
     if (abort.signal.aborted) { genRef.current = null; setGenerating(null); return; }
-    setManifest(man);
-    setLastMessages(messages);
+    setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
     // Logit bias: OpenAI shape {token_id: bias}, first token of each entry.
     const logitBias = {};
@@ -3872,7 +4090,7 @@ function Main({ storage, storageKind, storageFailed }) {
           const failed = applied.results.filter(r => !r.ok && r.note !== 'call cap reached').length;
           if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
           if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
-          setManifest({ ...man });
+          setManifestFor(chatObj.id, { ...man }, messages);
         }
       }
       if (!acc) discardEmptySwipe();
@@ -3883,7 +4101,7 @@ function Main({ storage, storageKind, storageFailed }) {
         attachProbs();
         // Attribute the finished swipe to a character (or "Narrator"), and
         // record how long the generation took.
-        const names = characterNamesOf(scen, work);
+        const names = characterNamesOf(scen, work, gchars);
         const n = work.messages[nodeId];
         if (n) {
           const swipes = n.swipes.slice();
@@ -3984,7 +4202,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // the model sees that definition; otherwise the directive alone stands.
         const scen = ref.current.scenarios[c.scenarioId];
         const q = arg.toLowerCase();
-        const chars = mergedLorePieces(scen, c).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
@@ -4170,18 +4388,28 @@ function Main({ storage, storageKind, storageFailed }) {
     removeScenario(id);
     if (ui.scenarioId === id) setUi(u => ({ ...u, scenarioId: null }));
   };
-  const createChat = (scenarioId, personaId, newPersonaName) => {
+  // New chat from a scenario (scenarioId) or directly with a global character
+  // (characterId). Selecting the matching sidebar filter keeps the new chat
+  // visible — a scenario filter would hide a character chat and vice versa.
+  const createChat = ({ scenarioId = null, characterId = null }, personaId, newPersonaName) => {
     let pid = personaId || null;
     if (!pid && newPersonaName.trim()) {
       pid = uid();
       upsertPersona(pid, { id: pid, name: newPersonaName.trim(), description: '' });
     }
-    const scen = ref.current.scenarios[scenarioId];
-    if (!scen) return;
-    const c = newChat(scen, pid, settings?.dateFormat);
+    const scen = scenarioId ? ref.current.scenarios[scenarioId] : null;
+    const char = characterId ? ref.current.characters[characterId] : null;
+    if (!scen && !char) return;
+    const c = newChat({ scenario: scen, character: char, personaId: pid, dateFormat: settings?.dateFormat });
     upsertChat(c.id, c);
-    setUi(u => ({ ...u, chatId: c.id, scenarioId }));
+    setUi(u => (scen
+      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null }
+      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id }));
     setModal(null);
+  };
+  const onDeleteCharacter = (id) => {
+    removeCharacter(id); // links dangle in scenarios/chats — resolveCharacters skips them
+    if (ui.characterId === id) setUi(u => ({ ...u, characterId: null }));
   };
   const onDeleteChat = (id) => {
     // Abort generation in flight for this chat before removing it.
@@ -4208,6 +4436,8 @@ function Main({ storage, storageKind, storageFailed }) {
     downloadJSON(`fictionpad-scenario-${scenarios[id]?.name ?? id}.json`, { type: 'fictionpad-scenario', version: 1, data: scenarios[id] });
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  const onExportCharacter = (id) =>
+    downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
     const obj = await pickJSONFile();
     if (!obj) return;
@@ -4216,19 +4446,23 @@ function Main({ storage, storageKind, storageFailed }) {
       const s = { ...obj.data, id: uid() };
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
+    } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
+      const ch = { ...obj.data, id: uid() };
+      upsertCharacter(ch.id, ch);
+      setUi(u => ({ ...u, characterId: ch.id, scenarioId: null }));
     } else if (obj.type === 'fictionpad-chat' && obj.data?.messages) {
       const c = { ...obj.data, id: uid() };
       upsertChat(c.id, c);
-      setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId }));
-      if (!ref.current.scenarios[c.scenarioId])
+      setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId ?? null }));
+      if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario or chat export.');
+      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export.');
     }
   };
 
-  const onPreview = () => {
-    const c = ref.current.chats[ui.chatId];
+  const onPreview = (chatId = ui.chatId) => {
+    const c = ref.current.chats[chatId];
     if (!c) return;
     const st = ref.current.settings;
     // Same platform-prompt composition as runGeneration so the preview counts
@@ -4238,14 +4472,30 @@ function Main({ storage, storageKind, storageFailed }) {
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
       chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
+      characters: ref.current.characters,
     });
     // Surface the keyword-only caveat when smart pieces could have fired.
-    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c)
+    if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c, ref.current.characters)
         .some(p => p && p.enabled !== false && !p.pinned && p.smart))
       man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
-    setManifest(man);
-    setLastMessages(messages);
+    setManifestFor(c.id, man, messages);
   };
+
+  // Suggestions fire after every swipe and would flood the aux list — hidden
+  // unless the user opts in (Settings → Features).
+  const shownAuxLog = settings.auxShowSuggestions ? auxLog : auxLog.filter(a => a.kind !== 'suggestions');
+
+  // Ribbon pane toggles: «/» edge arrows on phones always, and on desktop when
+  // the Appearance setting asks for them; otherwise the brand/Inspector labels.
+  const ribbonTier = (isMobile || settings.sidebarArrows) ? 2 : 0;
+  // Inset the centered title by the actual toggle-button widths so a long chat
+  // name ellipsizes instead of sliding under them.
+  const leftBtnRef = useRef(null), rightBtnRef = useRef(null);
+  const [btnW, setBtnW] = useState({ l: 0, r: 0 });
+  useEffect(() => {
+    const l = leftBtnRef.current?.offsetWidth ?? 0, r = rightBtnRef.current?.offsetWidth ?? 0;
+    if (l !== btnW.l || r !== btnW.r) setBtnW({ l, r });
+  }, [viewportW, ribbonTier]);
 
   return html`
     <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
@@ -4253,36 +4503,57 @@ function Main({ storage, storageKind, storageFailed }) {
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
         <div class="topbar-inner">
-          ${sidebarCollapsed && html`<button class="btn small ghost" title="Show sidebar" onClick=${toggleSidebar}>»</button>`}
-          <span class="title">${chat ? chat.name : 'FictionPad'}</span>
-          ${chat && html`<button class="btn small ghost" title="Close chat"
-            onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>`}
-          ${chat && html`<span class="sub">${scenarios[chat.scenarioId]?.name ?? '(missing scenario)'} · {{user}} = ${personaName}</span>`}
+          <span ref=${leftBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
+            ${ribbonTier >= 1
+              ? html`<button class="btn small ghost ${sidebarCollapsed ? '' : 'active'}" title=${sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+                  onClick=${toggleSidebar}>${sidebarCollapsed ? '»' : '«'}</button>`
+              : html`<button class="btn small ghost ${sidebarCollapsed ? '' : 'active'}"
+                  title=${sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick=${toggleSidebar}>FictionPad</button>`}
+          </span>
+          ${chat && html`<div class="mid"
+            style=${{ left: `${(isMobile ? 8 : 14) + padL + btnW.l + 6}px`, right: `${(isMobile ? 8 : 14) + padR + btnW.r + 6}px` }}>
+            <span class="title">${chat.name}</span>
+            <button class="btn small ghost" title="Close chat"
+              onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>
+            <span class="sub">${chat.scenarioId
+              ? (scenarios[chat.scenarioId]?.name ?? '(missing scenario)')
+              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · {{user}} = ${personaName}</span>
+          </div>`}
           <span class="spacer"></span>
-          <button class="btn small ghost wide-only ${ui.drawer === 'inspector' ? 'active' : ''}"
-            title="Context inspector" onClick=${() => toggleDrawer('inspector')}>Inspector</button>
-          <button class="btn small ghost wide-only ${ui.drawer === 'memory' ? 'active' : ''}"
-            title="Memories" onClick=${() => toggleDrawer('memory')}>Memory</button>
-          <button class="btn small ghost narrow-only ${ui.drawer ? 'active' : ''}"
-            title="Inspector / Memory panel"
-            onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>«</button>
+          <span ref=${rightBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
+            ${ribbonTier === 2
+              ? html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
+                  title="Inspector / Memory / Chat panel"
+                  onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>${ui.drawer ? '»' : '«'}</button>`
+              : html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
+                  title="Inspector panel (Inspector / Memory / Chat tabs)"
+                  onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>Inspector</button>`}
+          </span>
         </div>
       </div>
       <div class="app-body">
       <${Sidebar}
-        scenarios=${scenarios} chats=${chats}
-        selectedScenarioId=${ui.scenarioId} selectedChatId=${ui.chatId}
-        onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id }))}
+        scenarios=${scenarios} chats=${chats} characters=${characters}
+        selectedScenarioId=${ui.scenarioId} selectedCharacterId=${ui.characterId ?? null} selectedChatId=${ui.chatId}
+        onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
+        onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
         onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
         onNewChat=${(scenarioId) => setModal({ kind: 'newChat', scenarioId })}
+        onNewCharacter=${() => setModal({ kind: 'character', character: null })}
+        onEditCharacter=${(id) => setModal({ kind: 'character', character: characters[id] ?? null })}
+        onDeleteCharacter=${onDeleteCharacter}
+        onNewCharacterChat=${(characterId) => setModal({ kind: 'newChat', characterId })}
+        onExportCharacter=${onExportCharacter}
         onExportScenario=${onExportScenario}
         onImport=${onImport}
         onOpenPersonas=${() => setModal({ kind: 'personas' })}
         onOpenSettings=${() => setModal({ kind: 'settings' })}
-        collapsed=${sidebarCollapsed} onToggleCollapse=${toggleSidebar}
+        sideCollapsed=${ui.sideCollapsed ?? {}}
+        onToggleSection=${(key) => setUi(u => ({ ...u, sideCollapsed: { ...(u.sideCollapsed ?? {}), [key]: !(u.sideCollapsed ?? {})[key] } }))}
+        collapsed=${sidebarCollapsed}
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
@@ -4312,7 +4583,10 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
       <${RightDrawer}
         chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
+        manifest=${manifest} realCounts=${realCounts} onPreview=${() => onPreview()} auxLog=${shownAuxLog}
+        personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
+        onExport=${() => chat && onExportChat(chat)}
+        onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
@@ -4321,7 +4595,10 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'character' && html`
+      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
+        onUpsert=${upsertCharacter} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona} onRemove=${removePersona} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'settings' && html`
@@ -4337,9 +4614,10 @@ function Main({ storage, storageKind, storageFailed }) {
         onChange=${(map) => setSettings(s => ({ ...(s ?? {}), logitBias: map }))}
         onTokenize=${(prompt) => tokenize({ endpoint: effectiveEndpoint(settings, storageKind === 'server'), apiKey: settings.apiKey, serverToken: settings.serverToken, model: settings.model, prompt })}
         onClose=${() => setModal(null)} /><//>`}
-    ${modal?.kind === 'newChat' && scenarios[modal.scenarioId] && html`
-      <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId]} personas=${personas}
-        onCreate=${(pid, newName) => createChat(modal.scenarioId, pid, newName)}
+    ${modal?.kind === 'newChat' && (scenarios[modal.scenarioId] || characters[modal.characterId]) && html`
+      <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId] ?? null}
+        character=${characters[modal.characterId] ?? null} personas=${personas}
+        onCreate=${(pid, newName) => createChat({ scenarioId: modal.scenarioId ?? null, characterId: modal.characterId ?? null }, pid, newName)}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'recap' && html`
       <${ErrorBoundary} name="recap"><${RecapModal} text=${modal.text} onClose=${() => setModal(null)}
@@ -4354,8 +4632,10 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="chat panel"><${ChatPanelModal}
         chat=${chats[modal.chatId]} tab=${modal.tab}
         onTab=${(tab) => setModal(m => ({ ...m, tab }))}
-        manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview} auxLog=${auxLog}
-        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} onUpdateChat=${saveChat}
+        manifest=${manifests[modal.chatId]?.manifest ?? null}
+        realCounts=${modal.chatId === ui.chatId ? realCounts : null}
+        onPreview=${() => onPreview(modal.chatId)} auxLog=${shownAuxLog}
+        personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} characters=${characters} onUpdateChat=${saveChat}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}
@@ -4364,7 +4644,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${[
-          { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },
@@ -4480,4 +4760,5 @@ function App() {
 
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS };
+  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
+  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal };

@@ -72,7 +72,7 @@ const basicChallenge = (res, req) => {
 };
 
 // ---- server-side storage (mikupad-style): one kv table, gzip-compressed JSON ----
-const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta']);
+const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters']);
 const db = new DatabaseSync(DB_PATH);
 db.exec('CREATE TABLE IF NOT EXISTS kv (store TEXT, key TEXT, data BLOB, PRIMARY KEY (store, key))');
 const sendJson = (res, status, obj) => {

@@ -1,13 +1,15 @@
 // ============================================================================
-// COMPONENTS: NEW CHAT MODAL (scenario → pick persona)
+// COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
-function NewChatModal({ scenario, personas, onCreate, onClose }) {
+function NewChatModal({ scenario, character, personas, onCreate, onClose }) {
   const list = Object.values(personas);
   const [personaId, setPersonaId] = useState(list[0]?.id ?? '');
   const [newName, setNewName] = useState('');
   return html`
-    <${Modal} title=${`New chat — ${scenario.name}`} onClose=${onClose}
+    <${Modal} title=${`New chat — ${scenario?.name ?? character?.name ?? ''}`} onClose=${onClose}
       footer=${html`<button class="btn primary" onClick=${() => onCreate(personaId, newName)}>Start chat</button>`}>
+      ${character && !scenario && html`
+        <div class="hint">Direct chat with ${character.name} — no scenario. The character's greeting opens the chat; its card behaves like a linked character (edits apply live).</div>`}
       <label class="field"><span>Persona ({{user}})</span>
         <select value=${personaId} onChange=${(e) => setPersonaId(e.target.value)}>
           <option value="">— none ({{user}} → "User") —</option>
