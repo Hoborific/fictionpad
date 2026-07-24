@@ -128,7 +128,7 @@ trial('settings modal renders tab bar + appearance tab (SSR smoke)', () => {
     if (!out.includes(label)) throw new Error(`missing settings tab: ${label}`);
 });
 
-// v2.1 smoke: the sidebar's Characters section, and collapsed sections pinning
+// Smoke: the sidebar's Characters section, and collapsed sections pinning
 // the open chat's related entries (its scenario, linked characters, the chat).
 trial('sidebar renders characters + collapsed sections pin open-chat entries (SSR smoke)', () => {
   const noop = () => {};
@@ -153,7 +153,7 @@ trial('sidebar renders characters + collapsed sections pin open-chat entries (SS
   if (!out.includes('Mira')) throw new Error('pinned linked character missing: ' + out);
 });
 
-// v2.1 smoke: character editor, scenario-editor link section, and the
+// Smoke: character editor, scenario-editor link section, and the
 // direct-character new-chat modal.
 trial('character editor + scenario editor + character new-chat modal render (SSR smoke)', () => {
   const noop = () => {};
@@ -309,6 +309,29 @@ trial('openaiChatStream: content/lp split + request body', async () => {
     if (sentBody.logprobs !== true || sentBody.top_logprobs !== 10) throw new Error('logprobs not requested');
     if (sentBody.logit_bias?.['123'] !== -5) throw new Error('logit_bias not sent');
     if (!Array.isArray(sentBody.stop) || sentBody.stop[0] !== '<turn|>') throw new Error('stop not sent');
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+// Reasoning channel: delta.reasoning_content (vLLM/DeepSeek) and
+// delta.reasoning (OpenRouter) yield { think } records, kept out of content.
+trial('openaiChatStream: reasoning_content captured as { think }', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"Let me "}}]}',
+    'data: {"choices":[{"delta":{"reasoning":"think"}}]}',
+    'data: {"choices":[{"delta":{"content":"Answer."}}]}',
+    'data: {"choices":[{"finish_reason":"stop","delta":{}}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  try {
+    const chunks = [];
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x/v1', model: 'm', messages: [] })) chunks.push(c);
+    const think = chunks.filter(c => c.think != null).map(c => c.think).join('');
+    if (think !== 'Let me think') throw new Error('reasoning lost or reordered: ' + JSON.stringify(think));
+    const text = chunks.filter(c => c.content != null).map(c => c.content).join('');
+    if (text !== 'Answer.') throw new Error('reasoning leaked into content: ' + JSON.stringify(text));
+    if (!chunks.some(c => c.done)) throw new Error('done chunk missing');
   } finally { globalThis.fetch = oldFetch; }
 });
 

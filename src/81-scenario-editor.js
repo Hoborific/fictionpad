@@ -66,9 +66,9 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
             <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
               <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
           </div>
-          <label class="check" title="Embed this piece + the recent conversation each generation; activates on similarity even without keyword overlap">
+          <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
             <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
-            Smart activation (semantic) — requires an embeddings model in Settings
+            Semantic activation — uses the embedding model (aux); no keyword needed
           </label>
           <div class="grid3">
             <label class="field"><span>Weight</span>

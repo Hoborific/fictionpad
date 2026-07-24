@@ -29,10 +29,17 @@ const DEFAULT_SETTINGS = {
   // Follows the preset's default text until the user edits it.
   lengthDirective: LENGTH_PRESETS.medium.directive,
   samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
+  // Disabled sampler keys — values stay in `samplers`, they're just not sent.
+  disabledSamplers: [],
+  // Which sampler knobs appear as per-chat overrides in the panel's Samplers tab.
+  samplerFields: ['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'],
+  // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
+  customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
+  showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: true, // response-suggestion chips after generations
+  suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
@@ -60,7 +67,6 @@ const DEFAULT_SETTINGS = {
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
-  customTools: [], // user-defined tools: [{ id, name, argsHint, description, action: 'note'|'set_var'|'register_character'|'add_lore' }]
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
@@ -79,6 +85,51 @@ const SETTINGS_TABS = [
   ['features', 'Features'],
   ['prompts', 'Prompts'],
 ];
+
+// One custom-sampler definition card — collapsed by default (they stack
+// fast); the header shows the effective label + type, click to expand and
+// edit. Freshly added cards (no key yet) start open.
+function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
+  const [open, setOpen] = useState(!(d.key ?? '').trim());
+  const setDef = (patch) => onChange({ ...d, ...patch });
+  return html`
+    <div class="lore-card">
+      <div class="lc-head" onClick=${() => setOpen(!open)}>
+        <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
+        <span class="pill">${d.type === 'boolean' ? 'bool' : 'num'}</span>
+        <span>${open ? '▾' : '▸'}</span>
+      </div>
+      ${open && html`
+        <div class="lc-body">
+          <div class="grid2">
+            <label class="field"><span>Label (blank = the key)</span>
+              <input type="text" value=${d.name ?? ''} placeholder=${d.key || 'my_param'}
+                onInput=${(e) => setDef({ name: e.target.value })} /></label>
+            <label class="field"><span>Request key (dots nest)${keyClash ? ' — reserved built-in!' : ''}</span>
+              <input type="text" value=${d.key ?? ''} placeholder="chat_template_kwargs.enable_thinking"
+                onInput=${(e) => setDef({ key: e.target.value.replace(/\s+/g, '') })} /></label>
+          </div>
+          <div class="grid3">
+            <label class="field"><span>Type</span>
+              <select value=${d.type === 'boolean' ? 'boolean' : 'number'}
+                onChange=${(e) => setDef({ type: e.target.value, def: e.target.value === 'boolean' ? true : 0 })}>
+                <option value="number">number</option>
+                <option value="boolean">boolean (true/false)</option>
+              </select></label>
+            ${d.type === 'boolean'
+              ? html`<label class="field"><span>Default when enabled</span>
+                  <select value=${String(d.def !== false)} onChange=${(e) => setDef({ def: e.target.value === 'true' })}>
+                    <option value="true">true</option><option value="false">false</option>
+                  </select></label>`
+              : [['def', 'Default'], ['min', 'Min'], ['max', 'Max'], ['step', 'Step']].map(([k, lbl]) => html`
+                  <label class="field" key=${k}><span>${lbl}</span>
+                    <${NumInput} value=${d[k] ?? (k === 'step' ? 0.01 : 0)} step=${0.01} fallback=${k === 'step' ? 0.01 : 0}
+                      onCommit=${(n) => setDef({ [k]: n })} /></label>`)}
+          </div>
+          <button class="btn small danger" onClick=${onRemove}>Remove sampler</button>
+        </div>`}
+    </div>`;
+}
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload, initialDraft }) {
@@ -99,6 +150,15 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const [migNote, setMigNote] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
   const setSampler = (k, v) => { setDirty(true); setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } })); };
+  // Disable ≠ delete: the value stays in `samplers`, the key joins
+  // `disabledSamplers` (not sent). Re-enabling restores the tuned value.
+  const toggleSampler = (f, on) => { setDirty(true); setDraft(d => {
+    const disabledSamplers = (d.disabledSamplers ?? []).filter(k => k !== f.key);
+    if (!on) disabledSamplers.push(f.key);
+    const samplers = { ...(d.samplers ?? {}) };
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def; // never set before — seed the default
+    return { ...d, samplers, disabledSamplers };
+  }); };
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
@@ -120,7 +180,22 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const fetchModels = async () => {
     setModelsError(null);
     try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken })); }
-    catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
+    catch (e) { setModels(null); setModelsError(describeApiError(e)); }
+  };
+
+  // Manual config check (Connection tab): hits /models with the draft
+  // endpoint + key and reports reachability, auth, and whether the configured
+  // chat model is actually exposed.
+  const [testState, setTestState] = useState(null); // null | 'busy' | { ok, msg }
+  const testConnection = async () => {
+    setTestState('busy');
+    try {
+      const list = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
+      const note = draft.model
+        ? (list.includes(draft.model) ? `"${draft.model}" is available.` : `warning: "${draft.model}" is NOT among them.`)
+        : 'no chat model configured yet.';
+      setTestState({ ok: true, msg: `Connected — ${list.length} model(s) exposed; ${note}` });
+    } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
   // Shared prompt-textarea block for the Prompts tab.
@@ -184,6 +259,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
             Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
           </label>`}
+        <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
+          <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
+            ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
+          ${testState && testState !== 'busy' && html`
+            <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
+        </div>
         <div class="field"><span>Storage</span>
           <div class="hint">${storageKind === 'server'
             ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
@@ -222,7 +303,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
           </label>
           ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
-          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a smart lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
+          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a semantic ("smart") lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
         </div>`}
 
       ${tab === 'generation' && html`
@@ -248,16 +329,62 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
           <textarea rows=${2} value=${draft.lengthDirective ?? ''}
             onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
-        <div class="grid3">
-          ${['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'].map(k => html`
-            <label class="field" key=${k}><span>${{ temperature: 'Temperature', repetition_penalty: 'Repetition penalty' }[k] ?? k}</span>
-              <${NumInput} value=${draft.samplers[k]} step=${k === 'top_k' ? 1 : 0.05} fallback=${DEFAULT_SETTINGS.samplers[k]}
-                onCommit=${(n) => setSampler(k, n)} /></label>`)}
+        <div class="field"><span>Samplers</span>
+          <div class="sampler-grid">
+            ${allSamplerFields(draft).map(f => {
+              const active = draft.samplers?.[f.key] != null && !(draft.disabledSamplers ?? []).includes(f.key);
+              return html`
+                <div class="sampler-row" key=${f.key}>
+                  <label class="check">
+                    <input type="checkbox" checked=${active} onChange=${(e) => toggleSampler(f, e.target.checked)} />
+                    ${f.label}${f.custom ? ' ✦' : ''}</label>
+                  <span class="sval">
+                    ${active
+                      ? (f.type === 'boolean'
+                        ? html`<select value=${String(draft.samplers[f.key] !== false)}
+                            onChange=${(e) => setSampler(f.key, e.target.value === 'true')}>
+                            <option value="true">true</option><option value="false">false</option></select>`
+                        : html`<${NumInput} value=${draft.samplers[f.key]} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+                            onCommit=${(n) => setSampler(f.key, n)} />`)
+                      : html`<span class="hint">${draft.samplers?.[f.key] != null ? String(draft.samplers[f.key]) : '—'}</span>`}
+                  </span>
+                </div>`;
+            })}
+          </div>
+          <div class="hint">Unchecked params are not sent.</div>
         </div>
         <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
           <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
             placeholder="e.g. your EOS marker, if your model emits one"
             onChange=${(stopStrings) => set({ stopStrings })} /></label>
+        <div class="field"><span>Per-chat overrides — the knobs offered in the chat panel's Samplers tab</span>
+          <div class="sampler-grid">
+            ${allSamplerFields(draft).map(f => html`
+              <label class="check" key=${f.key} style=${{ margin: 0 }}>
+                <input type="checkbox" checked=${(draft.samplerFields ?? []).includes(f.key)}
+                  onChange=${(e) => set({ samplerFields: e.target.checked
+                    ? [...(draft.samplerFields ?? []), f.key]
+                    : (draft.samplerFields ?? []).filter(k => k !== f.key) })} />
+                ${f.label}${f.custom ? ' ✦' : ''}</label>`)}
+          </div>
+          <div class="hint">A per-chat override replaces the global value for that chat only; knobs unchecked here aren't overridable per chat. Context length and max tokens are always overridable.</div>
+        </div>
+        <div class="field"><span>Custom samplers (${(draft.customSamplers ?? []).length})
+          <button class="btn small" style=${{ marginLeft: '8px' }}
+            onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button></span>
+          <div class="hint">Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>. Built-in keys are reserved. Registered samplers join the lists above.</div>
+          ${(draft.customSamplers ?? []).map(d => html`
+            <${CustomSamplerCard} key=${d.id} def=${d}
+              keyClash=${!!SAMPLER_FIELD_MAP[(d.key ?? '').trim()]}
+              onChange=${(next) => set({ customSamplers: draft.customSamplers.map(q => q.id === d.id ? next : q) })}
+              onRemove=${() => set({
+                customSamplers: draft.customSamplers.filter(q => q.id !== d.id),
+                // Drop the def's key everywhere too — unregistered params are never sent.
+                samplers: Object.fromEntries(Object.entries(draft.samplers ?? {}).filter(([k]) => k !== (d.key ?? '').trim())),
+                disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
+                samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
+              })} />`)}
+        </div>
         <div class="grid3">
           <label class="field"><span>Top logprobs — alternatives stored per token</span>
             <${NumInput} value=${draft.topLogprobs ?? 10} min=${1} max=${20} fallback=${10}
@@ -298,7 +425,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Token probabilities (logprobs + alternatives per token; count in Generation tab)
           </label>
           <label class="check">
-            <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
+            <input type="checkbox" checked=${draft.showThinking !== false} onChange=${(e) => set({ showThinking: e.target.checked })} />
+            Thinking output — show the model's reasoning in a collapsible box on replies (when the backend sends it)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.suggestions} onChange=${(e) => set({ suggestions: e.target.checked })} />
             Response suggestions ("what you might do next" chips after each AI reply)
           </label>
           <label class="check">
@@ -310,7 +441,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
           </label>
         </div>
-        ${draft.suggestions !== false && html`
+        ${draft.suggestions && html`
           <div class="field"><span>Response suggestions</span>
             <div class="grid2">
               <label class="field"><span>Number of suggestions (1–5)</span>
@@ -369,36 +500,6 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <div class="hint" style=${{ margin: '4px 0' }}>Protocol instructions are editable in the Prompts tab.</div>
             <div class="grid3">
               ${numField('toolCallCap', 'Max tool calls per generation', TOOL_CALL_CAP, { min: 1, max: 25 })}
-            </div>
-            <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
-              <button class="btn small" style=${{ marginLeft: '8px' }}
-                onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
-              <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
-              ${(draft.customTools ?? []).map((t, i) => {
-                const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
-                return html`
-                  <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
-                    <div class="grid2">
-                      <label class="field"><span>Tool name (no spaces)</span>
-                        <input type="text" value=${t.name} placeholder="roll_dice"
-                          onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
-                      <label class="field"><span>Action</span>
-                        <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
-                          <option value="note">author's note (append steering text)</option>
-                          <option value="set_var">set story variable ({{var:name}})</option>
-                          <option value="register_character">register character</option>
-                          <option value="add_lore">add lore piece</option>
-                        </select></label>
-                    </div>
-                    <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
-                      <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
-                        onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
-                    <label class="field"><span>Description — when/why the model should call it</span>
-                      <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
-                    <button class="btn small danger"
-                      onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
-                  </div>`;
-              })}
             </div>`}
         </div>`}
 

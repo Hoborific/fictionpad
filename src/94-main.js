@@ -24,25 +24,14 @@ function newChat({ scenario = null, character = null, personaId = null, dateForm
   };
 }
 
-// User-defined tools (Settings → Features): advertised to the model after the
-// built-ins, executed by action kind in applyToolCall. Built-in names are
-// reserved — a custom def can never shadow register_character / add_lore.
-const enabledCustomTools = (st) => (st.customTools ?? []).filter(t => t?.name?.trim()
-  && t.name !== 'register_character' && t.name !== 'add_lore');
-
 // Full system-prompt head: platform prompt + enabled feature prompts (multi-
-// speaker, tool calling + user-defined tools). Shared by runGeneration and
-// the inspector preview so both count exactly what a generation would send.
+// speaker, tool calling). Shared by runGeneration and the inspector preview
+// so both count exactly what a generation would send.
 function buildPlatformPrompt(st) {
-  const defs = enabledCustomTools(st);
-  const customSection = defs.length
-    ? '\nAdditional tools:\n' + defs.map(t =>
-        `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
-    : '';
   return [
     st.platformPrompt,
     ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
-    ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+    ...(st.toolsEnabled !== false ? [(st.toolsPrompt ?? '').trim() || TOOLS_PROMPT] : []),
   ].filter(s => s?.trim()).join('\n\n');
 }
 
@@ -129,7 +118,7 @@ function Main({ storage, storageKind, storageFailed }) {
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
       return out;
     } catch (e) {
-      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: String(e?.message ?? e) }]);
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: describeApiError(e) }]);
       throw e;
     }
   }
@@ -199,11 +188,13 @@ function Main({ storage, storageKind, storageFailed }) {
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
-  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory' | 'chat') or null.
+  // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
   const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
   const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
   const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
   if (ui.drawer) lastDrawerTabRef.current = ui.drawer;
+  // Shallow settings patch (e.g. samplers from the panel's Samplers tab).
+  const updateSettings = (patch) => setSettings(prev => ({ ...(prev ?? {}), ...patch }));
   // touch:false for pure metadata edits (rename, options) — the sidebar sorts
   // by updatedAt, and a rename shouldn't teleport the chat to the top.
   const saveChat = useCallback((c, { touch = true } = {}) =>
@@ -432,7 +423,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
-  // ---- emergent lore extraction (v2.0d) ----
+  // ---- emergent lore extraction ----
   // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
   // the recent conversation. 'queue' mode (default): proposals wait for review
   // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
@@ -504,9 +495,14 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
-    const { scenarios: sc, personas: pe, characters: gchars, settings: st } = ref.current;
-    const model = chatObj.settings?.model || st.model; // per-chat override wins
-    if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
+    const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
+    if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    // Per-chat generation overrides (panel's Samplers tab): context length and
+    // max tokens shadow the globals for this chat's generations.
+    const st = { ...baseSt,
+      contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
+      maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
     // Claim the generation slot immediately — the async prep below (semantic
     // embeddings, exact token count) can take a long time on a slow backend,
     // and the UI (waiting dots, Stop button, input guards) keys off this.
@@ -602,6 +598,14 @@ function Main({ storage, storageKind, storageFailed }) {
       const id = e?.ids?.[0];
       if (Number.isInteger(id)) logitBias[String(id)] = Math.max(-100, Math.min(100, e.power));
     }
+    // Effective samplers: per-chat overrides win; only registered params
+    // (built-ins + customSamplers) are ever sent — a removed custom def can't
+    // leak a stale key upstream. Disabled globals keep their values but are
+    // not sent (enabledSamplers); a per-chat override can still force one.
+    const allowedSamplerKeys = new Set(allSamplerFields(st).map(f => f.key));
+    const effSamplers = Object.fromEntries(
+      Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
+        .filter(([k]) => allowedSamplerKeys.has(k)));
     let work = chatObj;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
@@ -612,6 +616,10 @@ function Main({ storage, storageKind, storageFailed }) {
       ? (node?.swipes?.[node.activeSwipe]?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
       : [];
     let acc = baseText;
+    // Reasoning channel (delta.reasoning_content) accumulates separately and
+    // lands on the swipe as `think` — displayed collapsibly, never prompted.
+    // Continuations prepend the base swipe's reasoning like its text.
+    let thinkAcc = continuation ? (node?.swipes?.[node.activeSwipe]?.think ?? '') : '';
     const lpTape = [];
     // Tool replies: the RAW accumulated text and its raw→stripped char map
     // (set when tool blocks were stripped) so the lp tape — which covers the
@@ -629,7 +637,8 @@ function Main({ storage, storageKind, storageFailed }) {
       // Persisted spans cap alternatives at 5 — the tape can carry up to 20
       // and would balloon storage on every swipe. Display needs only a few.
       const capped = tokens?.map(t => t.top?.length > 5 ? { ...t, top: t.top.slice(0, 5) } : t);
-      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(capped ? { tokens: capped } : {}) };
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model,
+        ...(thinkAcc ? { think: thinkAcc } : {}), ...(capped ? { tokens: capped } : {}) };
       const messages = { ...work.messages, [nodeId]: { ...n, swipes } };
       const cur = ref.current.chats[work.id];
       if (!cur) { work = { ...work, messages }; return; }
@@ -685,7 +694,9 @@ function Main({ storage, storageKind, storageFailed }) {
         try {
           for await (const chunk of openaiChatStream({
             endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
-            samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
+            // Per-chat sampler overrides (panel's Samplers tab) win over globals.
+            samplers: effSamplers,
+            maxTokens: st.maxTokens, signal: abort.signal,
             tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: stopList,
           })) {
             if (chunk.done) {
@@ -694,6 +705,7 @@ function Main({ storage, storageKind, storageFailed }) {
               continue;
             }
             if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
+            if (chunk.think) { thinkAcc += chunk.think; applyText(acc); continue; }
             acc += chunk.content;
             // Streaming view hides tool protocol blocks (complete + trailing
             // unterminated) so the user never sees them mid-generation.
@@ -715,11 +727,11 @@ function Main({ storage, storageKind, storageFailed }) {
       }
     } catch (e) {
       if (e.name !== 'AbortError')
-        setError(`Generation failed: ${e.message ?? e}`);
+        setError(`Generation failed: ${describeApiError(e)}`);
     } finally {
       genRef.current = null;
       setGenerating(null);
-      // Tool calls (v2.0b): parse the finished text, strip protocol blocks
+      // Tool calls: parse the finished text, strip protocol blocks
       // from display, execute against the chat lore overlay. Logprobs still
       // attach on tool replies: the lp tape is aligned against the RAW text
       // (which it tiles exactly) and projected through the strip's char map
@@ -773,7 +785,6 @@ function Main({ storage, storageKind, storageFailed }) {
             const applied = applyToolCalls(c, parsed.calls, {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
-              customTools: enabledCustomTools(st),
               atLen: getActivePath(c.messages, nodeId).length,
             }, mergedLorePieces(scen, c, gchars));
             toolResults = applied.results;
@@ -834,7 +845,7 @@ function Main({ storage, storageKind, storageFailed }) {
         maybeExtractLore(work);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
-        if (!continuation && st.suggestions !== false) {
+        if (!continuation && st.suggestions) {
           const parent = work.messages[node?.parentId];
           const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
           if (!parentIsOOC) fetchSuggestions(work, nodeId);
@@ -1206,13 +1217,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
+      chat: c, settings: { ...st, contextLength: c.settings?.contextLength ?? st.contextLength },
+      platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });
     // Surface the keyword-only caveat when smart pieces could have fired.
     if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c, ref.current.characters)
         .some(p => p && p.enabled !== false && !p.pinned && p.smart))
-      man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
+      man.warnings.push('Preview: semantic activation not run (embeddings) — semantic pieces show keyword-trigger results only.');
     setManifestFor(c.id, man, messages);
   };
 
@@ -1256,24 +1268,19 @@ function Main({ storage, storageKind, storageFailed }) {
               onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>
             <span class="sub">${chat.scenarioId
               ? (scenarios[chat.scenarioId]?.name ?? '(missing scenario)')
-              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · {{user}} = ${personaName}</span>
+              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · ${personaName}</span>
           </div>`}
-          ${generating && html`
-            <span style=${{ display: 'inline-flex', alignItems: 'center', gap: '6px', flex: 'none' }}>
-              ${generating.chatId !== chat?.id && html`
-                <span class="hint" style=${{ fontStyle: 'normal' }}
-                  title=${`Generating in "${chats[generating.chatId]?.name ?? 'another chat'}"`}>generating…</span>`}
-              <button class="btn small ghost" title="Stop generation"
-                onClick=${() => genRef.current?.abort.abort()}>■\uFE0E Stop</button>
-            </span>`}
+          ${generating && generating.chatId !== chat?.id && html`
+            <span class="hint" style=${{ fontStyle: 'normal', flex: 'none' }}
+              title=${`Generating in "${chats[generating.chatId]?.name ?? 'another chat'}"`}>generating…</span>`}
           <span class="spacer"></span>
           <span ref=${rightBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
             ${ribbonArrows
               ? html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
-                  title="Inspector / Memory / Chat panel"
+                  title="Inspector / Samplers / Memory / Chat panel"
                   onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>${ui.drawer ? '»' : '«'}</button>`
               : html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
-                  title="Inspector panel (Inspector / Memory / Chat tabs)"
+                  title="Inspector panel (Inspector / Samplers / Memory / Chat tabs)"
                   onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>Inspector</button>`}
           </span>
         </div>
@@ -1313,7 +1320,7 @@ function Main({ storage, storageKind, storageFailed }) {
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
-              dateFormat=${settings.dateFormat}
+              dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}
@@ -1334,6 +1341,7 @@ function Main({ storage, storageKind, storageFailed }) {
         manifest=${manifest} realCounts=${realCounts} onPreview=${() => onPreview()} auxLog=${shownAuxLog(ui.chatId)}
         cap=${settings.memoryCap ?? MEMORY_CAP}
         personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
+        settings=${settings} onUpdateSettings=${updateSettings}
         onExport=${() => chat && onExportChat(chat)}
         onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
@@ -1393,6 +1401,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onPreview=${() => onPreview(modal.chatId)} auxLog=${shownAuxLog(modal.chatId)}
         cap=${settings.memoryCap ?? MEMORY_CAP}
         personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} characters=${characters} onUpdateChat=${saveChat}
+        settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}

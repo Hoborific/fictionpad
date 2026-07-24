@@ -67,9 +67,31 @@ async function fetchAPI(endpoint, url, opts = {}) {
 
 async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   const res = await fetchAPI(endpoint, modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint, serverToken) }, signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const json = await res.json(); msg = json?.error?.message ?? json?.message ?? msg; } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
   const json = await res.json();
   return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
+}
+
+// Human-readable API failure for banners and the settings test button — a
+// bare "401" tells the user nothing; name the likely cause and where to fix it.
+function describeApiError(e) {
+  const status = e?.status;
+  const msg = String(e?.message ?? e);
+  const detail = msg && !/^HTTP \d+$/.test(msg) ? ` — ${msg}` : '';
+  if (status === 401) return `401 Unauthorized${detail}. The API key is missing or was rejected — check Settings → Connection.`;
+  if (status === 403) return `403 Forbidden${detail}. The key lacks access, or the server refused the request.`;
+  if (status === 404) return `404 Not Found${detail}. The endpoint URL looks wrong — expected an OpenAI-compatible server (…/v1).`;
+  if (status === 429) return `429 Too Many Requests${detail}. Rate-limited by the backend — wait a moment and retry.`;
+  if (status != null) return `HTTP ${status}${detail}`;
+  if (/failed to fetch|networkerror|load failed/i.test(msg))
+    return 'Could not reach the endpoint — is it running, and is the URL right? (A cross-origin server may need "Route API requests through this server".)';
+  return msg;
 }
 
 // Minimal SSE parser: line-based, only data: fields, JSON payloads.
@@ -108,6 +130,8 @@ async function* parseEventStream(body) {
 // logprob entries off by one position — observed in the wild):
 //   { content }  — display text; delta.content is the sole authority
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
+//   { think }    — reasoning text (delta.reasoning_content / delta.reasoning,
+//                  vLLM/DeepSeek/OpenRouter convention); displayed, never prompted
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null }) {
@@ -116,7 +140,9 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
-      model, messages, stream: true, max_tokens: maxTokens, ...samplers,
+      // expandSamplerParams: dotted custom-sampler keys (e.g.
+      // chat_template_kwargs.enable_thinking) become nested objects.
+      model, messages, stream: true, max_tokens: maxTokens, ...expandSamplerParams(samplers),
       ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
@@ -140,6 +166,11 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (!choice) continue;
     // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
+    // Reasoning channel (vLLM/DeepSeek/OpenRouter): own field, never part of
+    // content. Yielded separately so the caller can show it collapsibly.
+    const thinkText = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
+      ?? choice?.message?.reasoning_content;
+    if (thinkText) yield { think: thinkText };
     // Terminal chunk: report the finish reason so the caller can tell a clean
     // finish from a dropped connection (stream that just ends). A finish
     // chunk with empty/missing delta carries the sampled EOS in logprobs —
@@ -328,7 +359,9 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
       const json = await res.json();
       msg = json?.error?.message ?? json?.message ?? msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const json = await res.json();
   if (!Array.isArray(json?.data)) throw new Error('Malformed embeddings response');
@@ -376,7 +409,9 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
       const json = await res.json();
       msg = json?.error?.message ?? json?.message ?? msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const json = await res.json();
   if (json?.error?.message) throw new Error(json.error.message);

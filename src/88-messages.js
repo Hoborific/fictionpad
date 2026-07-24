@@ -33,7 +33,20 @@ function ProbsView({ tokens, onPick }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+// Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
+// Collapsed by default, streaming or not — the header still shows live that
+// thinking is in progress ("Thinking…").
+function ThinkBox({ text, streaming }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class="think">
+      <button class="think-head" onClick=${() => setOpen(!open)}>
+        <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
+      ${open && html`<div class="think-body">${text}</div>`}
+    </div>`;
+}
+
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -95,6 +108,10 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const showNav = m > 1 || isLeafAssistant;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
   const atUsed = usedIdx === node.activeSwipe;
+  // Reasoning channel (swipe.think): collapsible box atop the bubble.
+  const thinkBox = !isUser && !editing && showThinking !== false && swipe.think
+    ? html`<${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} />`
+    : null;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
   // left = next swipe / ▶⁺ on the leaf, right = previous swipe.
@@ -128,7 +145,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
-  // Multi-speaker split (v2.0c): one swipe, several `Name:` parts → one
+  // Multi-speaker split: one swipe, several `Name:` parts → one
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
   const multi = (segments?.length ?? 0) > 1;
@@ -216,6 +233,7 @@ ${showNav && html`
         <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
+          ${si === 0 && thinkBox}
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
             style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
@@ -223,6 +241,7 @@ ${showNav && html`
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
+        ${thinkBox}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>

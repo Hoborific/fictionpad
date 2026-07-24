@@ -17,7 +17,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore };`;
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -25,7 +25,7 @@ const {
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -162,7 +162,7 @@ section('lore engine');
   ok(!deep.has('D'), 'per-piece searchDepth limits the scan window');
 }
 
-// ---- per-chat lore overlay (v2.0a) ----
+// ---- per-chat lore overlay ----
 section('chat lore overlay');
 {
   const scen = { ...baseScenario, lorePieces: [
@@ -195,7 +195,7 @@ section('chat lore overlay');
     'manifest marks origin on inactive pieces too');
 }
 
-// ---- global characters (v2.1) ----
+// ---- global characters ----
 section('global characters');
 {
   const chars = {
@@ -245,7 +245,7 @@ section('global characters');
     'assembler: global character keyword-triggers on its name');
 }
 
-// ---- tool calls (v2.0b) ----
+// ---- tool calls ----
 section('tool calls');
 {
   // parser
@@ -261,7 +261,7 @@ section('tool calls');
   }
   {
     const p = parseToolCalls('```tool\n{"name":"add_lore","args":{"title":"X","content":"Y"}}\n```');
-    ok(p.calls.length === 1 && p.calls[0].name === 'add_lore', 'legacy "name" field still accepted');
+    ok(p.calls.length === 1 && p.calls[0].name === 'add_lore', '"name" field accepted as alias');
   }
   {
     const p = parseToolCalls('```tool {"name":"add_lore","args":{"title":"X","content":"Y"}}``` done');
@@ -376,7 +376,7 @@ section('tool calls');
   }
 }
 
-// ---- multi-speaker segments (v2.0c) ----
+// ---- multi-speaker segments ----
 section('speaker segments');
 {
   const names = ['Vex', 'Mira'];
@@ -442,8 +442,8 @@ section('speaker segments');
   }
 }
 
-// ---- story variables + author's note + lore queue (v2.0d) ----
-section('v2.0d: vars, notes, queue, custom tools');
+// ---- story variables + author's note + lore queue ----
+section('vars, notes, queue');
 {
   ok(subVars('HP: {{var:hp}}/{{var:max hp}}', { hp: '7', 'max hp': '12' }) === 'HP: 7/12', 'subVars substitutes');
   ok(subVars('x{{var:nope}}y', {}) === 'xy', 'unknown var → empty');
@@ -476,29 +476,6 @@ section('v2.0d: vars, notes, queue, custom tools');
     const withPiece = { ...baseChat, lorePieces: [lore({ id: 'T', title: 'Tower', keys: ['tower'] })] };
     const r2 = applyToolCalls(withPiece, [{ name: 'add_lore', args: { title: 'tower', content: 'taller' } }], { queueLore: true });
     ok(r2.chat.lorePieces[0].content === 'taller' && !r2.chat.loreQueue, 'queueLore: existing titles update directly');
-  }
-  // custom tool actions
-  {
-    const defs = [
-      { id: '1', name: 'add_beat', action: 'note' },
-      { id: '2', name: 'track', action: 'set_var' },
-      { id: '3', name: 'recruit', action: 'register_character' },
-      { id: '4', name: 'add_lore', action: 'note' }, // shadowing attempt: built-in must win
-      { id: '5', name: 'broken', action: 'explode' },
-    ];
-    let chat = baseChat;
-    chat = applyToolCalls(chat, [{ name: 'add_beat', args: { text: 'rain incoming' } }], { customTools: defs }).chat;
-    ok(chat.authorsNote === 'rain incoming', 'note action appends authorsNote');
-    chat = applyToolCalls(chat, [{ name: 'add_beat', args: { text: 'second line' } }], { customTools: defs }).chat;
-    ok(chat.authorsNote === 'rain incoming\nsecond line', 'note action appends with newline');
-    chat = applyToolCalls(chat, [{ name: 'track', args: { name: 'hp', value: '7' } }], { customTools: defs }).chat;
-    ok(chat.vars?.hp === '7', 'set_var writes chat.vars');
-    chat = applyToolCalls(chat, [{ name: 'recruit', args: { name: 'Vex', description: 'd' } }], { customTools: defs }).chat;
-    ok(chat.lorePieces?.[0]?.type === 'character' && chat.lorePieces[0].title === 'Vex', 'register_character alias works');
-    const r = applyToolCalls(baseChat, [{ name: 'add_lore', args: { title: 'X', content: 'y' } }], { customTools: defs });
-    ok(r.chat.lorePieces?.[0]?.type === 'lore', 'custom def cannot shadow a built-in');
-    const r2 = applyToolCalls(baseChat, [{ name: 'broken', args: {} }], { customTools: defs });
-    ok(!r2.results[0].ok && r2.results[0].note.includes('unknown action'), 'unknown custom action rejected');
   }
   // rewind resets the extraction cursor alongside memory
   {
@@ -864,6 +841,21 @@ section('macro edge cases');
   ok(subVars('{{var:Missing}}', { score: '5' }) === '', 'unknown var still substitutes empty');
 }
 
+// ---- sampler param expansion (dotted custom-sampler keys) ----
+section('sampler param expansion');
+{
+  const flat = expandSamplerParams({ temperature: 0.8, top_p: 0.95 });
+  ok(flat.temperature === 0.8 && flat.top_p === 0.95, 'flat keys pass through');
+  ok(expandSamplerParams({ 'chat_template_kwargs.enable_thinking': true })
+    .chat_template_kwargs?.enable_thinking === true, 'dotted key nests');
+  const merged = expandSamplerParams({ 'a.b': 1, 'a.c': 2, temperature: 0.7 });
+  ok(merged.a?.b === 1 && merged.a?.c === 2 && merged.temperature === 0.7, 'siblings deep-merge');
+  const skipped = expandSamplerParams({ a: null, b: undefined, c: 1 });
+  ok(!('a' in skipped) && !('b' in skipped) && skipped.c === 1, 'null/undefined dropped');
+  ok(expandSamplerParams({ 'a.b': 1, a: 5 }).a === 5, 'flat/dotted collision last-write-wins');
+  ok(expandSamplerParams(null) && Object.keys(expandSamplerParams(null)).length === 0, 'null input → empty');
+}
+
 // ---- rewind: position-based (atLen) cutoff ----
 section('rewind atLen cutoff');
 {
@@ -905,14 +897,14 @@ section('rewind atLen cutoff');
   ok(rw.loreQueue.map(q => q.id).join(',') === 'q1',
     'loreQueue proposals roll back with the same rule');
   ok(rw.memoryStore.cursor === 2 && rw.emergentCursor === 2, 'cursors reset to path length');
-  // legacy entries WITHOUT atLen still fall back to the createdAt cutoff
-  const legacy = { ...baseChat,
+  // entries WITHOUT atLen still fall back to the createdAt cutoff
+  const untagged = { ...baseChat,
     memoryStore: { memories: [
       { id: 'a', text: 'a', pinned: false, createdAt: 0 },
       { id: 'b', text: 'b', pinned: false, createdAt: Date.now() + 100000 },
     ], cursor: 0 },
     loreQueue: [{ id: 'q', title: 'Q', content: 'x', keys: [], source: 'tool', createdAt: Date.now() + 100000 }] };
-  const rw2 = rewindChat(legacy, 'root');
+  const rw2 = rewindChat(untagged, 'root');
   ok(rw2.memoryStore.memories.length === 1 && rw2.memoryStore.memories[0].id === 'a',
     'entries without atLen fall back to the createdAt cutoff');
   ok(rw2.loreQueue.length === 0, 'loreQueue entries without atLen fall back too');

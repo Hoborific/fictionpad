@@ -90,6 +90,22 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .hint { font-size: 12px; color: var(--c-dim); }
 .warn { color: var(--c-warning); }
 
+/* reasoning ("thinking") box inside a bubble */
+.think { margin-bottom: 6px; }
+.think-head {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--c-dim); font-size: 12px; font-family: inherit;
+}
+.think-head:hover { color: var(--c-text); }
+.think-caret { display: inline-block; width: 12px; }
+.think-body {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 12.5px; font-style: italic; color: var(--c-dim);
+  border-left: 2px solid var(--c-border);
+  padding: 4px 8px; margin-top: 4px;
+  max-height: 220px; overflow-y: auto;
+}
+
 /* ---------- sidebar (fixed overlay — consumes the slack margin, never shifts the chat column) ---------- */
 .sidebar {
   position: fixed; left: 0; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); bottom: 0; z-index: 40;
@@ -197,7 +213,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   transition: transform 0.18s ease; /* snap-back after a sub-threshold drag */
 }
 .msg .bubble.dragging { transition: none; }
-/* Multi-speaker segments (v2.0c): consecutive bubbles with a small speaker chip. */
+/* Multi-speaker segments: consecutive bubbles with a small speaker chip. */
 .msg .bubble + .bubble { margin-top: 6px; }
 .msg .bubble.seg { padding-top: 7px; }
 .msg .seg-who { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--c-faint); margin-bottom: 3px; }
@@ -426,6 +442,15 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .modal .m-tab.active { color: var(--c-accent); border-bottom-color: var(--c-accent); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 12px; }
+/* sampler rows: checkbox label left, fixed value slot right — enabled rows
+   hold the input/select there, disabled rows show the kept value dimmed, so
+   the column edge stays aligned; the grid fills the modal width */
+.sampler-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 20px; margin-bottom: 6px; }
+.sampler-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.sampler-row .check { flex: 1; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sampler-row .sval { width: 100px; flex: none; display: flex; justify-content: flex-end; align-items: center; min-height: 26px; }
+.sampler-row .sval input[type="number"], .sampler-row .sval select { width: 100%; padding: 3px 6px; font-size: 13px; }
+.sampler-row .sval .hint { margin: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lore-card { border: 1px solid var(--c-border); border-radius: 8px; margin-bottom: 8px; background: var(--c-bg-2); }
 .lore-card > .lc-head { display: flex; gap: 6px; align-items: center; padding: 6px 10px; cursor: pointer; }
 .lore-card > .lc-head .t { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -807,9 +832,9 @@ const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
 // literally, not as replacement-string patterns.
 const subUser = (text, personaName) =>
   String(text ?? '').replace(/\{\{user\}\}/gi, () => personaName || 'User');
-// {{var:name}} story variables (v2.0d): per-chat key/value store written by the
-// set_var tool action; unknown variables substitute to empty. Lookup is
-// case-insensitive (the macro regex is); an exact-case key wins on collision.
+// {{var:name}} story variables: per-chat key/value store; unknown variables
+// substitute to empty. Lookup is case-insensitive (the macro regex is); an
+// exact-case key wins on collision.
 const subVars = (text, vars) =>
   String(text ?? '').replace(/\{\{var:([^}]+)\}\}/gi, (_, k) => {
     if (!vars) return '';
@@ -818,6 +843,29 @@ const subVars = (text, vars) =>
     const found = Object.keys(vars).find(vk => vk.toLowerCase() === key.toLowerCase());
     return found === undefined ? '' : String(vars[found] ?? '');
   });
+
+// Sampler params → request body fields. Flat keys pass through untouched;
+// DOTTED keys (user-registered custom samplers, e.g.
+// `chat_template_kwargs.enable_thinking`) expand into nested objects, with
+// siblings sharing a prefix deep-merged into one parent. null/undefined
+// values are dropped (a cleared override must not send null upstream).
+// Flat/dotted collisions resolve last-write-wins in iteration order.
+function expandSamplerParams(samplers) {
+  const out = {};
+  for (const [key, val] of Object.entries(samplers ?? {})) {
+    if (val == null) continue;
+    const parts = key.split('.').filter(Boolean);
+    if (parts.length <= 1) { out[key] = val; continue; }
+    let node = out;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (typeof node[parts[i]] !== 'object' || node[parts[i]] === null || Array.isArray(node[parts[i]]))
+        node[parts[i]] = {};
+      node = node[parts[i]];
+    }
+    node[parts[parts.length - 1]] = val;
+  }
+  return out;
+}
 
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
@@ -921,14 +969,13 @@ function deleteSubtree(messages, nodeId) {
 // are untouched) and roll the memory store back to it. The cutoff is
 // position-based: entries stamped with `atLen` (active-path message count at
 // creation) survive iff atLen <= the target's path length, so rollback is
-// immune to regenerate (a new swipe gets a fresh createdAt) and to legacy
-// swipes without createdAt. Entries lacking atLen fall back to the legacy
-// createdAt cutoff (target node's active-swipe createdAt). Tool-written lore
-// (createdAt/atLen-tagged, v2.0b) and loreQueue proposals (v2.0d) roll back
-// with the same rule; hand-authored pieces (no createdAt) always survive.
+// immune to regenerate (a new swipe gets a fresh createdAt). Entries lacking
+// atLen fall back to the createdAt cutoff (target node's active-swipe
+// createdAt). Tool-written lore (createdAt/atLen-tagged) and loreQueue
+// proposals roll back with the same rule; hand-authored pieces (no createdAt)
+// always survive.
 // Deliberately rewind-EXEMPT: chat.vars and chat.authorsNote — they are world
-// state (set_var / note tool effects), not narrative state, so rewinding the
-// story does not un-write them.
+// state, not narrative state, so rewinding the story does not un-write them.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
@@ -1069,12 +1116,12 @@ function resolveCharacters(scenario, chat, charactersById) {
   return out;
 }
 
-// Per-chat scenario overlay (v2.0a): chat.lorePieces merge over the
+// Per-chat scenario overlay: chat.lorePieces merge over the
 // scenario's by id — the chat wins, including enabled:false to switch a
 // scenario piece off for one chat only; chat-only pieces append after the
-// scenario's. This is where model-generated characters/lore land (v2.0b+)
+// scenario's. This is where model-generated characters/lore land
 // and the "edit the scenario of this chat" surface. Branches inherit a copy
-// via branchChat's deepClone. Linked global characters (v2.1) slot in after
+// via branchChat's deepClone. Linked global characters slot in after
 // the scenario pieces — scenario wins on id collision, chat wins overall.
 function mergedLorePieces(scenario, chat, charactersById = null) {
   const base = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
@@ -1139,8 +1186,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     tailParts.push(`${personaName} is ${sub(persona.description).trim()}`);
   const customInstr = sub(chat?.customInstructions ?? '').trim();
   if (customInstr) tailParts.push(customInstr);
-  // Author's note: per-chat sticky steering, appended to by the note tool
-  // action (v2.0d), editable in chat settings.
+  // Author's note: per-chat sticky steering, editable in chat settings.
   const authorsNote = sub(chat?.authorsNote ?? '').trim();
   if (authorsNote) tailParts.push(`Author's note: ${authorsNote}`);
   // Length directive: user-editable in settings; falls back to the preset's
@@ -1287,15 +1333,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   return { messages, manifest };
 }
 
-// ---- tool calls (v2.0b) ---------------------------------------------------
+// ---- tool calls -------------------------------------------------------------
 // Prompt-based protocol: the platform prompt teaches the model to emit
 //   ```tool
 //   {"name": "…", "args": {…}}
 //   ```
 // blocks mid-reply. Works on any OpenAI-compatible endpoint — no tools param,
 // no extra round-trip, middleware-transparent. Blocks are stripped from
-// display text and executed app-side against the per-chat lore overlay
-// (v2.0a). An unterminated fence is never a call (partial stream or model
+// display text and executed app-side against the per-chat lore overlay.
+// An unterminated fence is never a call (partial stream or model
 // rambling) — it's hidden from display but executes nothing.
 const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
 const TOOL_NAME_MAX = 60;
@@ -1403,8 +1449,6 @@ function stripToolBlocks(text) {
 // pruning (pruneToolPieces). Updates keep the original piece's provenance.
 // opts.queueLore: add_lore calls for NEW titles go to the review queue
 // (emergent-lore 'queue' mode) instead of straight into lorePieces.
-// opts.customTools: user-defined tools (Settings) — action aliases for the
-// built-ins plus 'note' (author's note) and 'set_var' (story variable).
 // allPieces (optional): the full merged piece list (scenario + global
 // characters + chat overlay) — used ONLY for register_character dedupe, so a
 // name that exists outside the chat overlay is shadowed via the overlay
@@ -1432,7 +1476,7 @@ function pruneToolPieces(chat, nodeId) {
   return { ...chat, lorePieces: pieces.filter(p => p?.createdBy !== nodeId) };
 }
 
-// ---- emergent lore review queue (v2.0d) ------------------------------------
+// ---- emergent lore review queue ---------------------------------------------
 // Proposals (add_lore tool calls under a 'queue'-mode scenario, or the
 // extraction pipeline) wait in chat.loreQueue for user review. Accept moves a
 // proposal into lorePieces as USER-OWNED — provenance stripped, so prune and
@@ -1461,7 +1505,7 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
-function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, customTools = [], allPieces = null, atLen = null } = {}) {
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
   const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
@@ -1514,26 +1558,6 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
       `added lore "${title}"`);
   }
-  // User-defined custom tools (Settings → custom tools). Built-in names are
-  // reserved — a custom def can never shadow register_character / add_lore.
-  const def = customTools.find(t => t?.name?.trim() === call.name);
-  if (def) {
-    if (def.action === 'register_character' || def.action === 'add_lore')
-      return applyToolCall(chat, { name: def.action, args: call.args }, { nodeId, now, queueLore, customTools, allPieces, atLen });
-    if (def.action === 'note') {
-      const text = String(args.text ?? '').trim().slice(0, TOOL_TEXT_MAX);
-      if (!text) return fail(`${def.name}: text required`);
-      const authorsNote = [String(chat?.authorsNote ?? '').trim(), text].filter(Boolean).join('\n');
-      return { ok: true, note: 'author\'s note updated', chat: { ...chat, authorsNote } };
-    }
-    if (def.action === 'set_var') {
-      const vname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
-      if (!vname) return fail(`${def.name}: name required`);
-      const value = String(args.value ?? '').slice(0, TOOL_TEXT_MAX);
-      return { ok: true, note: `set {{var:${vname}}}`, chat: { ...chat, vars: { ...(chat?.vars ?? {}), [vname]: value } } };
-    }
-    return fail(`tool "${def.name}" has unknown action "${def.action}"`);
-  }
   return fail(`unknown tool "${call.name}"`);
 }
 
@@ -1552,7 +1576,7 @@ Available tools:
 - add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
 Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
 
-// ---- multi-speaker segments (v2.0c) ----------------------------------------
+// ---- multi-speaker segments -------------------------------------------------
 // One turn stays ONE swipe in the tree; a reply containing several
 // `Name:`-prefixed parts is split for DISPLAY into per-speaker bubbles.
 // Split points are line starts like `Name:` / `**Name:**` / `*Name*:` where
@@ -1878,9 +1902,31 @@ async function fetchAPI(endpoint, url, opts = {}) {
 
 async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   const res = await fetchAPI(endpoint, modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint, serverToken) }, signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const json = await res.json(); msg = json?.error?.message ?? json?.message ?? msg; } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
   const json = await res.json();
   return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
+}
+
+// Human-readable API failure for banners and the settings test button — a
+// bare "401" tells the user nothing; name the likely cause and where to fix it.
+function describeApiError(e) {
+  const status = e?.status;
+  const msg = String(e?.message ?? e);
+  const detail = msg && !/^HTTP \d+$/.test(msg) ? ` — ${msg}` : '';
+  if (status === 401) return `401 Unauthorized${detail}. The API key is missing or was rejected — check Settings → Connection.`;
+  if (status === 403) return `403 Forbidden${detail}. The key lacks access, or the server refused the request.`;
+  if (status === 404) return `404 Not Found${detail}. The endpoint URL looks wrong — expected an OpenAI-compatible server (…/v1).`;
+  if (status === 429) return `429 Too Many Requests${detail}. Rate-limited by the backend — wait a moment and retry.`;
+  if (status != null) return `HTTP ${status}${detail}`;
+  if (/failed to fetch|networkerror|load failed/i.test(msg))
+    return 'Could not reach the endpoint — is it running, and is the URL right? (A cross-origin server may need "Route API requests through this server".)';
+  return msg;
 }
 
 // Minimal SSE parser: line-based, only data: fields, JSON payloads.
@@ -1919,6 +1965,8 @@ async function* parseEventStream(body) {
 // logprob entries off by one position — observed in the wild):
 //   { content }  — display text; delta.content is the sole authority
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
+//   { think }    — reasoning text (delta.reasoning_content / delta.reasoning,
+//                  vLLM/DeepSeek/OpenRouter convention); displayed, never prompted
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null }) {
@@ -1927,7 +1975,9 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
     body: JSON.stringify({
-      model, messages, stream: true, max_tokens: maxTokens, ...samplers,
+      // expandSamplerParams: dotted custom-sampler keys (e.g.
+      // chat_template_kwargs.enable_thinking) become nested objects.
+      model, messages, stream: true, max_tokens: maxTokens, ...expandSamplerParams(samplers),
       ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
@@ -1951,6 +2001,11 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (!choice) continue;
     // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
+    // Reasoning channel (vLLM/DeepSeek/OpenRouter): own field, never part of
+    // content. Yielded separately so the caller can show it collapsibly.
+    const thinkText = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
+      ?? choice?.message?.reasoning_content;
+    if (thinkText) yield { think: thinkText };
     // Terminal chunk: report the finish reason so the caller can tell a clean
     // finish from a dropped connection (stream that just ends). A finish
     // chunk with empty/missing delta carries the sampled EOS in logprobs —
@@ -2139,7 +2194,9 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
       const json = await res.json();
       msg = json?.error?.message ?? json?.message ?? msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const json = await res.json();
   if (!Array.isArray(json?.data)) throw new Error('Malformed embeddings response');
@@ -2187,7 +2244,9 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
       const json = await res.json();
       msg = json?.error?.message ?? json?.message ?? msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const json = await res.json();
   if (json?.error?.message) throw new Error(json.error.message);
@@ -2267,6 +2326,52 @@ function pickJSONFile() {
     input.click();
   });
 }
+
+// Sampler knob registry — the sampling params the app can send on chat
+// completions (OpenAI-compatible + common vLLM/llama.cpp extensions). A param
+// is sent only while present in settings.samplers (global) or
+// chat.settings.samplers (per-chat override); `def` seeds a freshly-enabled
+// knob. Settings → Generation toggles the global set; settings.samplerFields
+// picks which knobs appear as per-chat overrides in the panel's Samplers tab.
+// Users can register additional knobs (settings.customSamplers) for backend-
+// specific params — a dotted key like `chat_template_kwargs.enable_thinking`
+// expands into a nested request object (expandSamplerParams).
+const SAMPLER_FIELDS = [
+  { key: 'temperature',        label: 'Temperature',        type: 'number', min: 0,  max: 2,          step: 0.01, def: 0.8  },
+  { key: 'top_p',              label: 'top_p',              type: 'number', min: 0,  max: 1,          step: 0.01, def: 0.95 },
+  { key: 'top_k',              label: 'top_k',              type: 'number', min: -1, max: 500,        step: 1,    def: 40   },
+  { key: 'min_p',              label: 'min_p',              type: 'number', min: 0,  max: 1,          step: 0.01, def: 0.05 },
+  { key: 'repetition_penalty', label: 'Repetition penalty', type: 'number', min: 0,  max: 2,          step: 0.01, def: 1.1  },
+  { key: 'presence_penalty',   label: 'presence_penalty',   type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
+  { key: 'frequency_penalty',  label: 'frequency_penalty',  type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
+  { key: 'seed',               label: 'seed (−1 = random)', type: 'number', min: -1, max: 2147483647, step: 1,    def: -1   },
+];
+const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f]));
+
+// User-registered samplers (Settings → Generation), sanitized to field shape.
+// Built-in keys are reserved — a custom def can never shadow them.
+//   number  — behaves like a built-in (send-checkbox + numeric input)
+//   boolean — send-checkbox + true/false select; while enabled the chosen
+//             bool IS sent (e.g. chat_template_kwargs.enable_thinking: false)
+const customSamplerFields = (st) => (st?.customSamplers ?? [])
+  .filter(d => d?.key?.trim() && !SAMPLER_FIELD_MAP[d.key.trim()])
+  .map(d => ({
+    key: d.key.trim(),
+    label: d.name?.trim() || d.key.trim(),
+    type: d.type === 'boolean' ? 'boolean' : 'number',
+    min: Number.isFinite(d.min) ? d.min : 0,
+    max: Number.isFinite(d.max) ? d.max : 1,
+    step: Number.isFinite(d.step) && d.step > 0 ? d.step : 0.01,
+    def: d.type === 'boolean' ? d.def !== false : (Number.isFinite(d.def) ? d.def : 0),
+    custom: true,
+  }));
+const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)];
+
+// Samplers minus the user-disabled keys — the set actually sent. Values stay
+// in settings.samplers while disabled, so re-enabling restores the tuned
+// number instead of resetting it.
+const enabledSamplers = (st) => Object.fromEntries(
+  Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {
@@ -2434,9 +2539,9 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
             <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
               <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
           </div>
-          <label class="check" title="Embed this piece + the recent conversation each generation; activates on similarity even without keyword overlap">
+          <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
             <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
-            Smart activation (semantic) — requires an embeddings model in Settings
+            Semantic activation — uses the embedding model (aux); no keyword needed
           </label>
           <div class="grid3">
             <label class="field"><span>Weight</span>
@@ -2608,10 +2713,17 @@ const DEFAULT_SETTINGS = {
   // Follows the preset's default text until the user edits it.
   lengthDirective: LENGTH_PRESETS.medium.directive,
   samplers: { temperature: 0.8, top_p: 0.95, top_k: 40, min_p: 0.05, repetition_penalty: 1.1 },
+  // Disabled sampler keys — values stay in `samplers`, they're just not sent.
+  disabledSamplers: [],
+  // Which sampler knobs appear as per-chat overrides in the panel's Samplers tab.
+  samplerFields: ['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'],
+  // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
+  customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
   tokenProbs: true, // request logprobs + top_logprobs on generations
+  showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: true, // response-suggestion chips after generations
+  suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
@@ -2639,7 +2751,6 @@ const DEFAULT_SETTINGS = {
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
-  customTools: [], // user-defined tools: [{ id, name, argsHint, description, action: 'note'|'set_var'|'register_character'|'add_lore' }]
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
@@ -2658,6 +2769,51 @@ const SETTINGS_TABS = [
   ['features', 'Features'],
   ['prompts', 'Prompts'],
 ];
+
+// One custom-sampler definition card — collapsed by default (they stack
+// fast); the header shows the effective label + type, click to expand and
+// edit. Freshly added cards (no key yet) start open.
+function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
+  const [open, setOpen] = useState(!(d.key ?? '').trim());
+  const setDef = (patch) => onChange({ ...d, ...patch });
+  return html`
+    <div class="lore-card">
+      <div class="lc-head" onClick=${() => setOpen(!open)}>
+        <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
+        <span class="pill">${d.type === 'boolean' ? 'bool' : 'num'}</span>
+        <span>${open ? '▾' : '▸'}</span>
+      </div>
+      ${open && html`
+        <div class="lc-body">
+          <div class="grid2">
+            <label class="field"><span>Label (blank = the key)</span>
+              <input type="text" value=${d.name ?? ''} placeholder=${d.key || 'my_param'}
+                onInput=${(e) => setDef({ name: e.target.value })} /></label>
+            <label class="field"><span>Request key (dots nest)${keyClash ? ' — reserved built-in!' : ''}</span>
+              <input type="text" value=${d.key ?? ''} placeholder="chat_template_kwargs.enable_thinking"
+                onInput=${(e) => setDef({ key: e.target.value.replace(/\s+/g, '') })} /></label>
+          </div>
+          <div class="grid3">
+            <label class="field"><span>Type</span>
+              <select value=${d.type === 'boolean' ? 'boolean' : 'number'}
+                onChange=${(e) => setDef({ type: e.target.value, def: e.target.value === 'boolean' ? true : 0 })}>
+                <option value="number">number</option>
+                <option value="boolean">boolean (true/false)</option>
+              </select></label>
+            ${d.type === 'boolean'
+              ? html`<label class="field"><span>Default when enabled</span>
+                  <select value=${String(d.def !== false)} onChange=${(e) => setDef({ def: e.target.value === 'true' })}>
+                    <option value="true">true</option><option value="false">false</option>
+                  </select></label>`
+              : [['def', 'Default'], ['min', 'Min'], ['max', 'Max'], ['step', 'Step']].map(([k, lbl]) => html`
+                  <label class="field" key=${k}><span>${lbl}</span>
+                    <${NumInput} value=${d[k] ?? (k === 'step' ? 0.01 : 0)} step=${0.01} fallback=${k === 'step' ? 0.01 : 0}
+                      onCommit=${(n) => setDef({ [k]: n })} /></label>`)}
+          </div>
+          <button class="btn small danger" onClick=${onRemove}>Remove sampler</button>
+        </div>`}
+    </div>`;
+}
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload, initialDraft }) {
@@ -2678,6 +2834,15 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const [migNote, setMigNote] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
   const setSampler = (k, v) => { setDirty(true); setDraft(d => ({ ...d, samplers: { ...d.samplers, [k]: v } })); };
+  // Disable ≠ delete: the value stays in `samplers`, the key joins
+  // `disabledSamplers` (not sent). Re-enabling restores the tuned value.
+  const toggleSampler = (f, on) => { setDirty(true); setDraft(d => {
+    const disabledSamplers = (d.disabledSamplers ?? []).filter(k => k !== f.key);
+    if (!on) disabledSamplers.push(f.key);
+    const samplers = { ...(d.samplers ?? {}) };
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def; // never set before — seed the default
+    return { ...d, samplers, disabledSamplers };
+  }); };
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
@@ -2699,7 +2864,22 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const fetchModels = async () => {
     setModelsError(null);
     try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken })); }
-    catch (e) { setModels(null); setModelsError(String(e.message ?? e)); }
+    catch (e) { setModels(null); setModelsError(describeApiError(e)); }
+  };
+
+  // Manual config check (Connection tab): hits /models with the draft
+  // endpoint + key and reports reachability, auth, and whether the configured
+  // chat model is actually exposed.
+  const [testState, setTestState] = useState(null); // null | 'busy' | { ok, msg }
+  const testConnection = async () => {
+    setTestState('busy');
+    try {
+      const list = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
+      const note = draft.model
+        ? (list.includes(draft.model) ? `"${draft.model}" is available.` : `warning: "${draft.model}" is NOT among them.`)
+        : 'no chat model configured yet.';
+      setTestState({ ok: true, msg: `Connected — ${list.length} model(s) exposed; ${note}` });
+    } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
   // Shared prompt-textarea block for the Prompts tab.
@@ -2763,6 +2943,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
             Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
           </label>`}
+        <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
+          <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
+            ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
+          ${testState && testState !== 'busy' && html`
+            <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
+        </div>
         <div class="field"><span>Storage</span>
           <div class="hint">${storageKind === 'server'
             ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
@@ -2801,7 +2987,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
           </label>
           ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
-          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a smart lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
+          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a semantic ("smart") lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
         </div>`}
 
       ${tab === 'generation' && html`
@@ -2827,16 +3013,62 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
           <textarea rows=${2} value=${draft.lengthDirective ?? ''}
             onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
-        <div class="grid3">
-          ${['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'].map(k => html`
-            <label class="field" key=${k}><span>${{ temperature: 'Temperature', repetition_penalty: 'Repetition penalty' }[k] ?? k}</span>
-              <${NumInput} value=${draft.samplers[k]} step=${k === 'top_k' ? 1 : 0.05} fallback=${DEFAULT_SETTINGS.samplers[k]}
-                onCommit=${(n) => setSampler(k, n)} /></label>`)}
+        <div class="field"><span>Samplers</span>
+          <div class="sampler-grid">
+            ${allSamplerFields(draft).map(f => {
+              const active = draft.samplers?.[f.key] != null && !(draft.disabledSamplers ?? []).includes(f.key);
+              return html`
+                <div class="sampler-row" key=${f.key}>
+                  <label class="check">
+                    <input type="checkbox" checked=${active} onChange=${(e) => toggleSampler(f, e.target.checked)} />
+                    ${f.label}${f.custom ? ' ✦' : ''}</label>
+                  <span class="sval">
+                    ${active
+                      ? (f.type === 'boolean'
+                        ? html`<select value=${String(draft.samplers[f.key] !== false)}
+                            onChange=${(e) => setSampler(f.key, e.target.value === 'true')}>
+                            <option value="true">true</option><option value="false">false</option></select>`
+                        : html`<${NumInput} value=${draft.samplers[f.key]} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+                            onCommit=${(n) => setSampler(f.key, n)} />`)
+                      : html`<span class="hint">${draft.samplers?.[f.key] != null ? String(draft.samplers[f.key]) : '—'}</span>`}
+                  </span>
+                </div>`;
+            })}
+          </div>
+          <div class="hint">Unchecked params are not sent.</div>
         </div>
         <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
           <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
             placeholder="e.g. your EOS marker, if your model emits one"
             onChange=${(stopStrings) => set({ stopStrings })} /></label>
+        <div class="field"><span>Per-chat overrides — the knobs offered in the chat panel's Samplers tab</span>
+          <div class="sampler-grid">
+            ${allSamplerFields(draft).map(f => html`
+              <label class="check" key=${f.key} style=${{ margin: 0 }}>
+                <input type="checkbox" checked=${(draft.samplerFields ?? []).includes(f.key)}
+                  onChange=${(e) => set({ samplerFields: e.target.checked
+                    ? [...(draft.samplerFields ?? []), f.key]
+                    : (draft.samplerFields ?? []).filter(k => k !== f.key) })} />
+                ${f.label}${f.custom ? ' ✦' : ''}</label>`)}
+          </div>
+          <div class="hint">A per-chat override replaces the global value for that chat only; knobs unchecked here aren't overridable per chat. Context length and max tokens are always overridable.</div>
+        </div>
+        <div class="field"><span>Custom samplers (${(draft.customSamplers ?? []).length})
+          <button class="btn small" style=${{ marginLeft: '8px' }}
+            onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button></span>
+          <div class="hint">Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>. Built-in keys are reserved. Registered samplers join the lists above.</div>
+          ${(draft.customSamplers ?? []).map(d => html`
+            <${CustomSamplerCard} key=${d.id} def=${d}
+              keyClash=${!!SAMPLER_FIELD_MAP[(d.key ?? '').trim()]}
+              onChange=${(next) => set({ customSamplers: draft.customSamplers.map(q => q.id === d.id ? next : q) })}
+              onRemove=${() => set({
+                customSamplers: draft.customSamplers.filter(q => q.id !== d.id),
+                // Drop the def's key everywhere too — unregistered params are never sent.
+                samplers: Object.fromEntries(Object.entries(draft.samplers ?? {}).filter(([k]) => k !== (d.key ?? '').trim())),
+                disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
+                samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
+              })} />`)}
+        </div>
         <div class="grid3">
           <label class="field"><span>Top logprobs — alternatives stored per token</span>
             <${NumInput} value=${draft.topLogprobs ?? 10} min=${1} max=${20} fallback=${10}
@@ -2877,7 +3109,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Token probabilities (logprobs + alternatives per token; count in Generation tab)
           </label>
           <label class="check">
-            <input type="checkbox" checked=${draft.suggestions !== false} onChange=${(e) => set({ suggestions: e.target.checked })} />
+            <input type="checkbox" checked=${draft.showThinking !== false} onChange=${(e) => set({ showThinking: e.target.checked })} />
+            Thinking output — show the model's reasoning in a collapsible box on replies (when the backend sends it)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.suggestions} onChange=${(e) => set({ suggestions: e.target.checked })} />
             Response suggestions ("what you might do next" chips after each AI reply)
           </label>
           <label class="check">
@@ -2889,7 +3125,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
           </label>
         </div>
-        ${draft.suggestions !== false && html`
+        ${draft.suggestions && html`
           <div class="field"><span>Response suggestions</span>
             <div class="grid2">
               <label class="field"><span>Number of suggestions (1–5)</span>
@@ -2948,36 +3184,6 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <div class="hint" style=${{ margin: '4px 0' }}>Protocol instructions are editable in the Prompts tab.</div>
             <div class="grid3">
               ${numField('toolCallCap', 'Max tool calls per generation', TOOL_CALL_CAP, { min: 1, max: 25 })}
-            </div>
-            <div class="field"><span>Custom tools (${(draft.customTools ?? []).length})
-              <button class="btn small" style=${{ marginLeft: '8px' }}
-                onClick=${() => set({ customTools: [...(draft.customTools ?? []), { id: uid(), name: '', argsHint: '', description: '', action: 'note' }] })}>+ add tool</button></span>
-              <div class="hint">Your own tools, listed to the model after the built-ins. Name + description are what the model sees; the action is what the app does when it's called. Built-in names (register_character, add_lore) are reserved.</div>
-              ${(draft.customTools ?? []).map((t, i) => {
-                const setTool = (patch) => set({ customTools: draft.customTools.map(q => q.id === t.id ? { ...q, ...patch } : q) });
-                return html`
-                  <div class="lore-card" key=${t.id} style=${{ padding: '8px' }}>
-                    <div class="grid2">
-                      <label class="field"><span>Tool name (no spaces)</span>
-                        <input type="text" value=${t.name} placeholder="roll_dice"
-                          onInput=${(e) => setTool({ name: e.target.value.replace(/\s+/g, '_') })} /></label>
-                      <label class="field"><span>Action</span>
-                        <select value=${t.action} onChange=${(e) => setTool({ action: e.target.value })}>
-                          <option value="note">author's note (append steering text)</option>
-                          <option value="set_var">set story variable ({{var:name}})</option>
-                          <option value="register_character">register character</option>
-                          <option value="add_lore">add lore piece</option>
-                        </select></label>
-                    </div>
-                    <label class="field"><span>Args hint — shown to the model, e.g. "text" or "name, value"</span>
-                      <input type="text" value=${t.argsHint ?? ''} placeholder=${t.action === 'set_var' ? 'name, value' : 'text'}
-                        onInput=${(e) => setTool({ argsHint: e.target.value })} /></label>
-                    <label class="field"><span>Description — when/why the model should call it</span>
-                      <textarea rows=${2} value=${t.description ?? ''} onInput=${(e) => setTool({ description: e.target.value })} /></label>
-                    <button class="btn small danger"
-                      onClick=${() => set({ customTools: draft.customTools.filter(q => q.id !== t.id) })}>Remove tool</button>
-                  </div>`;
-              })}
             </div>`}
         </div>`}
 
@@ -3318,7 +3524,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       <label class="field"><span>Custom instructions — appended to the system layer for this chat only</span>
         <textarea rows=${4} value=${chat.customInstructions ?? ''}
           onInput=${(e) => update({ ...chat, customInstructions: e.target.value })} /></label>
-      <label class="field"><span>Author's note — sticky steering injected after custom instructions; "note"-action tools append here</span>
+      <label class="field"><span>Author's note — sticky steering injected after custom instructions</span>
         <textarea rows=${2} value=${chat.authorsNote ?? ''}
           onInput=${(e) => update({ ...chat, authorsNote: e.target.value })} /></label>
       ${Object.keys(chat.vars ?? {}).length > 0 && html`
@@ -3343,7 +3549,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
           <button class="btn small" style=${{ marginLeft: '8px' }}
             onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
         </span>
-        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and smart activation for this chat only.</div>
+        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only.</div>
         ${pieces.map(p => html`
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${allPieces}
             onChange=${(next) => setPieces(pieces.map(q => q.id === p.id ? next : q))}
@@ -3353,6 +3559,122 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
+    </div>`;
+}
+
+// ============================================================================
+// COMPONENTS: CHAT SAMPLERS TAB — per-chat sampler + generation overrides,
+// with the global defaults editable in place (the toggle swaps the pane).
+// A knob is sent only while checked: per-chat rows override the global value
+// for this chat's generations; global rows mirror Settings → Generation.
+// ============================================================================
+// Generation-length knobs shown in BOTH Samplers pane views (per-chat rows
+// override, global rows edit directly) — keeps the two views in the same order.
+const GEN_LENGTH_FIELDS = [
+  { key: 'contextLength', label: 'Context length (tokens)', type: 'number', min: 256, step: 512, def: DEFAULT_SETTINGS.contextLength },
+  { key: 'maxTokens', label: 'Response max tokens', type: 'number', min: 1, step: 50, def: DEFAULT_SETTINGS.maxTokens },
+];
+
+function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
+  const [globalEdit, setGlobalEdit] = useState(false);
+  if (!chat) return html`<div class="hint">Select a chat first.</div>`;
+  const global = settings?.samplers ?? {};
+  const overrides = chat.settings?.samplers ?? {};
+  const fields = allSamplerFields(settings);
+  // touch:false — sampler tweaks are metadata, not narrative edits; don't
+  // bump updatedAt and re-sort the sidebar.
+  const putChatSettings = (patch) =>
+    onUpdateChat({ ...chat, settings: { ...(chat.settings ?? {}), ...patch } }, { touch: false });
+  const setGlobal = (k, v) => onUpdateSettings({ samplers: { ...global, [k]: v } });
+  // Disable ≠ delete: value stays in settings.samplers, key joins
+  // disabledSamplers; re-enabling restores it.
+  const toggleGlobal = (f, on) => {
+    const disabledSamplers = (settings?.disabledSamplers ?? []).filter(k => k !== f.key);
+    if (!on) disabledSamplers.push(f.key);
+    const samplers = { ...global };
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def;
+    onUpdateSettings({ samplers, disabledSamplers });
+  };
+  // What the global side would actually send (disabled keys excluded) — the
+  // per-chat rows display these as the inherited values.
+  const globalSent = enabledSamplers(settings);
+  // Value editor for a field: true/false select for booleans, NumInput else.
+  const valueCtl = (f, value, onChange) => f.type === 'boolean'
+    ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
+        <option value="true">true</option><option value="false">false</option></select>`
+    : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+        onCommit=${onChange} />`;
+  return html`
+    <div>
+      <div class="ptabs" style=${{ margin: '-4px 0 8px', padding: 0 }}>
+        <button class=${globalEdit ? '' : 'active'} onClick=${() => setGlobalEdit(false)}>This chat</button>
+        <button class=${globalEdit ? 'active' : ''} onClick=${() => setGlobalEdit(true)}>Global defaults</button>
+      </div>
+      ${globalEdit ? html`
+        ${GEN_LENGTH_FIELDS.map(f => html`
+          <div class="sampler-row" key=${f.key}>
+            <label class="check">${f.label}</label>
+            <span class="sval">
+              ${valueCtl(f, settings?.[f.key] ?? f.def, (v) => onUpdateSettings({ [f.key]: v }))}
+            </span>
+          </div>`)}
+        ${fields.map(f => {
+          const active = global[f.key] != null && !(settings?.disabledSamplers ?? []).includes(f.key);
+          return html`
+            <div class="sampler-row" key=${f.key}>
+              <label class="check">
+                <input type="checkbox" checked=${active} onChange=${(e) => toggleGlobal(f, e.target.checked)} />
+                ${f.label}${f.custom ? ' ✦' : ''}</label>
+              <span class="sval">
+                ${active
+                  ? valueCtl(f, global[f.key], (v) => setGlobal(f.key, v))
+                  : html`<span class="hint">${global[f.key] != null ? String(global[f.key]) : '—'}</span>`}
+              </span>
+            </div>`;
+        })}
+        <div class="hint" style=${{ marginTop: '8px' }}>Editing the global samplers (Settings → Generation). Unchecked params aren't sent — the backend default applies; values are kept.</div>` : html`
+        ${GEN_LENGTH_FIELDS.map(f => {
+          const on = chat.settings?.[f.key] != null;
+          const eff = on ? chat.settings[f.key] : settings?.[f.key];
+          return html`
+            <div class="sampler-row" key=${f.key}>
+              <label class="check">
+                <input type="checkbox" checked=${on}
+                  onChange=${(e) => putChatSettings({ [f.key]: e.target.checked ? (eff ?? f.def) : undefined })} />
+                ${f.label}</label>
+              <span class="sval">
+                ${on
+                  ? valueCtl(f, chat.settings[f.key], (v) => putChatSettings({ [f.key]: v }))
+                  : html`<span class="hint">global: ${eff ?? f.def}</span>`}
+              </span>
+            </div>`;
+        })}
+        ${(() => {
+          const offered = fields.filter(f => (settings?.samplerFields ?? []).includes(f.key));
+          if (!offered.length) return html`<div class="hint">No per-chat sampler knobs enabled — pick them in Settings → Generation.</div>`;
+          return offered.map(f => {
+            const on = overrides[f.key] != null;
+            const eff = on ? overrides[f.key] : globalSent[f.key];
+            return html`
+              <div class="sampler-row" key=${f.key}>
+                <label class="check">
+                  <input type="checkbox" checked=${on}
+                    onChange=${(e) => {
+                      const samplers = { ...overrides };
+                      if (e.target.checked) samplers[f.key] = global[f.key] ?? f.def;
+                      else delete samplers[f.key];
+                      putChatSettings({ samplers });
+                    }} />
+                  ${f.label}${f.custom ? ' ✦' : ''}</label>
+                <span class="sval">
+                  ${on
+                    ? valueCtl(f, overrides[f.key], (v) => putChatSettings({ samplers: { ...overrides, [f.key]: v } }))
+                    : html`<span class="hint">${eff != null ? `global: ${eff}` : 'backend default'}</span>`}
+                </span>
+              </div>`;
+          });
+        })()}
+        <div class="hint" style=${{ marginTop: '8px' }}>Checked knobs override the global value for this chat only. Sampler knobs are picked in Settings → Generation; context length and max tokens are always available.</div>`}
     </div>`;
 }
 
@@ -3391,7 +3713,20 @@ function ProbsView({ tokens, onPick }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+// Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
+// Collapsed by default, streaming or not — the header still shows live that
+// thinking is in progress ("Thinking…").
+function ThinkBox({ text, streaming }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class="think">
+      <button class="think-head" onClick=${() => setOpen(!open)}>
+        <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
+      ${open && html`<div class="think-body">${text}</div>`}
+    </div>`;
+}
+
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -3453,6 +3788,10 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const showNav = m > 1 || isLeafAssistant;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
   const atUsed = usedIdx === node.activeSwipe;
+  // Reasoning channel (swipe.think): collapsible box atop the bubble.
+  const thinkBox = !isUser && !editing && showThinking !== false && swipe.think
+    ? html`<${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} />`
+    : null;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
   // left = next swipe / ▶⁺ on the leaf, right = previous swipe.
@@ -3486,7 +3825,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
-  // Multi-speaker split (v2.0c): one swipe, several `Name:` parts → one
+  // Multi-speaker split: one swipe, several `Name:` parts → one
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
   const multi = (segments?.length ?? 0) > 1;
@@ -3574,6 +3913,7 @@ ${showNav && html`
         <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
+          ${si === 0 && thinkBox}
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
             style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
@@ -3581,6 +3921,7 @@ ${showNav && html`
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
+        ${thinkBox}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
@@ -3724,7 +4065,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId }) {
 }
 
 function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
@@ -3842,7 +4183,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
-            dateFormat=${dateFormat}
+            dateFormat=${dateFormat} showThinking=${showThinking}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
@@ -4092,20 +4433,23 @@ function ContextMenu({ x, y, items, onClose }) {
 
 // ============================================================================
 // COMPONENTS: CHAT PANEL — the former right pane as a tabbed modal sheet
-// (Inspector / Memory / Chat). Centered dialog on desktop, full-screen sheet
+// (Inspector / Samplers / Memory / Chat). Centered dialog on desktop, full-screen sheet
 // on phones (CSS .modal.sheet).
 // ============================================================================
-const PANEL_TABS = { inspector: 'Inspector', memory: 'Memory', chat: 'Chat' };
+const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memory', chat: 'Chat' };
 
-// Shared tab body for ChatPanelModal and RightDrawer — same three branches,
+// Shared tab body for ChatPanelModal and RightDrawer — same tab branches,
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
-                    onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap }) {
+                    onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
+                    settings, onUpdateSettings }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
       ${chat && tab === 'inspector' && html`
         <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
+      ${chat && tab === 'samplers' && html`
+        <${ChatSamplers} chat=${chat} settings=${settings} onUpdateChat=${onUpdateChat} onUpdateSettings=${onUpdateSettings} />`}
       ${chat && tab === 'memory' && html`
         <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />`}
       ${chat && tab === 'chat' && html`
@@ -4115,7 +4459,8 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
-                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap }) {
+                         onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
+                         settings, onUpdateSettings }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -4125,7 +4470,8 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
       <${PanelBody} chat=${chat} tab=${tab} manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
-        onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />
+        onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
+        settings=${settings} onUpdateSettings=${onUpdateSettings} />
     <//>`;
 }
 
@@ -4138,7 +4484,8 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
 function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog,
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
-                      width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap }) {
+                      width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
+                      settings, onUpdateSettings }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
@@ -4152,7 +4499,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
       <${PanelBody} chat=${chat} tab=${tab} manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
-        onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />
+        onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
+        settings=${settings} onUpdateSettings=${onUpdateSettings} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -4201,9 +4549,9 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
           <label class="check" title="Always injected while linked">
             <input type="checkbox" checked=${!!editing.pinned}
               onChange=${(e) => edit({ ...editing, pinned: e.target.checked })} /> pinned</label>
-          <label class="check" title="Semantic activation — requires an embeddings model in Settings">
+          <label class="check" title="Semantic activation — the embedding model (Settings → Models) injects this card when similar to the recent conversation; no keyword needed">
             <input type="checkbox" checked=${!!editing.smart}
-              onChange=${(e) => edit({ ...editing, smart: e.target.checked })} /> smart</label>
+              onChange=${(e) => edit({ ...editing, smart: e.target.checked })} /> semantic</label>
           <label class="check">
             <input type="checkbox" checked=${editing.enabled !== false}
               onChange=${(e) => edit({ ...editing, enabled: e.target.checked })} /> enabled</label>
@@ -4244,25 +4592,14 @@ function newChat({ scenario = null, character = null, personaId = null, dateForm
   };
 }
 
-// User-defined tools (Settings → Features): advertised to the model after the
-// built-ins, executed by action kind in applyToolCall. Built-in names are
-// reserved — a custom def can never shadow register_character / add_lore.
-const enabledCustomTools = (st) => (st.customTools ?? []).filter(t => t?.name?.trim()
-  && t.name !== 'register_character' && t.name !== 'add_lore');
-
 // Full system-prompt head: platform prompt + enabled feature prompts (multi-
-// speaker, tool calling + user-defined tools). Shared by runGeneration and
-// the inspector preview so both count exactly what a generation would send.
+// speaker, tool calling). Shared by runGeneration and the inspector preview
+// so both count exactly what a generation would send.
 function buildPlatformPrompt(st) {
-  const defs = enabledCustomTools(st);
-  const customSection = defs.length
-    ? '\nAdditional tools:\n' + defs.map(t =>
-        `- ${t.name.trim()}(${t.argsHint?.trim() || '…'}) — ${t.description?.trim() || 'custom tool'}`).join('\n')
-    : '';
   return [
     st.platformPrompt,
     ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
-    ...(st.toolsEnabled !== false ? [((st.toolsPrompt ?? '').trim() || TOOLS_PROMPT) + customSection] : []),
+    ...(st.toolsEnabled !== false ? [(st.toolsPrompt ?? '').trim() || TOOLS_PROMPT] : []),
   ].filter(s => s?.trim()).join('\n\n');
 }
 
@@ -4349,7 +4686,7 @@ function Main({ storage, storageKind, storageFailed }) {
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
       return out;
     } catch (e) {
-      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: String(e?.message ?? e) }]);
+      setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: describeApiError(e) }]);
       throw e;
     }
   }
@@ -4419,11 +4756,13 @@ function Main({ storage, storageKind, storageFailed }) {
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
-  // Right drawer: ui.drawer is the open tab ('inspector' | 'memory' | 'chat') or null.
+  // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
   const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
   const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
   const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
   if (ui.drawer) lastDrawerTabRef.current = ui.drawer;
+  // Shallow settings patch (e.g. samplers from the panel's Samplers tab).
+  const updateSettings = (patch) => setSettings(prev => ({ ...(prev ?? {}), ...patch }));
   // touch:false for pure metadata edits (rename, options) — the sidebar sorts
   // by updatedAt, and a rename shouldn't teleport the chat to the top.
   const saveChat = useCallback((c, { touch = true } = {}) =>
@@ -4652,7 +4991,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
-  // ---- emergent lore extraction (v2.0d) ----
+  // ---- emergent lore extraction ----
   // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
   // the recent conversation. 'queue' mode (default): proposals wait for review
   // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
@@ -4724,9 +5063,14 @@ function Main({ storage, storageKind, storageFailed }) {
 
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
-    const { scenarios: sc, personas: pe, characters: gchars, settings: st } = ref.current;
-    const model = chatObj.settings?.model || st.model; // per-chat override wins
-    if (!st.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
+    const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
+    if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
+    // Per-chat generation overrides (panel's Samplers tab): context length and
+    // max tokens shadow the globals for this chat's generations.
+    const st = { ...baseSt,
+      contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
+      maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
     // Claim the generation slot immediately — the async prep below (semantic
     // embeddings, exact token count) can take a long time on a slow backend,
     // and the UI (waiting dots, Stop button, input guards) keys off this.
@@ -4822,6 +5166,14 @@ function Main({ storage, storageKind, storageFailed }) {
       const id = e?.ids?.[0];
       if (Number.isInteger(id)) logitBias[String(id)] = Math.max(-100, Math.min(100, e.power));
     }
+    // Effective samplers: per-chat overrides win; only registered params
+    // (built-ins + customSamplers) are ever sent — a removed custom def can't
+    // leak a stale key upstream. Disabled globals keep their values but are
+    // not sent (enabledSamplers); a per-chat override can still force one.
+    const allowedSamplerKeys = new Set(allSamplerFields(st).map(f => f.key));
+    const effSamplers = Object.fromEntries(
+      Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
+        .filter(([k]) => allowedSamplerKeys.has(k)));
     let work = chatObj;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
@@ -4832,6 +5184,10 @@ function Main({ storage, storageKind, storageFailed }) {
       ? (node?.swipes?.[node.activeSwipe]?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
       : [];
     let acc = baseText;
+    // Reasoning channel (delta.reasoning_content) accumulates separately and
+    // lands on the swipe as `think` — displayed collapsibly, never prompted.
+    // Continuations prepend the base swipe's reasoning like its text.
+    let thinkAcc = continuation ? (node?.swipes?.[node.activeSwipe]?.think ?? '') : '';
     const lpTape = [];
     // Tool replies: the RAW accumulated text and its raw→stripped char map
     // (set when tool blocks were stripped) so the lp tape — which covers the
@@ -4849,7 +5205,8 @@ function Main({ storage, storageKind, storageFailed }) {
       // Persisted spans cap alternatives at 5 — the tape can carry up to 20
       // and would balloon storage on every swipe. Display needs only a few.
       const capped = tokens?.map(t => t.top?.length > 5 ? { ...t, top: t.top.slice(0, 5) } : t);
-      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model, ...(capped ? { tokens: capped } : {}) };
+      swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text, modelId: model,
+        ...(thinkAcc ? { think: thinkAcc } : {}), ...(capped ? { tokens: capped } : {}) };
       const messages = { ...work.messages, [nodeId]: { ...n, swipes } };
       const cur = ref.current.chats[work.id];
       if (!cur) { work = { ...work, messages }; return; }
@@ -4905,7 +5262,9 @@ function Main({ storage, storageKind, storageFailed }) {
         try {
           for await (const chunk of openaiChatStream({
             endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
-            samplers: st.samplers, maxTokens: st.maxTokens, signal: abort.signal,
+            // Per-chat sampler overrides (panel's Samplers tab) win over globals.
+            samplers: effSamplers,
+            maxTokens: st.maxTokens, signal: abort.signal,
             tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: stopList,
           })) {
             if (chunk.done) {
@@ -4914,6 +5273,7 @@ function Main({ storage, storageKind, storageFailed }) {
               continue;
             }
             if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
+            if (chunk.think) { thinkAcc += chunk.think; applyText(acc); continue; }
             acc += chunk.content;
             // Streaming view hides tool protocol blocks (complete + trailing
             // unterminated) so the user never sees them mid-generation.
@@ -4935,11 +5295,11 @@ function Main({ storage, storageKind, storageFailed }) {
       }
     } catch (e) {
       if (e.name !== 'AbortError')
-        setError(`Generation failed: ${e.message ?? e}`);
+        setError(`Generation failed: ${describeApiError(e)}`);
     } finally {
       genRef.current = null;
       setGenerating(null);
-      // Tool calls (v2.0b): parse the finished text, strip protocol blocks
+      // Tool calls: parse the finished text, strip protocol blocks
       // from display, execute against the chat lore overlay. Logprobs still
       // attach on tool replies: the lp tape is aligned against the RAW text
       // (which it tiles exactly) and projected through the strip's char map
@@ -4993,7 +5353,6 @@ function Main({ storage, storageKind, storageFailed }) {
             const applied = applyToolCalls(c, parsed.calls, {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
-              customTools: enabledCustomTools(st),
               atLen: getActivePath(c.messages, nodeId).length,
             }, mergedLorePieces(scen, c, gchars));
             toolResults = applied.results;
@@ -5054,7 +5413,7 @@ function Main({ storage, storageKind, storageFailed }) {
         maybeExtractLore(work);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
-        if (!continuation && st.suggestions !== false) {
+        if (!continuation && st.suggestions) {
           const parent = work.messages[node?.parentId];
           const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
           if (!parentIsOOC) fetchSuggestions(work, nodeId);
@@ -5426,13 +5785,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: st, platformPrompt: buildPlatformPrompt(st),
+      chat: c, settings: { ...st, contextLength: c.settings?.contextLength ?? st.contextLength },
+      platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });
     // Surface the keyword-only caveat when smart pieces could have fired.
     if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c, ref.current.characters)
         .some(p => p && p.enabled !== false && !p.pinned && p.smart))
-      man.warnings.push('Preview: semantic activation not run (embeddings) — smart pieces show keyword-trigger results only.');
+      man.warnings.push('Preview: semantic activation not run (embeddings) — semantic pieces show keyword-trigger results only.');
     setManifestFor(c.id, man, messages);
   };
 
@@ -5476,24 +5836,19 @@ function Main({ storage, storageKind, storageFailed }) {
               onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>
             <span class="sub">${chat.scenarioId
               ? (scenarios[chat.scenarioId]?.name ?? '(missing scenario)')
-              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · {{user}} = ${personaName}</span>
+              : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · ${personaName}</span>
           </div>`}
-          ${generating && html`
-            <span style=${{ display: 'inline-flex', alignItems: 'center', gap: '6px', flex: 'none' }}>
-              ${generating.chatId !== chat?.id && html`
-                <span class="hint" style=${{ fontStyle: 'normal' }}
-                  title=${`Generating in "${chats[generating.chatId]?.name ?? 'another chat'}"`}>generating…</span>`}
-              <button class="btn small ghost" title="Stop generation"
-                onClick=${() => genRef.current?.abort.abort()}>■\uFE0E Stop</button>
-            </span>`}
+          ${generating && generating.chatId !== chat?.id && html`
+            <span class="hint" style=${{ fontStyle: 'normal', flex: 'none' }}
+              title=${`Generating in "${chats[generating.chatId]?.name ?? 'another chat'}"`}>generating…</span>`}
           <span class="spacer"></span>
           <span ref=${rightBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
             ${ribbonArrows
               ? html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
-                  title="Inspector / Memory / Chat panel"
+                  title="Inspector / Samplers / Memory / Chat panel"
                   onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>${ui.drawer ? '»' : '«'}</button>`
               : html`<button class="btn small ghost ${ui.drawer ? 'active' : ''}"
-                  title="Inspector panel (Inspector / Memory / Chat tabs)"
+                  title="Inspector panel (Inspector / Samplers / Memory / Chat tabs)"
                   onClick=${() => ui.drawer ? closeDrawer() : toggleDrawer(lastDrawerTabRef.current ?? 'inspector')}>Inspector</button>`}
           </span>
         </div>
@@ -5533,7 +5888,7 @@ function Main({ storage, storageKind, storageFailed }) {
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
-              dateFormat=${settings.dateFormat}
+              dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}
@@ -5554,6 +5909,7 @@ function Main({ storage, storageKind, storageFailed }) {
         manifest=${manifest} realCounts=${realCounts} onPreview=${() => onPreview()} auxLog=${shownAuxLog(ui.chatId)}
         cap=${settings.memoryCap ?? MEMORY_CAP}
         personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
+        settings=${settings} onUpdateSettings=${updateSettings}
         onExport=${() => chat && onExportChat(chat)}
         onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
@@ -5613,6 +5969,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onPreview=${() => onPreview(modal.chatId)} auxLog=${shownAuxLog(modal.chatId)}
         cap=${settings.memoryCap ?? MEMORY_CAP}
         personas=${personas} scenario=${scenarios[chats[modal.chatId]?.scenarioId]} characters=${characters} onUpdateChat=${saveChat}
+        settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onExport=${() => onExportChat(chats[modal.chatId])}

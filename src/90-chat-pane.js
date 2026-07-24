@@ -1,5 +1,5 @@
 function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
@@ -117,7 +117,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
             personaName=${personaName} characterNames=${characterNames}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
-            dateFormat=${dateFormat}
+            dateFormat=${dateFormat} showThinking=${showThinking}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}

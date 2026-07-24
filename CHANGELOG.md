@@ -655,3 +655,98 @@ No changes to the app itself: the frontend, server, build and tests are identica
 **Fixed**
 - Internal: renamed the default theme id from `miku` to `defaultTheme`
 
+
+## v4.1 - Samplers & thinking display
+
+### v4.1.0
+
+**Added**
+- Settings → Samplers tab: eight sampling parameters (temperature, top_p, top_k, min_p, repetition penalty, presence penalty, frequency penalty, seed), each with an on/off checkbox - unchecked parameters are simply not sent, so the backend's own defaults apply.
+- Samplers tab in the chat panel: check a knob to override its value for that chat only, or flip to "Global defaults" to edit the global values in place. Which knobs are offered as per-chat overrides is configurable in Settings.
+- Test connection button (Settings → Connection): verifies the endpoint and key, counts the exposed models, and warns if the configured chat model isn't among them.
+- Friendlier API error messages: 401/403/404/429 and unreachable-endpoint failures now explain the likely cause and where to fix it, in error banners, the model fetch, and the aux-call log.
+
+**Changed**
+- Global sampler editing moved from the Generation tab to the new Samplers tab; stop strings moved there too.
+- Response suggestions now default to off (each suggestion round costs an extra model call).
+- "Smart activation" renamed to "semantic activation" throughout the UI, with clearer explanations of the embedding model's role.
+- Header cleanup: removed the Stop button (the composer's Stop remains) and the `{{user}} =` persona label.
+
+**Removed**
+- User-defined custom tools (the author's-note / set-variable / alias actions) are gone from Settings, the platform prompt, and tool execution. Hand-authored `{{var:name}}` story variables and author's notes still work as before.
+
+### v4.1.1
+
+**Added**
+- Custom samplers: register your own backend-specific request params (number or boolean) in Settings → Generation, with label, request key, min/max/step, and default
+- Dotted request keys expand into nested objects - e.g. `chat_template_kwargs.enable_thinking` sends `chat_template_kwargs: { enable_thinking: true/false }`; registered params appear in the global sampler list and per-chat overrides (marked ✦)
+- Per-chat overrides for context length and response max tokens in the chat panel's Samplers tab; both generation and the prompt preview honor them
+- Boolean samplers get a true/false dropdown instead of a numeric field
+
+**Changed**
+- Settings' separate "Samplers" tab is folded into "Generation"; sampler rows now use a responsive grid layout in both Settings and the chat panel
+- Finer control: temperature, repetition, presence, and frequency penalty steps go from 0.05 to 0.01
+- Only registered params (built-ins plus your custom samplers) are ever sent - removing a custom sampler can no longer leak a stale key to the backend, and cleared values are never sent as null
+
+**Fixed**
+- Per-chat context length is now respected when assembling the prompt preview, not just during generation
+
+### v4.1.2
+
+**Changed**
+- Unchecking a global sampler (Settings → Generation, or the chat panel's global-defaults editor) now disables it instead of deleting it: the parameter stops being sent to the backend, but your tuned value is kept and restored when you re-check it.
+- The chat panel's Samplers tab shows `global: N (off)` when a sampler is disabled globally, and a per-chat override can still force it on.
+
+**Fixed**
+- Removing a custom sampler now also clears its disabled state, so no stale entries linger.
+
+### v4.1.3
+
+A very small release: one UI wording change in the per-chat sampler panel.
+
+**Changed**
+
+- In the per-chat sampler settings, a knob without a per-chat override whose global value is disabled now shows the hint "backend default" instead of "global: <value> (off)", matching what is actually sent to the backend.
+
+### v4.1.4
+
+**Added**
+
+- Replies from reasoning-capable backends (vLLM, DeepSeek, OpenRouter - anything sending `reasoning_content` / `reasoning`) now show the model's thinking in a collapsible box at the top of the message bubble. The box opens automatically while the model is mid-thought and closes when the reply finishes; you can toggle it freely.
+- New **Thinking output** toggle in settings (on by default) to show or hide the reasoning box.
+- Reasoning is stored per swipe, so each swipe keeps its own thinking, and continuing a reply keeps the reasoning already produced.
+
+**Changed**
+
+- Reasoning text is kept strictly separate from the reply text: it is displayed only, never included in prompts sent back to the model, and never leaks into message content.
+- Reasoning goes through the same persona-name substitution as message text.
+
+**Fixed**
+
+- (Test coverage) Repro suite now verifies the reasoning channel is captured in order and never contaminates message content.
+
+### v4.1.5
+
+**Changed**
+- Sampler rows in Settings and the per-chat Samplers tab now have a fixed, right-aligned value column: when a sampler is disabled, its kept value shows dimmed in that slot instead of disappearing, so the column edge stays aligned.
+- Custom sampler definitions in Settings → Generation are now collapsible cards showing the label and type in the header; they start collapsed, and newly added samplers start open.
+- The thinking/reasoning box on messages no longer auto-opens while the model streams - it stays collapsed by default, with the header still indicating live that thinking is in progress.
+- Sampler grid is slightly wider (260px columns, 100px value slot) and the explanatory hint under the sampler list was trimmed.
+
+### v4.1.6
+
+**Changed**
+
+- The Samplers pane now shows Context length and Response max tokens in both the "This chat" and "Global defaults" views, in the same order, so the two views no longer look different
+- The "This chat" / "Global defaults" switch now uses the same pill-tab style as other tabs in the app
+- The explanatory hints in the Samplers pane now sit below the sampler rows instead of above them
+
+### v4.1.7
+
+No user-facing changes in this release. It is an audit-pass snapshot of v4.1.6: the code, behavior, and UI are functionally identical.
+
+**Changed**
+
+- Cleaned up source comments: removed historical version annotations (v2.0a/b/c/d, v2.1) and reworded "legacy" references so comments describe current behavior rather than version history.
+- Updated test section headers and descriptions to match the cleaned-up wording.
+

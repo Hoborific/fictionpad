@@ -27,9 +27,9 @@ const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
 // literally, not as replacement-string patterns.
 const subUser = (text, personaName) =>
   String(text ?? '').replace(/\{\{user\}\}/gi, () => personaName || 'User');
-// {{var:name}} story variables (v2.0d): per-chat key/value store written by the
-// set_var tool action; unknown variables substitute to empty. Lookup is
-// case-insensitive (the macro regex is); an exact-case key wins on collision.
+// {{var:name}} story variables: per-chat key/value store; unknown variables
+// substitute to empty. Lookup is case-insensitive (the macro regex is); an
+// exact-case key wins on collision.
 const subVars = (text, vars) =>
   String(text ?? '').replace(/\{\{var:([^}]+)\}\}/gi, (_, k) => {
     if (!vars) return '';
@@ -38,6 +38,29 @@ const subVars = (text, vars) =>
     const found = Object.keys(vars).find(vk => vk.toLowerCase() === key.toLowerCase());
     return found === undefined ? '' : String(vars[found] ?? '');
   });
+
+// Sampler params → request body fields. Flat keys pass through untouched;
+// DOTTED keys (user-registered custom samplers, e.g.
+// `chat_template_kwargs.enable_thinking`) expand into nested objects, with
+// siblings sharing a prefix deep-merged into one parent. null/undefined
+// values are dropped (a cleared override must not send null upstream).
+// Flat/dotted collisions resolve last-write-wins in iteration order.
+function expandSamplerParams(samplers) {
+  const out = {};
+  for (const [key, val] of Object.entries(samplers ?? {})) {
+    if (val == null) continue;
+    const parts = key.split('.').filter(Boolean);
+    if (parts.length <= 1) { out[key] = val; continue; }
+    let node = out;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (typeof node[parts[i]] !== 'object' || node[parts[i]] === null || Array.isArray(node[parts[i]]))
+        node[parts[i]] = {};
+      node = node[parts[i]];
+    }
+    node[parts[parts.length - 1]] = val;
+  }
+  return out;
+}
 
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
@@ -141,14 +164,13 @@ function deleteSubtree(messages, nodeId) {
 // are untouched) and roll the memory store back to it. The cutoff is
 // position-based: entries stamped with `atLen` (active-path message count at
 // creation) survive iff atLen <= the target's path length, so rollback is
-// immune to regenerate (a new swipe gets a fresh createdAt) and to legacy
-// swipes without createdAt. Entries lacking atLen fall back to the legacy
-// createdAt cutoff (target node's active-swipe createdAt). Tool-written lore
-// (createdAt/atLen-tagged, v2.0b) and loreQueue proposals (v2.0d) roll back
-// with the same rule; hand-authored pieces (no createdAt) always survive.
+// immune to regenerate (a new swipe gets a fresh createdAt). Entries lacking
+// atLen fall back to the createdAt cutoff (target node's active-swipe
+// createdAt). Tool-written lore (createdAt/atLen-tagged) and loreQueue
+// proposals roll back with the same rule; hand-authored pieces (no createdAt)
+// always survive.
 // Deliberately rewind-EXEMPT: chat.vars and chat.authorsNote — they are world
-// state (set_var / note tool effects), not narrative state, so rewinding the
-// story does not un-write them.
+// state, not narrative state, so rewinding the story does not un-write them.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
@@ -289,12 +311,12 @@ function resolveCharacters(scenario, chat, charactersById) {
   return out;
 }
 
-// Per-chat scenario overlay (v2.0a): chat.lorePieces merge over the
+// Per-chat scenario overlay: chat.lorePieces merge over the
 // scenario's by id — the chat wins, including enabled:false to switch a
 // scenario piece off for one chat only; chat-only pieces append after the
-// scenario's. This is where model-generated characters/lore land (v2.0b+)
+// scenario's. This is where model-generated characters/lore land
 // and the "edit the scenario of this chat" surface. Branches inherit a copy
-// via branchChat's deepClone. Linked global characters (v2.1) slot in after
+// via branchChat's deepClone. Linked global characters slot in after
 // the scenario pieces — scenario wins on id collision, chat wins overall.
 function mergedLorePieces(scenario, chat, charactersById = null) {
   const base = Array.isArray(scenario?.lorePieces) ? scenario.lorePieces : [];
@@ -359,8 +381,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     tailParts.push(`${personaName} is ${sub(persona.description).trim()}`);
   const customInstr = sub(chat?.customInstructions ?? '').trim();
   if (customInstr) tailParts.push(customInstr);
-  // Author's note: per-chat sticky steering, appended to by the note tool
-  // action (v2.0d), editable in chat settings.
+  // Author's note: per-chat sticky steering, editable in chat settings.
   const authorsNote = sub(chat?.authorsNote ?? '').trim();
   if (authorsNote) tailParts.push(`Author's note: ${authorsNote}`);
   // Length directive: user-editable in settings; falls back to the preset's
@@ -507,15 +528,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   return { messages, manifest };
 }
 
-// ---- tool calls (v2.0b) ---------------------------------------------------
+// ---- tool calls -------------------------------------------------------------
 // Prompt-based protocol: the platform prompt teaches the model to emit
 //   ```tool
 //   {"name": "…", "args": {…}}
 //   ```
 // blocks mid-reply. Works on any OpenAI-compatible endpoint — no tools param,
 // no extra round-trip, middleware-transparent. Blocks are stripped from
-// display text and executed app-side against the per-chat lore overlay
-// (v2.0a). An unterminated fence is never a call (partial stream or model
+// display text and executed app-side against the per-chat lore overlay.
+// An unterminated fence is never a call (partial stream or model
 // rambling) — it's hidden from display but executes nothing.
 const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
 const TOOL_NAME_MAX = 60;
@@ -623,8 +644,6 @@ function stripToolBlocks(text) {
 // pruning (pruneToolPieces). Updates keep the original piece's provenance.
 // opts.queueLore: add_lore calls for NEW titles go to the review queue
 // (emergent-lore 'queue' mode) instead of straight into lorePieces.
-// opts.customTools: user-defined tools (Settings) — action aliases for the
-// built-ins plus 'note' (author's note) and 'set_var' (story variable).
 // allPieces (optional): the full merged piece list (scenario + global
 // characters + chat overlay) — used ONLY for register_character dedupe, so a
 // name that exists outside the chat overlay is shadowed via the overlay
@@ -652,7 +671,7 @@ function pruneToolPieces(chat, nodeId) {
   return { ...chat, lorePieces: pieces.filter(p => p?.createdBy !== nodeId) };
 }
 
-// ---- emergent lore review queue (v2.0d) ------------------------------------
+// ---- emergent lore review queue ---------------------------------------------
 // Proposals (add_lore tool calls under a 'queue'-mode scenario, or the
 // extraction pipeline) wait in chat.loreQueue for user review. Accept moves a
 // proposal into lorePieces as USER-OWNED — provenance stripped, so prune and
@@ -681,7 +700,7 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
-function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, customTools = [], allPieces = null, atLen = null } = {}) {
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
   const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
@@ -734,26 +753,6 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
       `added lore "${title}"`);
   }
-  // User-defined custom tools (Settings → custom tools). Built-in names are
-  // reserved — a custom def can never shadow register_character / add_lore.
-  const def = customTools.find(t => t?.name?.trim() === call.name);
-  if (def) {
-    if (def.action === 'register_character' || def.action === 'add_lore')
-      return applyToolCall(chat, { name: def.action, args: call.args }, { nodeId, now, queueLore, customTools, allPieces, atLen });
-    if (def.action === 'note') {
-      const text = String(args.text ?? '').trim().slice(0, TOOL_TEXT_MAX);
-      if (!text) return fail(`${def.name}: text required`);
-      const authorsNote = [String(chat?.authorsNote ?? '').trim(), text].filter(Boolean).join('\n');
-      return { ok: true, note: 'author\'s note updated', chat: { ...chat, authorsNote } };
-    }
-    if (def.action === 'set_var') {
-      const vname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
-      if (!vname) return fail(`${def.name}: name required`);
-      const value = String(args.value ?? '').slice(0, TOOL_TEXT_MAX);
-      return { ok: true, note: `set {{var:${vname}}}`, chat: { ...chat, vars: { ...(chat?.vars ?? {}), [vname]: value } } };
-    }
-    return fail(`tool "${def.name}" has unknown action "${def.action}"`);
-  }
   return fail(`unknown tool "${call.name}"`);
 }
 
@@ -772,7 +771,7 @@ Available tools:
 - add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
 Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
 
-// ---- multi-speaker segments (v2.0c) ----------------------------------------
+// ---- multi-speaker segments -------------------------------------------------
 // One turn stays ONE swipe in the tree; a reply containing several
 // `Name:`-prefixed parts is split for DISPLAY into per-speaker bubbles.
 // Split points are line starts like `Name:` / `**Name:**` / `*Name*:` where

@@ -41,9 +41,9 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
           <label class="check" title="Always injected while linked">
             <input type="checkbox" checked=${!!editing.pinned}
               onChange=${(e) => edit({ ...editing, pinned: e.target.checked })} /> pinned</label>
-          <label class="check" title="Semantic activation — requires an embeddings model in Settings">
+          <label class="check" title="Semantic activation — the embedding model (Settings → Models) injects this card when similar to the recent conversation; no keyword needed">
             <input type="checkbox" checked=${!!editing.smart}
-              onChange=${(e) => edit({ ...editing, smart: e.target.checked })} /> smart</label>
+              onChange=${(e) => edit({ ...editing, smart: e.target.checked })} /> semantic</label>
           <label class="check">
             <input type="checkbox" checked=${editing.enabled !== false}
               onChange=${(e) => edit({ ...editing, enabled: e.target.checked })} /> enabled</label>

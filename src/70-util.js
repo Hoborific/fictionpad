@@ -28,6 +28,52 @@ function pickJSONFile() {
   });
 }
 
+// Sampler knob registry — the sampling params the app can send on chat
+// completions (OpenAI-compatible + common vLLM/llama.cpp extensions). A param
+// is sent only while present in settings.samplers (global) or
+// chat.settings.samplers (per-chat override); `def` seeds a freshly-enabled
+// knob. Settings → Generation toggles the global set; settings.samplerFields
+// picks which knobs appear as per-chat overrides in the panel's Samplers tab.
+// Users can register additional knobs (settings.customSamplers) for backend-
+// specific params — a dotted key like `chat_template_kwargs.enable_thinking`
+// expands into a nested request object (expandSamplerParams).
+const SAMPLER_FIELDS = [
+  { key: 'temperature',        label: 'Temperature',        type: 'number', min: 0,  max: 2,          step: 0.01, def: 0.8  },
+  { key: 'top_p',              label: 'top_p',              type: 'number', min: 0,  max: 1,          step: 0.01, def: 0.95 },
+  { key: 'top_k',              label: 'top_k',              type: 'number', min: -1, max: 500,        step: 1,    def: 40   },
+  { key: 'min_p',              label: 'min_p',              type: 'number', min: 0,  max: 1,          step: 0.01, def: 0.05 },
+  { key: 'repetition_penalty', label: 'Repetition penalty', type: 'number', min: 0,  max: 2,          step: 0.01, def: 1.1  },
+  { key: 'presence_penalty',   label: 'presence_penalty',   type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
+  { key: 'frequency_penalty',  label: 'frequency_penalty',  type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
+  { key: 'seed',               label: 'seed (−1 = random)', type: 'number', min: -1, max: 2147483647, step: 1,    def: -1   },
+];
+const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f]));
+
+// User-registered samplers (Settings → Generation), sanitized to field shape.
+// Built-in keys are reserved — a custom def can never shadow them.
+//   number  — behaves like a built-in (send-checkbox + numeric input)
+//   boolean — send-checkbox + true/false select; while enabled the chosen
+//             bool IS sent (e.g. chat_template_kwargs.enable_thinking: false)
+const customSamplerFields = (st) => (st?.customSamplers ?? [])
+  .filter(d => d?.key?.trim() && !SAMPLER_FIELD_MAP[d.key.trim()])
+  .map(d => ({
+    key: d.key.trim(),
+    label: d.name?.trim() || d.key.trim(),
+    type: d.type === 'boolean' ? 'boolean' : 'number',
+    min: Number.isFinite(d.min) ? d.min : 0,
+    max: Number.isFinite(d.max) ? d.max : 1,
+    step: Number.isFinite(d.step) && d.step > 0 ? d.step : 0.01,
+    def: d.type === 'boolean' ? d.def !== false : (Number.isFinite(d.def) ? d.def : 0),
+    custom: true,
+  }));
+const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)];
+
+// Samplers minus the user-disabled keys — the set actually sent. Values stay
+// in settings.samplers while disabled, so re-enabling restores the tuned
+// number instead of resetting it.
+const enabledSamplers = (st) => Object.fromEntries(
+  Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
+
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {
   'dd/mm/yyyy': (d, p) => `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`,
