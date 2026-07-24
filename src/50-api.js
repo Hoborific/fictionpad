@@ -203,6 +203,10 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
 //   suffix — tape covers the tail (middleware dropped leading entries, or
 //            attached them off-by-one: tape = text minus a leading span)
 //   prefix — tape covers the head only
+//   tape-longer — reasoning-model backends may logprob the RAW output:
+//            the tape then carries think/marker tokens the content never
+//            shows. Text is an in-order subsequence of such a tape, so
+//            unmatched tape entries are DROPPED (never misattributed).
 //   greedy — anything else: match tokens in order, plain text in the gaps
 function alignTokensToSpans(text, lpTape) {
   const toks = (lpTape ?? []).filter(t => t?.token);
@@ -217,6 +221,15 @@ function alignTokensToSpans(text, lpTape) {
     return [...(pre ? [plain(pre)] : []), ...toks.map(span)];
   }
   if (text.startsWith(joined)) return [...toks.map(span), plain(text.slice(joined.length))];
+  // Tape longer than the text (think tokens mixed in): fast case first — if
+  // the text is a suffix of the tape on a token boundary, drop the leading
+  // junk wholesale (reasoning always streams before content).
+  if (joined.endsWith(text)) {
+    const dropLen = joined.length - text.length;
+    let accLen = 0, k = 0;
+    while (k < toks.length && accLen < dropLen) accLen += toks[k++].token.length;
+    if (accLen === dropLen) return toks.slice(k).map(span);
+  }
   const spans = [];
   let pos = 0, i = 0, gap = '';
   const flush = () => { if (gap) { spans.push(plain(gap)); gap = ''; } };
@@ -248,7 +261,29 @@ function alignTokensToSpans(text, lpTape) {
     }
   }
   flush();
-  return spans;
+  // Drop-tolerant fallback for interleaved junk the greedy pass can't resync
+  // around: discard tape entries that don't match at the cursor (first match
+  // wins — content is an in-order subsequence of the tape). Used only when it
+  // covers strictly more of the text with real probs than the greedy pass.
+  const coverage = (sp) => sp.reduce((n, s) => n + (s.logprob != null ? s.text.length : 0), 0);
+  const baseCov = coverage(spans);
+  if (baseCov >= text.length) return spans;
+  const alt = [];
+  {
+    let aPos = 0, aI = 0, aGap = '';
+    const aFlush = () => { if (aGap) { alt.push(plain(aGap)); aGap = ''; } };
+    while (aPos < text.length) {
+      let j = aI;
+      while (j < toks.length && !text.startsWith(toks[j].token, aPos)) j++;
+      if (j >= toks.length) { aGap += text.slice(aPos); break; }
+      aFlush();
+      alt.push(span(toks[j]));
+      aPos += toks[j].token.length;
+      aI = j + 1;
+    }
+    aFlush();
+  }
+  return coverage(alt) > baseCov ? alt : spans;
 }
 
 // Tool replies: align the raw lp tape against the RAW text (which it tiles

@@ -7,6 +7,14 @@
 // ============================================================================
 const visibleTok = (t) => String(t ?? '').replace(/ /g, '␣').replace(/\t/g, '⇥').replace(/\n/g, '↵\n');
 const probPct = (lp) => lp == null ? null : Math.exp(lp) * 100;
+// Adaptive precision: near-degenerate distributions (e.g. post-thinking
+// replies, where the answer is ~decided) all round to 100.0%/0.0% at 1
+// decimal and the view looks broken. Show more digits near the extremes.
+const fmtPct = (pct) => pct == null ? null
+  : pct >= 99.95 ? pct.toFixed(3) + '%'
+  : pct >= 99.5 ? pct.toFixed(2) + '%'
+  : pct > 0 && pct < 0.1 ? '<0.1%'
+  : pct.toFixed(1) + '%';
 
 function ProbsView({ tokens, onPick }) {
   return html`
@@ -20,12 +28,12 @@ function ProbsView({ tokens, onPick }) {
         return html`
           <span key=${i} class="tok" style=${{ background: bg }}>${t.text}<span class="pop">
             <div class="pop-row head"><span class="tt">${visibleTok(t.text) || '∅'}</span>
-              <span class="pc">${pct == null ? 'n/a' : pct.toFixed(1) + '%'}</span></div>
+              <span class="pc">${fmtPct(pct) ?? 'n/a'}</span></div>
             ${(t.top ?? []).map((alt, j) => {
               const ap = probPct(alt.logprob);
               return html`<div key=${j} class="pop-row alt" onClick=${() => onPick(i, alt.token)}>
                 <span class="rank">#${j + 1}</span><span class="tt">${visibleTok(alt.token)}</span>
-                <span class="pc">${ap == null ? '' : ap.toFixed(1) + '%'}</span></div>`;
+                <span class="pc">${fmtPct(ap) ?? ''}</span></div>`;
             })}
             <div class="pop-row alt" onClick=${() => onPick(i, null)}><span class="tt">↻ from here</span></div>
           </span></span>`;
@@ -35,14 +43,35 @@ function ProbsView({ tokens, onPick }) {
 
 // Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
 // Collapsed by default, streaming or not — the header still shows live that
-// thinking is in progress ("Thinking…").
+// thinking is in progress ("Thinking…"). The expanded body shows its extent
+// subtly (the native scrollbar auto-hides): a thin accent rail tracking
+// scroll position, and a bottom fade while more text remains below.
 function ThinkBox({ text, streaming }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  // CSS vars only — no re-render per scroll event.
+  const syncExtent = () => {
+    const wrap = wrapRef.current;
+    const el = wrap?.querySelector('.think-body');
+    if (!el) return;
+    const scrollable = el.scrollHeight > el.clientHeight + 2;
+    wrap.dataset.scrollable = scrollable ? '1' : '';
+    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
+    if (scrollable) {
+      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
+      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
+    }
+  };
+  useEffect(() => { if (open) syncExtent(); }, [open, text, streaming]);
   return html`
     <div class="think">
       <button class="think-head" onClick=${() => setOpen(!open)}>
         <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
-      ${open && html`<div class="think-body">${text}</div>`}
+      ${open && html`
+        <div class="think-body-wrap" ref=${wrapRef}>
+          <div class="think-body" onScroll=${syncExtent}>${text}</div>
+          <div class="think-rail"><div class="think-rail-thumb" /></div>
+        </div>`}
     </div>`;
 }
 
@@ -108,9 +137,10 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const showNav = m > 1 || isLeafAssistant;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
   const atUsed = usedIdx === node.activeSwipe;
-  // Reasoning channel (swipe.think): collapsible box atop the bubble.
-  const thinkBox = !isUser && !editing && showThinking !== false && swipe.think
-    ? html`<${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} />`
+  // Reasoning channel (swipe.think): its own bubble ahead of the reply —
+  // visually separated like a speaker segment, but unnamed and collapsible.
+  const thinkBubble = !isUser && !editing && showThinking !== false && swipe.think
+    ? html`<div class="bubble think-bubble"><${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} /></div>`
     : null;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
@@ -229,19 +259,20 @@ ${showNav && html`
           </span>`}
         
       </div>
-      ${multi && !editing && !(showProbs && hasProbs) ? segments.map((seg, si) => html`
+      ${multi && !editing && !(showProbs && hasProbs) ? html`
+        ${thinkBubble}
+        ${segments.map((seg, si) => html`
         <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
-          ${si === 0 && thinkBox}
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
             style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
-        </div>`) : html`
+        </div>`)}` : html`
+      ${thinkBubble}
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
-        ${thinkBox}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>

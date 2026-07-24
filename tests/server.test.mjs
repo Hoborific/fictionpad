@@ -4,7 +4,7 @@
 // Run: node tests/server.test.mjs
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,7 +47,8 @@ const stopServer = (child) => child && new Promise(r => { child.on('exit', r); c
 const tmp = mkdtempSync(join(tmpdir(), 'fp-server-test-'));
 const dbPath = join(tmp, 'test.db');
 const portA = 18931, portB = 18932, portC = 18933, portU = 18934, portD = 18935;
-let a = null, b = null, c = null, d = null, upstream = null;
+const portE = 18936, portF = 18937;
+let a = null, b = null, c = null, d = null, e = null, f = null, upstream = null;
 let hangClosed = false;
 
 try {
@@ -159,10 +160,64 @@ try {
   ok(badBearer.headers.get('x-fictionpad-auth') === 'required',
     'basic+bearer: Bearer 401 still carries X-FictionPad-Auth: required');
 
+  // ---- /backup (checkpointed full-db download) ----
+  await post(portA, '/save', { store: 'Meta', key: 'bkp', data: { stamp: 'backup-me' } });
+  const bak = await fetch(`http://127.0.0.1:${portA}/backup`);
+  ok(bak.status === 200, '/backup → 200');
+  ok(bak.headers.get('content-type') === 'application/octet-stream',
+    '/backup Content-Type is application/octet-stream');
+  const cd = bak.headers.get('content-disposition') ?? '';
+  ok(cd.includes('attachment') && /filename="fictionpad-backup-.+\.db"/.test(cd),
+    '/backup Content-Disposition carries a dated .db filename');
+  const bakBuf = Buffer.from(await bak.arrayBuffer());
+  ok(bakBuf.length > 100 && bakBuf.subarray(0, 15).toString('utf8') === 'SQLite format 3' && bakBuf[15] === 0,
+    '/backup body is a SQLite database file');
+  // The row saved moments ago lives only in the WAL until a checkpoint — its
+  // presence in the streamed .db proves /backup checkpoints before reading.
+  const bakCopy = join(tmp, 'backup-copy.db');
+  writeFileSync(bakCopy, bakBuf);
+  {
+    const raw = new DatabaseSync(bakCopy);
+    ok(!!raw.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get('Meta', 'bkp'),
+      '/backup contains the just-saved row (checkpoint-before-stream)');
+    raw.close();
+  }
+  ok((await post(portA, '/backup', {})).status === 405, '/backup rejects POST (405)');
+  const bakNoAuth = await fetch(`http://127.0.0.1:${portB}/backup`);
+  ok(bakNoAuth.status === 401 && bakNoAuth.headers.get('x-fictionpad-auth') === 'required',
+    '/backup: token server without Bearer → tagged 401');
+  ok((await fetch(`http://127.0.0.1:${portB}/backup`, { headers: auth })).ok,
+    '/backup: token server with Bearer → 200');
+  ok((await fetch(`http://127.0.0.1:${portC}/backup`, { headers: basic })).ok,
+    '/backup: basic server with Basic → 200');
+  ok((await fetch(`http://127.0.0.1:${portC}/backup`, { headers: auth })).ok,
+    '/backup: basic server with Bearer → 200 (either credential)');
+
   // CORS preflight must allow the X-Real-Authorization header the app sends.
   const preflight = await fetch(`http://127.0.0.1:${portA}/proxy/x`, { method: 'OPTIONS' });
   ok((preflight.headers.get('access-control-allow-headers') ?? '').includes('X-Real-Authorization'),
     'CORS preflight allows X-Real-Authorization');
+
+  // CORS lockdown: CORS headers (incl. the preflight answer) are emitted only
+  // when the Origin header is absent (same-origin/curl) or exactly 'null'
+  // (file://). Any other Origin is still served, but gets no ACAO header.
+  const evil = { Origin: 'https://evil.example' };
+  const vNull = await fetch(`http://127.0.0.1:${portA}/version`, { headers: { Origin: 'null' } });
+  ok(vNull.headers.get('access-control-allow-origin') === '*',
+    'CORS: Origin "null" (file://) gets ACAO');
+  const vEvil = await fetch(`http://127.0.0.1:${portA}/version`, { headers: evil });
+  ok(vEvil.ok, 'CORS: foreign Origin is still served normally (200)');
+  ok(vEvil.headers.get('access-control-allow-origin') === null,
+    'CORS: foreign Origin gets NO ACAO header');
+  const preNull = await fetch(`http://127.0.0.1:${portA}/proxy/x`,
+    { method: 'OPTIONS', headers: { Origin: 'null' } });
+  ok(preNull.headers.get('access-control-allow-origin') === '*' &&
+    (preNull.headers.get('access-control-allow-headers') ?? '').includes('X-Real-Authorization'),
+    'CORS: preflight from Origin "null" answered with full headers');
+  const preEvil = await fetch(`http://127.0.0.1:${portA}/proxy/x`, { method: 'OPTIONS', headers: evil });
+  ok(preEvil.headers.get('access-control-allow-origin') === null &&
+    preEvil.headers.get('access-control-allow-headers') === null,
+    'CORS: preflight from a foreign Origin carries no CORS headers');
 
   // ---- proxy credential hygiene (mock upstream echoes headers) ----
   upstream = http.createServer((req, res) => {
@@ -242,6 +297,12 @@ try {
   const offList = await proxyTo(portD, `http://localhost:${portU}/echo`, auth);
   ok(offList.status === 403, 'proxy policy: non-allowlisted host (even loopback alias) → 403');
 
+  // CORS lockdown on proxied responses: ACAO only for the allowed origins.
+  ok((await proxyTo(portA, loop, { Origin: 'null' })).headers.get('access-control-allow-origin') === '*',
+    'CORS: proxied response to Origin "null" carries ACAO');
+  ok((await proxyTo(portA, loop, evil)).headers.get('access-control-allow-origin') === null,
+    'CORS: proxied response to a foreign Origin carries no ACAO');
+
   // An allowlisted host 302-ing elsewhere must not be followed past the
   // policy — the 3xx passes through to the client as-is.
   const redir = await fetch(`http://127.0.0.1:${portD}/proxy/http://127.0.0.1:${portU}/redirect`,
@@ -283,8 +344,43 @@ try {
     }
     ok(hangClosed, 'proxy: client disconnect aborts the upstream request');
   }
+
+  // ---- WAL durability ----
+  // Periodic TRUNCATE checkpoint (short interval via FICTIONPAD_CHECKPOINT_MS):
+  // after a write, the -wal sidecar is truncated back to zero without a
+  // restart, so the on-disk .db is always a recent complete snapshot.
+  e = startServer(portE, { FICTIONPAD_DB: join(tmp, 'ckpt.db'), FICTIONPAD_CHECKPOINT_MS: '200' });
+  await waitReady(portE);
+  await post(portE, '/save', { store: 'Meta', key: 'ck', data: { n: 1 } });
+  {
+    const walPath = join(tmp, 'ckpt.db-wal');
+    let truncated = false;
+    for (let i = 0; i < 40 && !truncated; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      truncated = !existsSync(walPath) || statSync(walPath).size === 0;
+    }
+    ok(truncated, 'periodic wal_checkpoint(TRUNCATE) empties the -wal sidecar');
+  }
+
+  // Graceful shutdown: SIGTERM closes the db — closing the last WAL connection
+  // checkpoints and removes the -wal/-shm sidecars — and exits 0.
+  f = startServer(portF, { FICTIONPAD_DB: join(tmp, 'sig.db') });
+  await waitReady(portF);
+  await post(portF, '/save', { store: 'Chats', key: 's1', data: { id: 's1' } });
+  const sigDb = join(tmp, 'sig.db');
+  const exitInfo = await new Promise(r => { f.on('exit', (code, sig) => r({ code, sig })); f.kill('SIGTERM'); });
+  f = null; // already exited — don't kill() it again in the finally block
+  ok(exitInfo.code === 0, 'SIGTERM → graceful shutdown, exit code 0');
+  ok(!existsSync(`${sigDb}-wal`) && !existsSync(`${sigDb}-shm`),
+    'SIGTERM shutdown removes the -wal/-shm sidecars (checkpoint on close)');
+  {
+    const raw = new DatabaseSync(sigDb);
+    ok(!!raw.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get('Chats', 's1'),
+      'data saved just before SIGTERM is in the .db itself');
+    raw.close();
+  }
 } finally {
-  await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d)]);
+  await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d), stopServer(e), stopServer(f)]);
   upstream?.close();
 }
 

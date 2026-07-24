@@ -750,3 +750,73 @@ No user-facing changes in this release. It is an audit-pass snapshot of v4.1.6: 
 - Cleaned up source comments: removed historical version annotations (v2.0a/b/c/d, v2.1) and reworded "legacy" references so comments describe current behavior rather than version history.
 - Updated test section headers and descriptions to match the cleaned-up wording.
 
+
+## v4.2 - Drafts, templates & export/import
+
+### v4.2.0
+
+**Added**
+- Per-chat composer drafts: unsent text survives switching between chats (session-only, never persisted). If a send is silently rejected (no endpoint/model configured), the draft is restored instead of being lost.
+- Quick-add lore templates in the scenario editor and per-chat lore panel: one-click character, location, faction and item pieces prefilled with a skeleton.
+- Full backup in Settings → Connection: "Export everything" downloads all scenarios, chats, personas, characters and settings as one JSON; "Import backup" upserts by id (last write wins, data missing from the file is kept). The server token never leaves the device - stripped from exports, ignored on imports.
+- Scenario exports are now bundles that include the scenario's linked global characters, so the file works standalone on import (legacy single-scenario files still import).
+- Server: `GET /backup` checkpoints the WAL and streams the full SQLite database as a dated `.db` download; a matching button lives in Settings → Connection.
+- Chat filter box in the sidebar - matches on chat name, scenario name or linked character names.
+
+**Changed**
+- Server durability: periodic WAL checkpoint (configurable via `FICTIONPAD_CHECKPOINT_MS`, default 60s) keeps the on-disk `.db` a recent complete snapshot, and SIGINT/SIGTERM now close the database cleanly.
+- CORS lockdown: CORS headers are now emitted only for same-origin requests and the `file://` build - other origins get no `Access-Control-Allow-Origin`, so a random website can't drive a visitor's browser through `/proxy` or the storage routes on a no-auth deployment.
+- Markdown rendering is sanitized: raw HTML in model output or imported content is escaped (except the app's own dialogue spans), and links/images with `javascript:`/`data:` schemes are neutralized. Message bubbles also gained proper styling for images, tables and blockquotes.
+- Sampler parameter expansion rejects `__proto__`/`constructor`/`prototype` path segments, closing a prototype-pollution hole from typed or imported keys.
+- On mobile, the sidebar now auto-collapses when opening or creating a chat so the chat is immediately visible.
+
+**Fixed**
+- Logprob highlight spans were misaligned whenever tool blocks were stripped from a reply - the strip map is now rebased to absolute indices.
+- A failure during generation prep (e.g. hostile imported data) no longer wedges the UI in "generating" until reload; it surfaces an error and discards the empty swipe.
+- Memory entries are now stamped with their rewind position at creation, so an all-pinned full store can't mis-tag an unrelated memory's position.
+- The `add_lore` tool now dedupes by title across scenario and global lore too, updating via a chat-overlay shadow instead of injecting a duplicate.
+
+### v4.2.1
+
+**Fixed**
+
+- Prompt preview token estimate now respects a chat's per-chat max response tokens override (not just its context length), so the previewed budget matches what an actual generation sends.
+- Browsing alternate swipes no longer marks the chat as recently updated - it stays put in the sidebar instead of jumping to the top.
+
+**Changed**
+
+- The default theme for new users is now the standard default theme instead of "miku".
+
+### v4.2.2
+
+**Fixed**
+
+- Token probabilities were misattributed or lost for replies from reasoning ("thinking") models, whose logprob stream includes hidden think/marker tokens that never appear in the visible text
+- Leading think tokens in the logprob stream are now dropped wholesale when the reply is a clean suffix of it
+- Interleaved junk tokens mid-reply are discarded via a fallback alignment pass, but only when it yields strictly better probability coverage than the standard one
+- Probability view no longer shows everything as a flat 100.0% / 0.0% on near-decided post-thinking replies: percentages now use adaptive precision (extra decimals near 100%, "<0.1%" for tiny values)
+
+### v4.2.3
+
+**Changed**
+
+- Rewrote the default multi-speaker prompt (Settings → Prompts) to stop models from abusing the `Narrator:` prefix:
+  - `Narrator:` is now reserved for genuine scene-level narration that belongs to no character.
+  - In scenes with only one character, the model is told to write everything - action and description included - in that character's own voice and not to use `Narrator:` at all.
+  - The one-part-per-character rule is folded into the main instruction for clarity.
+
+Note: this only changes the default prompt text; existing chats with a customized speaker prompt are unaffected, and there are no functional code changes.
+
+### v4.2.4
+
+**Changed**
+
+- The model's "Thinking" box now renders as its own dashed-border bubble ahead of the reply (or the speaker segments in multi-character messages), instead of being tucked inside the reply bubble.
+- The expanded thinking box no longer shows a native scrollbar; it indicates its extent with a thin accent scroll rail and a subtle bottom fade while more text remains below.
+
+**Fixed**
+
+- Regenerating a reply (swiping) now rolls back any tool-written pieces (e.g. lore created by tool calls) *before* the new take is generated, so the regeneration runs against the rolled-back state and its tools actually re-fire - previously the old swipe's pieces were pruned only after the new swipe was already written with them still in its prompt.
+- If a regeneration produces nothing (failure or empty output), the rolled-back tool pieces are restored, so a failed retry no longer destroys the effects of the take that survived.
+- Fixed a same-cycle state race where speaker attribution and the tool-only placeholder were rebuilt from a pre-tool snapshot and silently dropped the pieces tool calls had just written.
+

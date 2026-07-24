@@ -10,6 +10,22 @@ function newLorePiece() {
   };
 }
 
+// Quick-add skeletons: name + one-line hook + focused fields, filled in by hand.
+// Keys stay empty — note that unlike global character cards (resolveCharacters
+// defaults empty keys to the card name), lore pieces have no title-as-key
+// fallback in scanLore, so a character piece needs a key or pinned to fire.
+const LORE_TEMPLATES = [
+  { label: 'character', type: 'character',
+    content: 'Name — one-line hook.\nAppearance: \nPersonality: \nMotive: ' },
+  { label: 'location', type: 'lore',
+    content: 'Location — one-line hook.\nDetails: ' },
+  { label: 'faction', type: 'lore',
+    content: 'Faction — one-line hook.\nGoal: \nMembers: ' },
+  { label: 'item', type: 'lore',
+    content: 'Item — one-line hook.\nProperties: ' },
+];
+const newLoreFromTemplate = (t) => ({ ...newLorePiece(), type: t.type, content: t.content });
+
 // Text field for string-array values (lore keys, tags). Keeps the raw text
 // locally so in-progress typing (trailing newlines, ", " before the next
 // item) isn't destroyed by the parse→join roundtrip; only re-syncs from the
@@ -159,6 +175,10 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
             onClick=${() => set({ lorePieces: [...draft.lorePieces, newLorePiece()] })}>+ add piece</button>
+          ${LORE_TEMPLATES.map(t => html`
+            <button class="btn small" key=${t.label} style=${{ marginLeft: '4px' }}
+              title=${`New ${t.label} piece, prefilled with a skeleton`}
+              onClick=${() => set({ lorePieces: [...draft.lorePieces, newLoreFromTemplate(t)] })}>+ ${t.label}</button>`)}
         </span>
         ${draft.lorePieces.map(p => html`
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}

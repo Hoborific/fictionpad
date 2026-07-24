@@ -51,6 +51,10 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
         <span>Lore — this chat only (${pieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
             onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
+          ${LORE_TEMPLATES.map(t => html`
+            <button key=${t.label} class="btn small" style=${{ marginLeft: '4px' }}
+              title=${`New ${t.label} piece, prefilled with a skeleton`}
+              onClick=${() => setPieces([...pieces, newLoreFromTemplate(t)])}>+ ${t.label}</button>`)}
         </span>
         <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only.</div>
         ${pieces.map(p => html`

@@ -132,7 +132,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
 }
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
-                        storageKind, onUpload, onDownload, initialDraft }) {
+                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft }) {
   const [draft, setDraft] = useState(() => {
     // initialDraft restores the in-progress draft after the logit-bias detour.
     if (initialDraft) return initialDraft;
@@ -175,6 +175,30 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) {
       setMigNote(`Failed: ${e.message ?? e}`);
     } finally { setMigBusy(null); }
+  };
+
+  // Full backup (export everything / import backup) — handlers live in Main;
+  // null return = picker cancelled. Imported settings already landed in live
+  // state; mirror them into the draft so "Save settings" can't clobber them
+  // (serverToken stays per-device — never part of the file).
+  const [bakBusy, setBakBusy] = useState(null); // 'import' | 'db'
+  const [bakNote, setBakNote] = useState(null);
+  const importBackup = async () => {
+    setBakBusy('import'); setBakNote(null);
+    try {
+      const out = await onImportAll();
+      if (!out) return;
+      if (out.settings) setDraft(d => ({ ...d, ...out.settings }));
+      setBakNote(out.note);
+    } catch (e) {
+      setBakNote(`Import failed: ${e.message ?? e}`);
+    } finally { setBakBusy(null); }
+  };
+  const serverBackup = async () => {
+    setBakBusy('db'); setMigNote(null);
+    try { await onServerBackup(); }
+    catch (e) { setMigNote(`Server backup failed: ${e.message ?? e}`); }
+    finally { setBakBusy(null); }
   };
 
   const fetchModels = async () => {
@@ -278,8 +302,20 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
               <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
                 ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+              <button class="btn small" disabled=${!!bakBusy} title="Snapshot of the server's SQLite database (all users of this server)"
+                onClick=${serverBackup}>
+                ${bakBusy === 'db' ? 'Downloading…' : 'Download server backup (.db)'}</button>
             </div>
             ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
+        </div>
+        <div class="field"><span>Export / import everything — one JSON with all scenarios, chats, personas, characters and settings</span>
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button class="btn small" onClick=${onExportAll}>Export everything (.json)</button>
+            <button class="btn small" disabled=${!!bakBusy} onClick=${importBackup}>
+              ${bakBusy === 'import' ? 'Importing…' : 'Import backup…'}</button>
+          </div>
+          <div class="hint" style=${{ marginTop: '4px' }}>Import upserts by id (last write wins) — data missing from the file is kept. The server token never leaves this device: stripped from exports, ignored on imports.</div>
+          ${bakNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${bakNote}</div>`}
         </div>`}
 
       ${tab === 'models' && html`

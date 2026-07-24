@@ -99,6 +99,41 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
       seenLeafRef.current = leafId;
     }
   }, [path]);
+  // Per-chat composer drafts (ephemeral, session-only — never persisted). The
+  // Composer remounts per chat (key=chat.id) and seeds from this map; edits
+  // flow back via onDraft, so an unsent draft survives any number of chat
+  // switches. A successful send reports '' and clears only that chat's entry.
+  const draftsRef = useRef(new Map());
+  const onDraft = (chatId, text) => {
+    if (text) draftsRef.current.set(chatId, text);
+    else draftsRef.current.delete(chatId);
+  };
+  // Send acceptance: onSubmitInput returns a hint string (draft kept) or null
+  // ("consumed"), but Main's pre-flight guard (no endpoint/model configured)
+  // drops a plain send silently while still returning null, and the Composer
+  // clears its text optimistically. Verify acceptance once Main's state has
+  // settled and restore the draft if the message never went anywhere.
+  const [draftRestore, setDraftRestore] = useState(null);
+  useEffect(() => { setDraftRestore(null); }, [composerInject]); // a fresh Main inject takes precedence
+  const latestRef = useRef(null);
+  latestRef.current = { chat, generating, auxBusy };
+  const onComposerSubmit = (text) => {
+    const chatId = chat?.id;
+    const res = onSubmitInput(text);
+    if (res || !chatId) return res; // hint shown, draft kept by the Composer
+    setTimeout(() => {
+      const cur = latestRef.current;
+      const p = cur.chat ? getActivePath(cur.chat.messages, cur.chat.activeLeafId) : [];
+      // Accepted = a generation/aux pass started, or the user message landed
+      // in the tree (runGeneration can still bail after the append).
+      const appended = p[p.length - 1]?.role === 'assistant'
+        && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
+      if (cur.generating || cur.auxBusy || appended) return;
+      draftsRef.current.set(chatId, text); // rejected — restore the draft
+      if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
+    }, 0);
+    return null;
+  };
   if (!chat) return html`
     <div class="main"><div class="chatlog"><div class="empty">
       <div style=${{ fontSize: '22px' }}>FictionPad</div>
@@ -139,7 +174,9 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy}
+        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
+        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
 }
 

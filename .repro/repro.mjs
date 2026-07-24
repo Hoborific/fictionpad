@@ -17,7 +17,7 @@ src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
-  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal };`);
+  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -153,6 +153,32 @@ trial('sidebar renders characters + collapsed sections pin open-chat entries (SS
   if (!out.includes('Mira')) throw new Error('pinned linked character missing: ' + out);
 });
 
+// Smoke: the Chats section filter input renders; with an empty filter the
+// chat list is exactly the old behavior (here: collapsed → pinned open chat).
+trial('sidebar chat filter input renders, empty filter keeps pinned view (SSR smoke)', () => {
+  const noop = () => {};
+  const scenarios = { S: { id: 'S', name: 'Veyra', characterIds: [], lorePieces: [] } };
+  const chats = {
+    C1: { id: 'C1', scenarioId: 'S', name: 'Alpha run', createdAt: 1 },
+    C2: { id: 'C2', scenarioId: 'S', name: 'Beta run', createdAt: 2 },
+  };
+  const out = renderToStaticMarkup(html`
+    <${fp.Sidebar} scenarios=${scenarios} chats=${chats} characters=${{}}
+      selectedScenarioId=${null} selectedCharacterId=${null} selectedChatId=${'C1'}
+      onSelectScenario=${noop} onSelectCharacter=${noop} onSelectChat=${noop}
+      onNewScenario=${noop} onEditScenario=${noop} onDeleteScenario=${noop} onNewChat=${noop}
+      onNewCharacter=${noop} onEditCharacter=${noop} onDeleteCharacter=${noop} onNewCharacterChat=${noop}
+      onExportScenario=${noop} onExportCharacter=${noop} onImport=${noop}
+      onOpenPersonas=${noop} onOpenSettings=${noop} collapsed=${false} onToggleCollapse=${noop}
+      onDeleteChat=${noop} sideCollapsed=${{ scenarios: false, characters: false, chats: true }}
+      onToggleSection=${noop} storageKind="local" saveRetrying=${false}
+      width=${300} onDragStart=${noop} onResetWidth=${noop} onChatAction=${noop} onChatContextMenu=${noop} />`);
+  if (!out.includes('Filter chats')) throw new Error('filter input missing: ' + out);
+  // Chats section collapsed + empty filter → only the open chat pinned.
+  if (!out.includes('Alpha run')) throw new Error('pinned open chat missing: ' + out);
+  if (out.includes('Beta run')) throw new Error('empty filter must respect collapse: ' + out);
+});
+
 // Smoke: character editor, scenario-editor link section, and the
 // direct-character new-chat modal.
 trial('character editor + scenario editor + character new-chat modal render (SSR smoke)', () => {
@@ -170,6 +196,26 @@ trial('character editor + scenario editor + character new-chat modal render (SSR
     <${fp.NewChatModal} scenario=${null} character=${characters.CH1} personas=${{}}
       onCreate=${noop} onClose=${noop} />`);
   if (!nc.includes('Direct chat with Mira')) throw new Error('character new-chat hint missing: ' + nc);
+});
+
+// Lore quick-add templates: buttons render in the scenario editor and each
+// skeleton yields a well-formed piece (type set, keys empty, hook line first).
+trial('lore templates: buttons render + skeletons are well-formed', () => {
+  const noop = () => {};
+  const ed = renderToStaticMarkup(html`
+    <${fp.ScenarioEditor} scenario=${{ id: 'S', name: 'Veyra', lorePieces: [] }}
+      characters=${{}} onSave=${noop} onClose=${noop} />`);
+  for (const t of fp.LORE_TEMPLATES)
+    if (!ed.includes(`>+ ${t.label}<`)) throw new Error(`template button missing: ${t.label}`);
+  const byLabel = Object.fromEntries(fp.LORE_TEMPLATES.map(t => [t.label, fp.newLoreFromTemplate(t)]));
+  if (byLabel.character.type !== 'character') throw new Error('character template type wrong');
+  for (const label of ['location', 'faction', 'item'])
+    if (byLabel[label].type !== 'lore') throw new Error(`${label} template type wrong`);
+  for (const [label, p] of Object.entries(byLabel)) {
+    if (!p.id || !p.content.includes('— one-line hook.')) throw new Error(`${label} skeleton malformed`);
+    if (!Array.isArray(p.keys) || p.keys.length) throw new Error(`${label} keys should be empty`);
+    if (p.title !== '') throw new Error(`${label} title should be empty`);
+  }
 });
 
 // Regression: `Mia:\n*actions here*` — the prefix strip must not cross the
@@ -254,6 +300,59 @@ trial('prose auto-close edge cases (lone star, final render raw)', () => {
   if (final.includes('<em>')) throw new Error('final render must show the raw unclosed star: ' + final);
   const rawQ = renderToStaticMarkup(html`<${Markdown} text='He says "hello' prose=${true} streaming=${false} />`);
   if (rawQ.includes('class="dialogue"')) throw new Error('final render must leave unterminated quote raw: ' + rawQ);
+});
+
+// Stored-XSS sanitizing (marked.use config in 00-imports.js): raw HTML from
+// model output / imported cards is escaped, script-capable hrefs neutralized,
+// while the app's own dialogue spans and normal markdown still render.
+const mdHtml = (text) => renderToStaticMarkup(html`<${Markdown} text=${text} />`);
+
+trial('xss: <img onerror> payload renders inert (escaped to text)', () => {
+  const out = mdHtml('<img src=x onerror=alert(1)>');
+  if (out.includes('<img')) throw new Error('raw img tag survived: ' + out);
+  if (!out.includes('&lt;img src=x onerror=alert(1)&gt;'))
+    throw new Error('payload not escaped to text: ' + out);
+});
+
+trial('xss: <script> block is escaped', () => {
+  const out = mdHtml('<script>alert(1)</script>');
+  if (out.includes('<script>')) throw new Error('script tag survived: ' + out);
+  if (!out.includes('&lt;script&gt;')) throw new Error('script not escaped: ' + out);
+});
+
+trial('xss: javascript:/data: links neutralized, text kept', () => {
+  for (const href of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'vbscript:msgbox(1)', 'data:text/html,xss']) {
+    const out = mdHtml(`[click me](${href})`);
+    if (out.includes('<a ')) throw new Error(`link with href ${JSON.stringify(href)} survived: ` + out);
+    if (!out.includes('click me')) throw new Error('link text lost: ' + out);
+  }
+});
+
+trial('xss: safe links and images still render', () => {
+  const out = mdHtml('[site](https://example.com) ![alt](https://example.com/x.png) [mail](mailto:a@b.c) [rel](#anchor)');
+  if (!out.includes('href="https://example.com"')) throw new Error('https link dropped: ' + out);
+  if (!out.includes('<img src="https://example.com/x.png" alt="alt">')) throw new Error('safe image broken: ' + out);
+  if (!out.includes('href="mailto:a@b.c"')) throw new Error('mailto link dropped: ' + out);
+  if (!out.includes('href="#anchor"')) throw new Error('anchor link dropped: ' + out);
+});
+
+trial('xss: data:/javascript: image src neutralized', () => {
+  const out = mdHtml('![x](data:text/html;base64,PHNjcmlwdD4=)');
+  if (out.includes('<img')) throw new Error('data: image survived: ' + out);
+});
+
+trial('xss: dialogue spans still render in prose mode, hostile html inert', () => {
+  const out = proseHtml('"Hello there." *she waves* <img src=x onerror=alert(1)>');
+  if (!out.includes('<span class="dialogue">&quot;Hello there.&quot;</span>'))
+    throw new Error('dialogue span broken by sanitizer: ' + out);
+  if (!out.includes('<em>she waves</em>')) throw new Error('action em broken: ' + out);
+  if (out.includes('<img')) throw new Error('img payload survived in prose mode: ' + out);
+});
+
+trial('xss: normal markdown (emphasis, code, quote, table) still works', () => {
+  const out = mdHtml('*em* `code` **bold**\n\n> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+  for (const frag of ['<em>em</em>', '<code>code</code>', '<strong>bold</strong>', '<blockquote>', '<table>', '<td>1</td>'])
+    if (!out.includes(frag)) throw new Error(`missing ${frag}: ` + out);
 });
 
 // ProbsView renders per-token spans with popovers (no client JS needed for SSR).
@@ -460,6 +559,37 @@ trial('alignTokensToSpans: exact / suffix / prefix / greedy / degenerate', () =>
   const annotated = spans.filter(s => s.logprob != null);
   if (annotated.length !== 6 || annotated.some((s, i) => s.text !== [' lean',' back',' against',' wall',' I',' said'][i]))
     throw new Error('distant-token: tokens misattributed: ' + JSON.stringify(spans));
+
+  // reasoning-model tape: leading think tokens the content never shows
+  // (suffix-of-tape fast case — reasoning always streams before content)
+  spans = A('Mia: hello there', [
+    { token: 'Okay', logprob: -2.0, top: [] },
+    { token: ' let', logprob: -2.0, top: [] },
+    { token: ' me think.', logprob: -2.0, top: [] },
+    { token: 'Mia', logprob: -0.1, top: [] },
+    { token: ': hello', logprob: -0.2, top: [] },
+    { token: ' there', logprob: -0.3, top: [] },
+  ]);
+  if (!cover(spans, 'Mia: hello there')
+    || spans.length !== 3 || spans.some(s => s.logprob == null || s.logprob === -2.0))
+    throw new Error('think-prefix: ' + JSON.stringify(spans));
+
+  // interleaved think junk beyond the greedy resync window: junk is dropped,
+  // every prose token keeps its prob
+  const thinkJunk = Array.from({ length: 6 }, (_, k) => ({ token: `~t${k}~`, logprob: -5, top: [] }));
+  spans = A('Character: nods slowly', [
+    { token: 'Hmm', logprob: -5, top: [] },
+    { token: 'Character', logprob: -0.1, top: [] },
+    { token: ':', logprob: -0.2, top: [] },
+    { token: ' nods', logprob: -0.3, top: [] },
+    ...thinkJunk,
+    { token: ' slowly', logprob: -0.4, top: [] },
+  ]);
+  if (!cover(spans, 'Character: nods slowly'))
+    throw new Error('think-interleaved: coverage ' + JSON.stringify(spans));
+  const kept = spans.filter(s => s.logprob != null);
+  if (kept.length !== 4 || kept.map(s => s.text).join('') !== 'Character: nods slowly')
+    throw new Error('think-interleaved: probs lost ' + JSON.stringify(spans));
 });
 
 // alignStrippedToolSpans: tape covers the RAW reply (tool blocks included);
@@ -496,6 +626,26 @@ trial('alignStrippedToolSpans: probs survive tool-block stripping', () => {
   // map/stripped mismatch → null (caller falls back)
   if (fp.alignStrippedToolSpans(raw, tape, map, 0, 'something else') !== null)
     throw new Error('mismatch should return null');
+});
+
+// Continuation case: the map is slice-relative, so attachProbs rebases it to
+// absolute raw indices (rawOffset > 0). An unrebased map must NOT be passed.
+trial('alignStrippedToolSpans: continuation rawOffset > 0', () => {
+  const base = 'Once upon a time. ';
+  const slice = 'Hi ```tool\n{"tool":"add_lore","args":{"title":"X","content":"Y"}}\n``` there';
+  const { text: stripped, map } = fp.stripToolBlocksMapped(slice);
+  const tape = [
+    { token: 'Hi ', logprob: -0.1, top: [] },
+    { token: '```tool\n{"tool":"add_lore","args":{"title":"X","content":"Y"}}\n```', logprob: -1.0, top: [] },
+    { token: ' there', logprob: -0.4, top: [] },
+  ];
+  const off = base.length;
+  const spans = fp.alignStrippedToolSpans(slice, tape, map.map(j => j + off), off, stripped);
+  if (!spans) throw new Error('continuation projection returned null');
+  if (spans.map(s => s.text).join('') !== stripped) throw new Error('continuation coverage: ' + JSON.stringify(spans));
+  const annotated = spans.filter(s => s.logprob != null);
+  if (annotated.length !== 2 || annotated[0].text !== 'Hi ' || annotated[1].text !== ' there')
+    throw new Error('continuation probs lost: ' + JSON.stringify(spans));
 });
 // /tokenize shape tolerance: {tokens:[ids]}, count-only, and 404 → null.
 trial('tokenize: ids / count-only / unavailable', async () => {

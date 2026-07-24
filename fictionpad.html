@@ -104,6 +104,27 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   border-left: 2px solid var(--c-border);
   padding: 4px 8px; margin-top: 4px;
   max-height: 220px; overflow-y: auto;
+  scrollbar-width: none; /* extent rail replaces the native scrollbar */
+}
+.think-body::-webkit-scrollbar { display: none; }
+/* Extent cues for the scrollable think body (native scrollbar auto-hides):
+   a bottom fade while more text remains, and a thin accent rail tracking
+   scroll position (thumb size = visible fraction, offset = scroll progress). */
+.think-body-wrap { position: relative; }
+.think-body-wrap .think-body { margin-top: 4px; }
+.think-body-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .think-body {
+  mask-image: linear-gradient(to bottom, black calc(100% - 16px), transparent);
+}
+.think-rail {
+  position: absolute; top: 2px; bottom: 2px; right: 1px; width: 3px;
+  border-radius: 2px; background: color-mix(in oklch, var(--c-border) 60%, transparent);
+  opacity: 0; transition: opacity 0.15s; pointer-events: none;
+}
+.think-body-wrap[data-scrollable="1"] .think-rail { opacity: 1; }
+.think-rail-thumb {
+  position: absolute; left: 0; right: 0;
+  top: calc(var(--th-off, 0) * 100%); height: calc(var(--th-frac, 1) * 100%);
+  border-radius: 2px; background: color-mix(in oklch, var(--c-accent) 55%, transparent);
 }
 
 /* ---------- sidebar (fixed overlay — consumes the slack margin, never shifts the chat column) ---------- */
@@ -216,6 +237,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 /* Multi-speaker segments: consecutive bubbles with a small speaker chip. */
 .msg .bubble + .bubble { margin-top: 6px; }
 .msg .bubble.seg { padding-top: 7px; }
+/* Reasoning bubble: visually auxiliary — dashed border, tighter padding, no
+   speaker chip. Sits ahead of the reply bubble(s) like a segment. */
+.msg .bubble.think-bubble { border-style: dashed; padding: 6px 14px; }
+.msg .bubble.think-bubble .think { margin-bottom: 0; }
 .msg .seg-who { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--c-faint); margin-bottom: 3px; }
 .msg .seg-who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
 .msg.user .bubble { background: color-mix(in oklch, var(--c-user) 9%, var(--c-bg-1)); }
@@ -270,6 +295,12 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .md > :last-child { margin-bottom: 0; }
 .msg .md pre { background: var(--c-bg-2); padding: 8px; border-radius: 6px; overflow-x: auto; }
 .msg .md code { background: var(--c-bg-2); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+/* Wide markdown elements: .chatlog clips overflow-x, so keep media inside the bubble. */
+.msg .md img, .msg .md video { max-width: 100%; border-radius: 6px; }
+.msg .md table { border-collapse: collapse; margin: 8px 0; }
+.msg .md th, .msg .md td { border: 1px solid var(--c-border); padding: 4px 10px; }
+.msg .md th { background: var(--c-bg-2); }
+.msg .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--c-accent); color: var(--c-dim); }
 .msg textarea.edit { width: 100%; min-height: 120px; margin-bottom: 6px; }
 .streaming-cursor::after { content: "▌"; color: var(--c-accent); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -587,6 +618,47 @@ import { marked } from 'marked';
 marked.setOptions({ breaks: true, gfm: true });
 
 // ============================================================================
+// MARKDOWN OUTPUT SANITIZING — marked v5+ ships no sanitizer, and every
+// message bubble renders marked output via dangerouslySetInnerHTML while
+// apiKey/serverToken sit in localStorage. Raw HTML from model output (or
+// imported scenario greetings / character cards / chat exports) is escaped
+// to text, EXCEPT the two exact spans wrapDialogue (20-prose.js) injects
+// itself before parsing — those must survive or dialogue coloring breaks.
+// Link/image hrefs with script-capable schemes are neutralized.
+// ============================================================================
+const escapeHtml = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const DIALOGUE_SPANS = new Set(['<span class="dialogue">', '</span>']);
+// Browsers ignore ASCII whitespace/control chars inside a scheme
+// ("java\tscript:" still executes), so strip them before the test.
+const dangerousHref = (href) => {
+  let clean = '';
+  for (const ch of String(href ?? '')) {
+    const cp = ch.codePointAt(0);
+    if (cp > 0x20 && cp !== 0x7f) clean += ch;
+  }
+  return /^(javascript|vbscript|data):/i.test(clean);
+};
+marked.use({
+  walkTokens(token) {
+    if (token.type === 'html' && !DIALOGUE_SPANS.has((token.raw ?? '').trim()))
+      token.text = escapeHtml(token.text ?? token.raw); // renderers emit token.text
+  },
+  renderer: {
+    link({ href, title, tokens, text }) {
+      const inner = tokens?.length ? this.parser.parseInline(tokens) : escapeHtml(text);
+      if (dangerousHref(href)) return inner; // keep the text, drop the link
+      return `<a href="${escapeHtml(href)}"${title ? ` title="${escapeHtml(title)}"` : ''}>${inner}</a>`;
+    },
+    image({ href, title, text }) {
+      if (dangerousHref(href)) return escapeHtml(text);
+      return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${title ? ` title="${escapeHtml(title)}"` : ''}>`;
+    },
+  },
+});
+
+// ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
 // --c-faint, --c-accent-dim, --c-border) are computed in static CSS from
@@ -855,6 +927,9 @@ function expandSamplerParams(samplers) {
   for (const [key, val] of Object.entries(samplers ?? {})) {
     if (val == null) continue;
     const parts = key.split('.').filter(Boolean);
+    // Never walk into the prototype chain — a user-typed or imported key like
+    // `__proto__.x` would otherwise pollute Object.prototype for the session.
+    if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) continue;
     if (parts.length <= 1) { out[key] = val; continue; }
     let node = out;
     for (let i = 0; i < parts.length - 1; i++) {
@@ -1140,8 +1215,12 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
-  const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now }];
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null) {
+  // atLen is stamped at creation, before eviction: in an all-pinned full store
+  // the incoming entry is the one dropped, and stamping after the fact would
+  // mis-tag an unrelated old memory's rewind position.
+  const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
+    ...(Number.isFinite(atLen) ? { atLen } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -1545,10 +1624,19 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!content) return fail('add_lore: content required');
     const keys = (Array.isArray(args.keys) ? args.keys : [])
       .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
-    const existing = pieces.find(p => (p.type ?? 'lore') === 'lore'
+    // Dedupe by title across EVERYTHING the caller can see (same rationale as
+    // register_character above) — a same-titled scenario/global piece would
+    // otherwise be duplicated in the merged view and injected twice.
+    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
+    const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
-    if (existing)
+    if (existing && pieces.some(p => p.id === existing.id))
       return save(pieces.map(p => p.id === existing.id ? { ...p, content, ...(keys.length ? { keys } : {}) } : p),
+        `updated lore "${title}"`);
+    if (existing)
+      // Match lives outside the chat overlay: shadow it via an overlay copy
+      // (fresh provenance → rewind drops the shadow again).
+      return save([...pieces, { ...existing, ...provenance, content, ...(keys.length ? { keys } : {}) }],
         `updated lore "${title}"`);
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
@@ -1615,7 +1703,7 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters are in the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line. Give each character at most one part per reply.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all.`;
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
@@ -2038,6 +2126,10 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
 //   suffix — tape covers the tail (middleware dropped leading entries, or
 //            attached them off-by-one: tape = text minus a leading span)
 //   prefix — tape covers the head only
+//   tape-longer — reasoning-model backends may logprob the RAW output:
+//            the tape then carries think/marker tokens the content never
+//            shows. Text is an in-order subsequence of such a tape, so
+//            unmatched tape entries are DROPPED (never misattributed).
 //   greedy — anything else: match tokens in order, plain text in the gaps
 function alignTokensToSpans(text, lpTape) {
   const toks = (lpTape ?? []).filter(t => t?.token);
@@ -2052,6 +2144,15 @@ function alignTokensToSpans(text, lpTape) {
     return [...(pre ? [plain(pre)] : []), ...toks.map(span)];
   }
   if (text.startsWith(joined)) return [...toks.map(span), plain(text.slice(joined.length))];
+  // Tape longer than the text (think tokens mixed in): fast case first — if
+  // the text is a suffix of the tape on a token boundary, drop the leading
+  // junk wholesale (reasoning always streams before content).
+  if (joined.endsWith(text)) {
+    const dropLen = joined.length - text.length;
+    let accLen = 0, k = 0;
+    while (k < toks.length && accLen < dropLen) accLen += toks[k++].token.length;
+    if (accLen === dropLen) return toks.slice(k).map(span);
+  }
   const spans = [];
   let pos = 0, i = 0, gap = '';
   const flush = () => { if (gap) { spans.push(plain(gap)); gap = ''; } };
@@ -2083,7 +2184,29 @@ function alignTokensToSpans(text, lpTape) {
     }
   }
   flush();
-  return spans;
+  // Drop-tolerant fallback for interleaved junk the greedy pass can't resync
+  // around: discard tape entries that don't match at the cursor (first match
+  // wins — content is an in-order subsequence of the tape). Used only when it
+  // covers strictly more of the text with real probs than the greedy pass.
+  const coverage = (sp) => sp.reduce((n, s) => n + (s.logprob != null ? s.text.length : 0), 0);
+  const baseCov = coverage(spans);
+  if (baseCov >= text.length) return spans;
+  const alt = [];
+  {
+    let aPos = 0, aI = 0, aGap = '';
+    const aFlush = () => { if (aGap) { alt.push(plain(aGap)); aGap = ''; } };
+    while (aPos < text.length) {
+      let j = aI;
+      while (j < toks.length && !text.startsWith(toks[j].token, aPos)) j++;
+      if (j >= toks.length) { aGap += text.slice(aPos); break; }
+      aFlush();
+      alt.push(span(toks[j]));
+      aPos += toks[j].token.length;
+      aI = j + 1;
+    }
+    aFlush();
+  }
+  return coverage(alt) > baseCov ? alt : spans;
 }
 
 // Tool replies: align the raw lp tape against the RAW text (which it tiles
@@ -2483,6 +2606,22 @@ function newLorePiece() {
   };
 }
 
+// Quick-add skeletons: name + one-line hook + focused fields, filled in by hand.
+// Keys stay empty — note that unlike global character cards (resolveCharacters
+// defaults empty keys to the card name), lore pieces have no title-as-key
+// fallback in scanLore, so a character piece needs a key or pinned to fire.
+const LORE_TEMPLATES = [
+  { label: 'character', type: 'character',
+    content: 'Name — one-line hook.\nAppearance: \nPersonality: \nMotive: ' },
+  { label: 'location', type: 'lore',
+    content: 'Location — one-line hook.\nDetails: ' },
+  { label: 'faction', type: 'lore',
+    content: 'Faction — one-line hook.\nGoal: \nMembers: ' },
+  { label: 'item', type: 'lore',
+    content: 'Item — one-line hook.\nProperties: ' },
+];
+const newLoreFromTemplate = (t) => ({ ...newLorePiece(), type: t.type, content: t.content });
+
 // Text field for string-array values (lore keys, tags). Keeps the raw text
 // locally so in-progress typing (trailing newlines, ", " before the next
 // item) isn't destroyed by the parse→join roundtrip; only re-syncs from the
@@ -2632,6 +2771,10 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
         <span>Lore pieces (${draft.lorePieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
             onClick=${() => set({ lorePieces: [...draft.lorePieces, newLorePiece()] })}>+ add piece</button>
+          ${LORE_TEMPLATES.map(t => html`
+            <button class="btn small" key=${t.label} style=${{ marginLeft: '4px' }}
+              title=${`New ${t.label} piece, prefilled with a skeleton`}
+              onClick=${() => set({ lorePieces: [...draft.lorePieces, newLoreFromTemplate(t)] })}>+ ${t.label}</button>`)}
         </span>
         ${draft.lorePieces.map(p => html`
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
@@ -2816,7 +2959,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
 }
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
-                        storageKind, onUpload, onDownload, initialDraft }) {
+                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft }) {
   const [draft, setDraft] = useState(() => {
     // initialDraft restores the in-progress draft after the logit-bias detour.
     if (initialDraft) return initialDraft;
@@ -2859,6 +3002,30 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) {
       setMigNote(`Failed: ${e.message ?? e}`);
     } finally { setMigBusy(null); }
+  };
+
+  // Full backup (export everything / import backup) — handlers live in Main;
+  // null return = picker cancelled. Imported settings already landed in live
+  // state; mirror them into the draft so "Save settings" can't clobber them
+  // (serverToken stays per-device — never part of the file).
+  const [bakBusy, setBakBusy] = useState(null); // 'import' | 'db'
+  const [bakNote, setBakNote] = useState(null);
+  const importBackup = async () => {
+    setBakBusy('import'); setBakNote(null);
+    try {
+      const out = await onImportAll();
+      if (!out) return;
+      if (out.settings) setDraft(d => ({ ...d, ...out.settings }));
+      setBakNote(out.note);
+    } catch (e) {
+      setBakNote(`Import failed: ${e.message ?? e}`);
+    } finally { setBakBusy(null); }
+  };
+  const serverBackup = async () => {
+    setBakBusy('db'); setMigNote(null);
+    try { await onServerBackup(); }
+    catch (e) { setMigNote(`Server backup failed: ${e.message ?? e}`); }
+    finally { setBakBusy(null); }
   };
 
   const fetchModels = async () => {
@@ -2962,8 +3129,20 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
               <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
                 ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+              <button class="btn small" disabled=${!!bakBusy} title="Snapshot of the server's SQLite database (all users of this server)"
+                onClick=${serverBackup}>
+                ${bakBusy === 'db' ? 'Downloading…' : 'Download server backup (.db)'}</button>
             </div>
             ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
+        </div>
+        <div class="field"><span>Export / import everything — one JSON with all scenarios, chats, personas, characters and settings</span>
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button class="btn small" onClick=${onExportAll}>Export everything (.json)</button>
+            <button class="btn small" disabled=${!!bakBusy} onClick=${importBackup}>
+              ${bakBusy === 'import' ? 'Importing…' : 'Import backup…'}</button>
+          </div>
+          <div class="hint" style=${{ marginTop: '4px' }}>Import upserts by id (last write wins) — data missing from the file is kept. The server token never leaves this device: stripped from exports, ignored on imports.</div>
+          ${bakNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${bakNote}</div>`}
         </div>`}
 
       ${tab === 'models' && html`
@@ -3548,6 +3727,10 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
         <span>Lore — this chat only (${pieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
             onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
+          ${LORE_TEMPLATES.map(t => html`
+            <button key=${t.label} class="btn small" style=${{ marginLeft: '4px' }}
+              title=${`New ${t.label} piece, prefilled with a skeleton`}
+              onClick=${() => setPieces([...pieces, newLoreFromTemplate(t)])}>+ ${t.label}</button>`)}
         </span>
         <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only.</div>
         ${pieces.map(p => html`
@@ -3687,6 +3870,14 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
 // ============================================================================
 const visibleTok = (t) => String(t ?? '').replace(/ /g, '␣').replace(/\t/g, '⇥').replace(/\n/g, '↵\n');
 const probPct = (lp) => lp == null ? null : Math.exp(lp) * 100;
+// Adaptive precision: near-degenerate distributions (e.g. post-thinking
+// replies, where the answer is ~decided) all round to 100.0%/0.0% at 1
+// decimal and the view looks broken. Show more digits near the extremes.
+const fmtPct = (pct) => pct == null ? null
+  : pct >= 99.95 ? pct.toFixed(3) + '%'
+  : pct >= 99.5 ? pct.toFixed(2) + '%'
+  : pct > 0 && pct < 0.1 ? '<0.1%'
+  : pct.toFixed(1) + '%';
 
 function ProbsView({ tokens, onPick }) {
   return html`
@@ -3700,12 +3891,12 @@ function ProbsView({ tokens, onPick }) {
         return html`
           <span key=${i} class="tok" style=${{ background: bg }}>${t.text}<span class="pop">
             <div class="pop-row head"><span class="tt">${visibleTok(t.text) || '∅'}</span>
-              <span class="pc">${pct == null ? 'n/a' : pct.toFixed(1) + '%'}</span></div>
+              <span class="pc">${fmtPct(pct) ?? 'n/a'}</span></div>
             ${(t.top ?? []).map((alt, j) => {
               const ap = probPct(alt.logprob);
               return html`<div key=${j} class="pop-row alt" onClick=${() => onPick(i, alt.token)}>
                 <span class="rank">#${j + 1}</span><span class="tt">${visibleTok(alt.token)}</span>
-                <span class="pc">${ap == null ? '' : ap.toFixed(1) + '%'}</span></div>`;
+                <span class="pc">${fmtPct(ap) ?? ''}</span></div>`;
             })}
             <div class="pop-row alt" onClick=${() => onPick(i, null)}><span class="tt">↻ from here</span></div>
           </span></span>`;
@@ -3715,14 +3906,35 @@ function ProbsView({ tokens, onPick }) {
 
 // Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
 // Collapsed by default, streaming or not — the header still shows live that
-// thinking is in progress ("Thinking…").
+// thinking is in progress ("Thinking…"). The expanded body shows its extent
+// subtly (the native scrollbar auto-hides): a thin accent rail tracking
+// scroll position, and a bottom fade while more text remains below.
 function ThinkBox({ text, streaming }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  // CSS vars only — no re-render per scroll event.
+  const syncExtent = () => {
+    const wrap = wrapRef.current;
+    const el = wrap?.querySelector('.think-body');
+    if (!el) return;
+    const scrollable = el.scrollHeight > el.clientHeight + 2;
+    wrap.dataset.scrollable = scrollable ? '1' : '';
+    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
+    if (scrollable) {
+      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
+      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
+    }
+  };
+  useEffect(() => { if (open) syncExtent(); }, [open, text, streaming]);
   return html`
     <div class="think">
       <button class="think-head" onClick=${() => setOpen(!open)}>
         <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
-      ${open && html`<div class="think-body">${text}</div>`}
+      ${open && html`
+        <div class="think-body-wrap" ref=${wrapRef}>
+          <div class="think-body" onScroll=${syncExtent}>${text}</div>
+          <div class="think-rail"><div class="think-rail-thumb" /></div>
+        </div>`}
     </div>`;
 }
 
@@ -3788,9 +4000,10 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   const showNav = m > 1 || isLeafAssistant;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
   const atUsed = usedIdx === node.activeSwipe;
-  // Reasoning channel (swipe.think): collapsible box atop the bubble.
-  const thinkBox = !isUser && !editing && showThinking !== false && swipe.think
-    ? html`<${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} />`
+  // Reasoning channel (swipe.think): its own bubble ahead of the reply —
+  // visually separated like a speaker segment, but unnamed and collapsible.
+  const thinkBubble = !isUser && !editing && showThinking !== false && swipe.think
+    ? html`<div class="bubble think-bubble"><${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} /></div>`
     : null;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
@@ -3909,19 +4122,20 @@ ${showNav && html`
           </span>`}
         
       </div>
-      ${multi && !editing && !(showProbs && hasProbs) ? segments.map((seg, si) => html`
+      ${multi && !editing && !(showProbs && hasProbs) ? html`
+        ${thinkBubble}
+        ${segments.map((seg, si) => html`
         <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
-          ${si === 0 && thinkBox}
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
             style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
-        </div>`) : html`
+        </div>`)}` : html`
+      ${thinkBubble}
       <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
-        ${thinkBox}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
@@ -3999,8 +4213,12 @@ const COMPOSER_COMMANDS = [
   ['/theme NAME', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId }) {
-  const [text, setText] = useState('');
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft }) {
+  // Draft text seeds from ChatPane's per-chat drafts store (this component
+  // remounts per chat via key=chat.id) and every edit is reported back through
+  // onDraft, so an unsent draft survives chat switches within the session.
+  const [text, setTextRaw] = useState(() => initialText ?? '');
+  const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
   useEffect(() => {
     if (!inject) return;
@@ -4165,6 +4383,41 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
       seenLeafRef.current = leafId;
     }
   }, [path]);
+  // Per-chat composer drafts (ephemeral, session-only — never persisted). The
+  // Composer remounts per chat (key=chat.id) and seeds from this map; edits
+  // flow back via onDraft, so an unsent draft survives any number of chat
+  // switches. A successful send reports '' and clears only that chat's entry.
+  const draftsRef = useRef(new Map());
+  const onDraft = (chatId, text) => {
+    if (text) draftsRef.current.set(chatId, text);
+    else draftsRef.current.delete(chatId);
+  };
+  // Send acceptance: onSubmitInput returns a hint string (draft kept) or null
+  // ("consumed"), but Main's pre-flight guard (no endpoint/model configured)
+  // drops a plain send silently while still returning null, and the Composer
+  // clears its text optimistically. Verify acceptance once Main's state has
+  // settled and restore the draft if the message never went anywhere.
+  const [draftRestore, setDraftRestore] = useState(null);
+  useEffect(() => { setDraftRestore(null); }, [composerInject]); // a fresh Main inject takes precedence
+  const latestRef = useRef(null);
+  latestRef.current = { chat, generating, auxBusy };
+  const onComposerSubmit = (text) => {
+    const chatId = chat?.id;
+    const res = onSubmitInput(text);
+    if (res || !chatId) return res; // hint shown, draft kept by the Composer
+    setTimeout(() => {
+      const cur = latestRef.current;
+      const p = cur.chat ? getActivePath(cur.chat.messages, cur.chat.activeLeafId) : [];
+      // Accepted = a generation/aux pass started, or the user message landed
+      // in the tree (runGeneration can still bail after the append).
+      const appended = p[p.length - 1]?.role === 'assistant'
+        && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
+      if (cur.generating || cur.auxBusy || appended) return;
+      draftsRef.current.set(chatId, text); // rejected — restore the draft
+      if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
+    }, 0);
+    return null;
+  };
   if (!chat) return html`
     <div class="main"><div class="chatlog"><div class="empty">
       <div style=${{ fontSize: '22px' }}>FictionPad</div>
@@ -4205,7 +4458,9 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy} onSubmit=${onSubmitInput} onStop=${onStop} inject=${composerInject} />
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy}
+        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
+        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
 }
 
@@ -4244,7 +4499,18 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   // The open chat is always pinned into the list — even when the scenario/
   // character filter would exclude it (chat opened first, filter changed after).
   const baseChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
-  const shownChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
+  const pinnedChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
+  // Chat filter: case-insensitive substring on the chat name, its scenario's
+  // name, or any linked character's name. Non-empty filter ignores the
+  // section's collapse state; empty filter = the pinned view above, untouched.
+  const [chatFilter, setChatFilter] = useState('');
+  const chatQuery = chatFilter.trim().toLowerCase();
+  const shownChats = chatQuery
+    ? chatList.filter(c =>
+        (c.name ?? '').toLowerCase().includes(chatQuery)
+        || (scenarios[c.scenarioId]?.name ?? '').toLowerCase().includes(chatQuery)
+        || (c.characterIds ?? []).some(id => (characters?.[id]?.name ?? '').toLowerCase().includes(chatQuery)))
+    : pinnedChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
@@ -4315,7 +4581,12 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         </div>
         <div class="side-section">
           ${sectionTitle('chats', `Chats${(selectedScenarioId || selectedCharacterId) ? '' : ' (all)'}`, null, null)}
-          ${shownChats.length === 0 && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
+          <input type="text" placeholder="Filter chats…" value=${chatFilter}
+            onInput=${(e) => setChatFilter(e.target.value)}
+            style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
+          ${shownChats.length === 0 && chatQuery
+            && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats match.</div>`}
+          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
           ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => {
@@ -4649,7 +4920,7 @@ function Main({ storage, storageKind, storageFailed }) {
     storage.set('Meta', SETTINGS_SYNC_KEY, rest);
   }, [settingsRaw, storageKind]);
   const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
-  const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
+  const [theme, setTheme] = usePersistentState('fictionpad.theme', 'defaultTheme');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
   useEffect(() => applyTheme(theme, accent), [theme, accent]);
   // Inspector data is cached per chat: opening another chat's panel shows ITS
@@ -4952,15 +5223,10 @@ function Main({ storage, storageKind, storageFailed }) {
   }
   // Append a memory to a chat's store, stamped with atLen (the chat's current
   // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat).
-  const pushMemory = (c, text) => {
-    const store = addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP);
-    const memories = store.memories.slice();
-    if (memories.length)
-      memories[memories.length - 1] = { ...memories[memories.length - 1],
-        atLen: getActivePath(c.messages, c.activeLeafId).length };
-    return { ...store, memories };
-  };
+  // timestamp (see rewindChat). Stamped at creation (see addMemory).
+  const pushMemory = (c, text) =>
+    addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
+      getActivePath(c.messages, c.activeLeafId).length);
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -5081,6 +5347,22 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
+    // Leaf regenerate: roll back tool pieces the replaced swipe created BEFORE
+    // generating — the new take must be written against the rolled-back state
+    // (pruning afterwards would rip context out from under the swipe that was
+    // just generated with the piece in its prompt). Stashed so a generation
+    // that produces nothing can restore them (discardEmptySwipe).
+    let prunedTools = null;
+    if (!fresh && !continuation && node
+        && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
+      const pruned = pruneToolPieces(chatObj, nodeId);
+      if (pruned.lorePieces.length !== (chatObj.lorePieces?.length ?? 0)) {
+        prunedTools = (chatObj.lorePieces ?? []).filter(p => p?.createdBy === nodeId);
+        chatObj = { ...pruned, updatedAt: Date.now() };
+        upsertChat(chatObj.id, chatObj);
+        ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
+      }
+    }
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -5092,6 +5374,13 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticWarning = null;
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
+    // All of prep runs outside the stream's try/finally below: a throw here
+    // (hostile imported data reaching mergedLorePieces/assemblePrompt) must
+    // still release the generation slot and drop the empty swipe, or the UI
+    // wedges in "generating" until reload. Handled at the abort check below.
+    let prepError = null;
+    let messages = null, man = null; // declared outside the prep try — used by the stream below
+    try {
     if (st.embeddingModel) {
       const smartPieces = mergedLorePieces(scen, chatObj, gchars).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
@@ -5115,11 +5404,11 @@ function Main({ storage, storageKind, storageFailed }) {
         }
       }
     }
-    let { messages, manifest: man } = assemblePrompt({
+    ({ messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
       platformPrompt: buildPlatformPrompt(st),
       preActivated, pov, characters: gchars,
-    });
+    }));
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
     // Exact-count overflow guard: the assembler budgets on char estimates,
@@ -5157,6 +5446,7 @@ function Main({ storage, storageKind, storageFailed }) {
           man.warnings.push(`Fixed layers alone use ~${headTok} exact tokens, over the ${man.budget}-token prompt budget — shrink backstory/lore/memory or raise the context length.`);
       }
     }
+    } catch (e) { prepError = e; }
     // (Abort-during-prep check lives just before the stream loop, after
     // discardEmptySwipe is defined — Stop during prep must not leak the
     // empty swipe/fresh node the caller already created.)
@@ -5219,7 +5509,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const attachProbs = () => {
       let spans = null;
       if (probMap && rawAcc != null)
-        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape, probMap.map, baseText.length, acc.slice(baseText.length));
+        // stripToolBlocksMapped's map is slice-relative; rebase to absolute
+        // raw-reply indices (alignStrippedToolSpans reads inv[rawOffset + i]).
+        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape,
+          probMap.map.map(j => j + baseText.length), baseText.length, acc.slice(baseText.length));
       if (!spans) spans = alignTokensToSpans(acc.slice(baseText.length), lpTape);
       spans = [...baseSpans, ...spans];
       if (spans.some(s => s.logprob != null)) applyText(acc, spans);
@@ -5235,14 +5528,22 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
+      // The generation produced nothing — restore any tool pieces rolled back
+      // before it started, or a failed/empty retry would destroy the replaced
+      // take's effects while the take itself survives.
+      let base = cur;
+      if (prunedTools?.length) {
+        const missing = prunedTools.filter(p => !(cur.lorePieces ?? []).some(q => q.id === p.id));
+        if (missing.length) base = { ...cur, lorePieces: [...(cur.lorePieces ?? []), ...missing] };
+      }
       if (n.swipes.length > 1) {
         const swipes = n.swipes.slice(0, -1);
-        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+        work = { ...base, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
         upsertChat(work.id, work);
       } else if (fresh) {
         const messages = { ...work.messages };
         delete messages[nodeId];
-        work = { ...cur, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
+        work = { ...base, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
         upsertChat(work.id, work);
       }
     };
@@ -5250,6 +5551,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // streaming — and discard the empty swipe/fresh node the caller already
     // created, or Stop during prep leaks it into the tree.
     if (abort.signal.aborted) { discardEmptySwipe(); genRef.current = null; setGenerating(null); return; }
+    if (prepError) {
+      console.warn('FictionPad: generation prep failed:', prepError);
+      setError(`Generation failed: ${describeApiError(prepError)}`);
+      discardEmptySwipe(); genRef.current = null; setGenerating(null); return;
+    }
     setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
     let sawDone = false; // a chunk with finish_reason arrived (clean finish)
@@ -5319,16 +5625,16 @@ function Main({ storage, storageKind, storageFailed }) {
         if (next === base) { work = base; return true; }
         work = { ...next, updatedAt: Date.now() };
         upsertChat(work.id, work);
+        // React flushes this write only AFTER the finally completes — reflect
+        // it in ref immediately, or later same-finally reads (speaker
+        // attribution, the tool-only placeholder) rebuild from the pre-tool
+        // snapshot and silently drop the pieces the tools just wrote.
+        ref.current.chats = { ...ref.current.chats, [work.id]: work };
         return true;
       };
-      // Regenerate hygiene: a successful regeneration replaces the previous
-      // swipe — drop tool-written pieces it created, but ONLY when nothing
-      // follows this node in the tree (mid-tree regenerates keep them: later
-      // messages may rely on them). Runs even with tools toggled off — the
-      // old swipe's pieces were written when they were on.
-      if (acc && !fresh && !continuation
-          && !Object.values(work.messages).some(m => m.parentId === nodeId))
-        commit((c) => pruneToolPieces(c, nodeId));
+      // (Regenerate hygiene: tool pieces the replaced swipe created were
+      // already rolled back BEFORE this generation started — see the top of
+      // runGeneration. Restored by discardEmptySwipe when nothing is produced.)
       if (acc && st.toolsEnabled !== false) {
         // Continuation: parse ONLY the new slice — tool blocks in the base
         // text were already executed by its own generation, and the base
@@ -5458,13 +5764,24 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- chat input / slash commands ----
+  // Generation entry guard: callers append the target swipe/node BEFORE
+  // calling runGeneration, so a late "not configured" bail would leak an
+  // empty bubble into the tree. Check before writing anything.
+  const generationReady = (c) => {
+    const st = ref.current.settings;
+    if (st.endpoint && (c?.settings?.model || st.model)) return true;
+    setError('Configure an endpoint and chat model in Settings first.');
+    return false;
+  };
   function sendUserMessage(c, content) {
+    if (!generationReady(c)) return;
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
     upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
     runGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
+    if (!generationReady(c)) return;
     const path = getActivePath(c.messages, c.activeLeafId);
     const last = path[path.length - 1];
     if (last?.role === 'assistant' && activeText(last)) {
@@ -5500,6 +5817,7 @@ function Main({ storage, storageKind, storageFailed }) {
         const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
+        if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
         runGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
@@ -5629,7 +5947,7 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onRegenerate = (nodeId) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current) return;
+    if (!n || genRef.current || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
@@ -5643,7 +5961,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!n || genRef.current) return;
     const src = n.swipes[n.activeSwipe];
     const toks = src?.tokens;
-    if (!toks?.length) return;
+    if (!toks?.length || !generationReady(c)) return;
     const keep = toks.slice(0, alt == null ? tokIdx + 1 : tokIdx);
     const prefix = keep.map(t => t.text).join('') + (alt ?? '');
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
@@ -5656,12 +5974,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n) return;
     const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } });
+    // touch: false — browsing swipes changes no tree state; the chat must not
+    // re-sort to the top of the sidebar.
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, { touch: false });
   };
   const onSwipeTo = (nodeId, idx) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n || idx < 0 || idx >= n.swipes.length) return;
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } });
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, { touch: false });
   };
   const onBranch = (nodeId) => {
     const c = ref.current.chats[ui.chatId];
@@ -5711,8 +6031,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = newChat({ scenario: scen, character: char, personaId: pid, dateFormat: settings?.dateFormat });
     upsertChat(c.id, c);
     setUi(u => (scen
-      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null }
-      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id }));
+      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null, ...(isMobile ? { sidebarCollapsed: true } : {}) }
+      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id, ...(isMobile ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
   const onDeleteCharacter = (id) => {
@@ -5737,7 +6057,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // calls create sibling assistant branches — same semantics as swipes.
   const onGenerateReply = (nodeId = null) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current) return;
+    if (!c || genRef.current || !generationReady(c)) return;
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
@@ -5746,8 +6066,17 @@ function Main({ storage, storageKind, storageFailed }) {
   };
 
   // ---- export / import ----
-  const onExportScenario = (id) =>
-    downloadJSON(`fictionpad-scenario-${scenarios[id]?.name ?? id}.json`, { type: 'fictionpad-scenario', version: 1, data: scenarios[id] });
+  // A scenario export is a BUNDLE: the scenario plus its linked global
+  // characters (scenario.characterIds), so the file works standalone on
+  // import. The legacy single-scenario type stays importable (below).
+  const onExportScenario = (id) => {
+    const s = scenarios[id];
+    if (!s) return;
+    downloadJSON(`fictionpad-scenario-${s.name ?? id}.json`, {
+      type: 'fictionpad-scenario-bundle', version: 1,
+      data: { scenario: s, characters: (s.characterIds ?? []).map(cid => characters[cid]).filter(Boolean) },
+    });
+  };
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
   const onExportCharacter = (id) =>
@@ -5757,8 +6086,18 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!obj) return;
     if (obj.__error) return setError(`Import failed: ${obj.__error}`);
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
+      // Legacy single-scenario export: fresh id, never clobbers an existing one.
       const s = { ...obj.data, id: uid() };
       upsertScenario(s.id, s);
+      setUi(u => ({ ...u, scenarioId: s.id }));
+    } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
+      // Bundle: upsert scenario + linked characters by id (last write wins,
+      // same as the migration helpers).
+      const s = obj.data.scenario;
+      if (!s.id) s.id = uid();
+      upsertScenario(s.id, s);
+      for (const ch of obj.data.characters ?? [])
+        if (ch?.id && ch.name != null) upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
       const ch = { ...obj.data, id: uid() };
@@ -5771,8 +6110,68 @@ function Main({ storage, storageKind, storageFailed }) {
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export.');
+      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export. Full backups import via Settings → Connection.');
     }
+  };
+
+  // ---- full backup (Settings → Connection): everything in one JSON ----
+  // serverToken is per-device and NEVER leaves the machine — stripped here on
+  // export and ignored on import (same rule as the Meta/app.settings sync).
+  const onExportAll = () => {
+    const { serverToken, ...rest } = settingsRaw ?? {};
+    downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
+      type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
+      data: { scenarios, chats, personas, characters, settings: rest },
+    });
+  };
+  // Upserts everything by id (last write wins — entities absent from the file
+  // are kept). Returns { note, settings } for the Settings modal, null when
+  // the picker was cancelled; throws on invalid input.
+  const onImportAll = async () => {
+    const obj = await pickJSONFile();
+    if (!obj) return null;
+    if (obj.__error) throw new Error(`not valid JSON (${obj.__error})`);
+    if (obj.type !== 'fictionpad-backup' || !obj.data || typeof obj.data !== 'object')
+      throw new Error('not a FictionPad backup file (expected type "fictionpad-backup") — scenario/character/chat files import from the sidebar instead.');
+    const d = obj.data;
+    const counts = { scenarios: 0, chats: 0, characters: 0, personas: 0 };
+    for (const s of Object.values(d.scenarios ?? {}))
+      if (s?.id && s.name != null) { upsertScenario(s.id, s); counts.scenarios++; }
+    // Chats upsert through the same path as normal edits, so importing over
+    // the currently open chat replaces the live copy instead of forking state.
+    for (const c of Object.values(d.chats ?? {}))
+      if (c?.id && c.messages) { upsertChat(c.id, c); counts.chats++; }
+    for (const ch of Object.values(d.characters ?? {}))
+      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, ch); counts.characters++; }
+    for (const p of Object.values(d.personas ?? {}))
+      if (p?.id && p.name != null) { upsertPersona(p.id, p); counts.personas++; }
+    let applied = null;
+    if (d.settings && typeof d.settings === 'object') {
+      const { serverToken, ...rest } = d.settings; // any serverToken in the file is dropped
+      applied = rest;
+      // One setSettings commit → the settings-sync effect uploads it once.
+      setSettings(prev => ({ ...rest, serverToken: prev?.serverToken ?? '' }));
+    }
+    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`);
+    if (applied) parts.push('settings');
+    return { note: `Imported ${parts.join(', ')}.`, settings: applied };
+  };
+  // Server .db backup: fetch (anchor navigation can't send the Bearer header),
+  // then save the blob under the server's Content-Disposition filename. On a
+  // Basic-auth deployment a stale Bearer earns a 401 — retry bare so the
+  // browser's cached Basic creds take over (mirrors ServerDBAdapter).
+  const onServerBackup = async () => {
+    const tok = ref.current.settings.serverToken ?? '';
+    let res = await fetch('/backup', { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
+    if (res.status === 401 && tok) res = await fetch('/backup');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const m = (res.headers.get('Content-Disposition') ?? '').match(/filename="([^"]+)"/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m?.[1] ?? 'fictionpad-backup.db';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   };
 
   const onPreview = (chatId = ui.chatId) => {
@@ -5785,7 +6184,11 @@ function Main({ storage, storageKind, storageFailed }) {
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: { ...st, contextLength: c.settings?.contextLength ?? st.contextLength },
+      chat: c, settings: { ...st,
+        // Match runGeneration's merge: both per-chat overrides shadow the
+        // globals, or the preview's budget/reserve disagree with real sends.
+        contextLength: c.settings?.contextLength ?? st.contextLength,
+        maxTokens: c.settings?.maxTokens ?? st.maxTokens },
       platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });
@@ -5859,7 +6262,9 @@ function Main({ storage, storageKind, storageFailed }) {
         selectedScenarioId=${ui.scenarioId} selectedCharacterId=${ui.characterId ?? null} selectedChatId=${ui.chatId}
         onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
         onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
-        onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id }))}
+        onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id,
+          // On phones the sidebar is an overlay — close it so the chat shows.
+          ...(isMobile ? { sidebarCollapsed: true } : {}) }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
@@ -5938,6 +6343,7 @@ function Main({ storage, storageKind, storageFailed }) {
         accent=${accent} onAccentChange=${setAccent} initialDraft=${settingsDraft}
         onOpenLogitBias=${(draft) => { setSettingsDraft(draft ?? null); setModal({ kind: 'logitBias' }); }}
         storageKind=${storageKind} onUpload=${migrateUpload} onDownload=${migrateDownload}
+        onExportAll=${onExportAll} onImportAll=${onImportAll} onServerBackup=${onServerBackup}
         onSave=${(s) => { setSettingsDraft(null); setSettings(prev => ({ ...s, logitBias: prev?.logitBias ?? s.logitBias ?? {} })); setModal(null); }}
         onClose=${() => { setSettingsDraft(null); setModal(null); }} /><//>`}
     ${modal?.kind === 'logitBias' && html`

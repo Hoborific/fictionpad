@@ -9,8 +9,12 @@ const COMPOSER_COMMANDS = [
   ['/theme NAME', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId }) {
-  const [text, setText] = useState('');
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft }) {
+  // Draft text seeds from ChatPane's per-chat drafts store (this component
+  // remounts per chat via key=chat.id) and every edit is reported back through
+  // onDraft, so an unsent draft survives chat switches within the session.
+  const [text, setTextRaw] = useState(() => initialText ?? '');
+  const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
   useEffect(() => {
     if (!inject) return;

@@ -50,6 +50,9 @@ function expandSamplerParams(samplers) {
   for (const [key, val] of Object.entries(samplers ?? {})) {
     if (val == null) continue;
     const parts = key.split('.').filter(Boolean);
+    // Never walk into the prototype chain — a user-typed or imported key like
+    // `__proto__.x` would otherwise pollute Object.prototype for the session.
+    if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) continue;
     if (parts.length <= 1) { out[key] = val; continue; }
     let node = out;
     for (let i = 0; i < parts.length - 1; i++) {
@@ -335,8 +338,12 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP) {
-  const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now }];
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null) {
+  // atLen is stamped at creation, before eviction: in an all-pinned full store
+  // the incoming entry is the one dropped, and stamping after the fact would
+  // mis-tag an unrelated old memory's rewind position.
+  const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
+    ...(Number.isFinite(atLen) ? { atLen } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -740,10 +747,19 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!content) return fail('add_lore: content required');
     const keys = (Array.isArray(args.keys) ? args.keys : [])
       .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
-    const existing = pieces.find(p => (p.type ?? 'lore') === 'lore'
+    // Dedupe by title across EVERYTHING the caller can see (same rationale as
+    // register_character above) — a same-titled scenario/global piece would
+    // otherwise be duplicated in the merged view and injected twice.
+    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
+    const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
-    if (existing)
+    if (existing && pieces.some(p => p.id === existing.id))
       return save(pieces.map(p => p.id === existing.id ? { ...p, content, ...(keys.length ? { keys } : {}) } : p),
+        `updated lore "${title}"`);
+    if (existing)
+      // Match lives outside the chat overlay: shadow it via an overlay copy
+      // (fresh provenance → rewind drops the shadow again).
+      return save([...pieces, { ...existing, ...provenance, content, ...(keys.length ? { keys } : {}) }],
         `updated lore "${title}"`);
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
@@ -810,7 +826,7 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters are in the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line. Give each character at most one part per reply.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all.`;
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also

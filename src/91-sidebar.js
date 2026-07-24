@@ -33,7 +33,18 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   // The open chat is always pinned into the list — even when the scenario/
   // character filter would exclude it (chat opened first, filter changed after).
   const baseChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
-  const shownChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
+  const pinnedChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
+  // Chat filter: case-insensitive substring on the chat name, its scenario's
+  // name, or any linked character's name. Non-empty filter ignores the
+  // section's collapse state; empty filter = the pinned view above, untouched.
+  const [chatFilter, setChatFilter] = useState('');
+  const chatQuery = chatFilter.trim().toLowerCase();
+  const shownChats = chatQuery
+    ? chatList.filter(c =>
+        (c.name ?? '').toLowerCase().includes(chatQuery)
+        || (scenarios[c.scenarioId]?.name ?? '').toLowerCase().includes(chatQuery)
+        || (c.characterIds ?? []).some(id => (characters?.[id]?.name ?? '').toLowerCase().includes(chatQuery)))
+    : pinnedChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
@@ -104,7 +115,12 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         </div>
         <div class="side-section">
           ${sectionTitle('chats', `Chats${(selectedScenarioId || selectedCharacterId) ? '' : ' (all)'}`, null, null)}
-          ${shownChats.length === 0 && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
+          <input type="text" placeholder="Filter chats…" value=${chatFilter}
+            onInput=${(e) => setChatFilter(e.target.value)}
+            style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
+          ${shownChats.length === 0 && chatQuery
+            && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats match.</div>`}
+          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
           ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => {

@@ -854,6 +854,10 @@ section('sampler param expansion');
   ok(!('a' in skipped) && !('b' in skipped) && skipped.c === 1, 'null/undefined dropped');
   ok(expandSamplerParams({ 'a.b': 1, a: 5 }).a === 5, 'flat/dotted collision last-write-wins');
   ok(expandSamplerParams(null) && Object.keys(expandSamplerParams(null)).length === 0, 'null input → empty');
+  // Hostile keys: prototype-chain segments are skipped entirely
+  const hostile = expandSamplerParams({ '__proto__.polluted': 1, 'a.__proto__.b': 2, 'constructor.x': 3, ok: 4 });
+  ok(Object.keys(hostile).join(',') === 'ok' && ({}).polluted === undefined && Object.prototype.polluted === undefined,
+    '__proto__/constructor/prototype segments rejected, no pollution');
 }
 
 // ---- rewind: position-based (atLen) cutoff ----
@@ -960,6 +964,23 @@ section('register_character cross-origin dedupe');
   const r2 = applyToolCalls(r.chat, [{ name: 'register_character', args: { name: 'VEX', description: 'third' } }]);
   ok(r2.chat.lorePieces.length === 1 && r2.chat.lorePieces[0].content === 'third',
     'old call shape still dedupes inside the overlay');
+}
+
+// ---- add_lore dedupe across all pieces ----
+section('add_lore cross-origin dedupe');
+{
+  const scenLore = lore({ id: 'SL1', title: 'The Ash Gate', content: 'scenario text', keys: ['gate'] });
+  const chat = { ...baseChat, lorePieces: [] };
+  const allPieces = [scenLore];
+  const r = applyToolCalls(chat, [{ name: 'add_lore', args: { title: 'the ash gate', content: 'updated text' } }], {}, allPieces);
+  ok(r.results[0].ok && r.results[0].note.startsWith('updated'), 'scenario-level lore match reported as an update');
+  ok(r.chat.lorePieces.length === 1 && r.chat.lorePieces[0].id === 'SL1' && r.chat.lorePieces[0].content === 'updated text',
+    'scenario lore shadowed via the chat overlay — no duplicate');
+  const merged = mergedLorePieces({ ...baseScenario, lorePieces: [scenLore] }, r.chat);
+  ok(merged.filter(p => (p.title ?? '').trim().toLowerCase() === 'the ash gate').length === 1,
+    'merged view keeps a single piece for the title');
+  ok(Number.isFinite(r.chat.lorePieces[0].createdAt) && 'createdBy' in r.chat.lorePieces[0],
+    'lore shadow copy carries fresh provenance');
 }
 
 // ---- memory render order ----

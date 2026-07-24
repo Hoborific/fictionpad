@@ -81,7 +81,7 @@ function Main({ storage, storageKind, storageFailed }) {
     storage.set('Meta', SETTINGS_SYNC_KEY, rest);
   }, [settingsRaw, storageKind]);
   const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
-  const [theme, setTheme] = usePersistentState('fictionpad.theme', 'miku');
+  const [theme, setTheme] = usePersistentState('fictionpad.theme', 'defaultTheme');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
   useEffect(() => applyTheme(theme, accent), [theme, accent]);
   // Inspector data is cached per chat: opening another chat's panel shows ITS
@@ -384,15 +384,10 @@ function Main({ storage, storageKind, storageFailed }) {
   }
   // Append a memory to a chat's store, stamped with atLen (the chat's current
   // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat).
-  const pushMemory = (c, text) => {
-    const store = addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP);
-    const memories = store.memories.slice();
-    if (memories.length)
-      memories[memories.length - 1] = { ...memories[memories.length - 1],
-        atLen: getActivePath(c.messages, c.activeLeafId).length };
-    return { ...store, memories };
-  };
+  // timestamp (see rewindChat). Stamped at creation (see addMemory).
+  const pushMemory = (c, text) =>
+    addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
+      getActivePath(c.messages, c.activeLeafId).length);
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -513,6 +508,22 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
+    // Leaf regenerate: roll back tool pieces the replaced swipe created BEFORE
+    // generating — the new take must be written against the rolled-back state
+    // (pruning afterwards would rip context out from under the swipe that was
+    // just generated with the piece in its prompt). Stashed so a generation
+    // that produces nothing can restore them (discardEmptySwipe).
+    let prunedTools = null;
+    if (!fresh && !continuation && node
+        && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
+      const pruned = pruneToolPieces(chatObj, nodeId);
+      if (pruned.lorePieces.length !== (chatObj.lorePieces?.length ?? 0)) {
+        prunedTools = (chatObj.lorePieces ?? []).filter(p => p?.createdBy === nodeId);
+        chatObj = { ...pruned, updatedAt: Date.now() };
+        upsertChat(chatObj.id, chatObj);
+        ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
+      }
+    }
     // The node being generated is excluded from the prompt unless continuing it.
     const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
@@ -524,6 +535,13 @@ function Main({ storage, storageKind, storageFailed }) {
     let semanticWarning = null;
     let semanticReport = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
+    // All of prep runs outside the stream's try/finally below: a throw here
+    // (hostile imported data reaching mergedLorePieces/assemblePrompt) must
+    // still release the generation slot and drop the empty swipe, or the UI
+    // wedges in "generating" until reload. Handled at the abort check below.
+    let prepError = null;
+    let messages = null, man = null; // declared outside the prep try — used by the stream below
+    try {
     if (st.embeddingModel) {
       const smartPieces = mergedLorePieces(scen, chatObj, gchars).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
       const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
@@ -547,11 +565,11 @@ function Main({ storage, storageKind, storageFailed }) {
         }
       }
     }
-    let { messages, manifest: man } = assemblePrompt({
+    ({ messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
       platformPrompt: buildPlatformPrompt(st),
       preActivated, pov, characters: gchars,
-    });
+    }));
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
     // Exact-count overflow guard: the assembler budgets on char estimates,
@@ -589,6 +607,7 @@ function Main({ storage, storageKind, storageFailed }) {
           man.warnings.push(`Fixed layers alone use ~${headTok} exact tokens, over the ${man.budget}-token prompt budget — shrink backstory/lore/memory or raise the context length.`);
       }
     }
+    } catch (e) { prepError = e; }
     // (Abort-during-prep check lives just before the stream loop, after
     // discardEmptySwipe is defined — Stop during prep must not leak the
     // empty swipe/fresh node the caller already created.)
@@ -651,7 +670,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const attachProbs = () => {
       let spans = null;
       if (probMap && rawAcc != null)
-        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape, probMap.map, baseText.length, acc.slice(baseText.length));
+        // stripToolBlocksMapped's map is slice-relative; rebase to absolute
+        // raw-reply indices (alignStrippedToolSpans reads inv[rawOffset + i]).
+        spans = alignStrippedToolSpans(rawAcc.slice(baseText.length), lpTape,
+          probMap.map.map(j => j + baseText.length), baseText.length, acc.slice(baseText.length));
       if (!spans) spans = alignTokensToSpans(acc.slice(baseText.length), lpTape);
       spans = [...baseSpans, ...spans];
       if (spans.some(s => s.logprob != null)) applyText(acc, spans);
@@ -667,14 +689,22 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
+      // The generation produced nothing — restore any tool pieces rolled back
+      // before it started, or a failed/empty retry would destroy the replaced
+      // take's effects while the take itself survives.
+      let base = cur;
+      if (prunedTools?.length) {
+        const missing = prunedTools.filter(p => !(cur.lorePieces ?? []).some(q => q.id === p.id));
+        if (missing.length) base = { ...cur, lorePieces: [...(cur.lorePieces ?? []), ...missing] };
+      }
       if (n.swipes.length > 1) {
         const swipes = n.swipes.slice(0, -1);
-        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+        work = { ...base, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
         upsertChat(work.id, work);
       } else if (fresh) {
         const messages = { ...work.messages };
         delete messages[nodeId];
-        work = { ...cur, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
+        work = { ...base, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
         upsertChat(work.id, work);
       }
     };
@@ -682,6 +712,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // streaming — and discard the empty swipe/fresh node the caller already
     // created, or Stop during prep leaks it into the tree.
     if (abort.signal.aborted) { discardEmptySwipe(); genRef.current = null; setGenerating(null); return; }
+    if (prepError) {
+      console.warn('FictionPad: generation prep failed:', prepError);
+      setError(`Generation failed: ${describeApiError(prepError)}`);
+      discardEmptySwipe(); genRef.current = null; setGenerating(null); return;
+    }
     setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
     let sawDone = false; // a chunk with finish_reason arrived (clean finish)
@@ -751,16 +786,16 @@ function Main({ storage, storageKind, storageFailed }) {
         if (next === base) { work = base; return true; }
         work = { ...next, updatedAt: Date.now() };
         upsertChat(work.id, work);
+        // React flushes this write only AFTER the finally completes — reflect
+        // it in ref immediately, or later same-finally reads (speaker
+        // attribution, the tool-only placeholder) rebuild from the pre-tool
+        // snapshot and silently drop the pieces the tools just wrote.
+        ref.current.chats = { ...ref.current.chats, [work.id]: work };
         return true;
       };
-      // Regenerate hygiene: a successful regeneration replaces the previous
-      // swipe — drop tool-written pieces it created, but ONLY when nothing
-      // follows this node in the tree (mid-tree regenerates keep them: later
-      // messages may rely on them). Runs even with tools toggled off — the
-      // old swipe's pieces were written when they were on.
-      if (acc && !fresh && !continuation
-          && !Object.values(work.messages).some(m => m.parentId === nodeId))
-        commit((c) => pruneToolPieces(c, nodeId));
+      // (Regenerate hygiene: tool pieces the replaced swipe created were
+      // already rolled back BEFORE this generation started — see the top of
+      // runGeneration. Restored by discardEmptySwipe when nothing is produced.)
       if (acc && st.toolsEnabled !== false) {
         // Continuation: parse ONLY the new slice — tool blocks in the base
         // text were already executed by its own generation, and the base
@@ -890,13 +925,24 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- chat input / slash commands ----
+  // Generation entry guard: callers append the target swipe/node BEFORE
+  // calling runGeneration, so a late "not configured" bail would leak an
+  // empty bubble into the tree. Check before writing anything.
+  const generationReady = (c) => {
+    const st = ref.current.settings;
+    if (st.endpoint && (c?.settings?.model || st.model)) return true;
+    setError('Configure an endpoint and chat model in Settings first.');
+    return false;
+  };
   function sendUserMessage(c, content) {
+    if (!generationReady(c)) return;
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
     upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
     runGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
+    if (!generationReady(c)) return;
     const path = getActivePath(c.messages, c.activeLeafId);
     const last = path[path.length - 1];
     if (last?.role === 'assistant' && activeText(last)) {
@@ -932,6 +978,7 @@ function Main({ storage, storageKind, storageFailed }) {
         const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
         const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
           ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
+        if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
         runGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
@@ -1061,7 +1108,7 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onRegenerate = (nodeId) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current) return;
+    if (!n || genRef.current || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
@@ -1075,7 +1122,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!n || genRef.current) return;
     const src = n.swipes[n.activeSwipe];
     const toks = src?.tokens;
-    if (!toks?.length) return;
+    if (!toks?.length || !generationReady(c)) return;
     const keep = toks.slice(0, alt == null ? tokIdx + 1 : tokIdx);
     const prefix = keep.map(t => t.text).join('') + (alt ?? '');
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
@@ -1088,12 +1135,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n) return;
     const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } });
+    // touch: false — browsing swipes changes no tree state; the chat must not
+    // re-sort to the top of the sidebar.
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, { touch: false });
   };
   const onSwipeTo = (nodeId, idx) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n || idx < 0 || idx >= n.swipes.length) return;
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } });
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, { touch: false });
   };
   const onBranch = (nodeId) => {
     const c = ref.current.chats[ui.chatId];
@@ -1143,8 +1192,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = newChat({ scenario: scen, character: char, personaId: pid, dateFormat: settings?.dateFormat });
     upsertChat(c.id, c);
     setUi(u => (scen
-      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null }
-      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id }));
+      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null, ...(isMobile ? { sidebarCollapsed: true } : {}) }
+      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id, ...(isMobile ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
   const onDeleteCharacter = (id) => {
@@ -1169,7 +1218,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // calls create sibling assistant branches — same semantics as swipes.
   const onGenerateReply = (nodeId = null) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current) return;
+    if (!c || genRef.current || !generationReady(c)) return;
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
@@ -1178,8 +1227,17 @@ function Main({ storage, storageKind, storageFailed }) {
   };
 
   // ---- export / import ----
-  const onExportScenario = (id) =>
-    downloadJSON(`fictionpad-scenario-${scenarios[id]?.name ?? id}.json`, { type: 'fictionpad-scenario', version: 1, data: scenarios[id] });
+  // A scenario export is a BUNDLE: the scenario plus its linked global
+  // characters (scenario.characterIds), so the file works standalone on
+  // import. The legacy single-scenario type stays importable (below).
+  const onExportScenario = (id) => {
+    const s = scenarios[id];
+    if (!s) return;
+    downloadJSON(`fictionpad-scenario-${s.name ?? id}.json`, {
+      type: 'fictionpad-scenario-bundle', version: 1,
+      data: { scenario: s, characters: (s.characterIds ?? []).map(cid => characters[cid]).filter(Boolean) },
+    });
+  };
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
   const onExportCharacter = (id) =>
@@ -1189,8 +1247,18 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!obj) return;
     if (obj.__error) return setError(`Import failed: ${obj.__error}`);
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
+      // Legacy single-scenario export: fresh id, never clobbers an existing one.
       const s = { ...obj.data, id: uid() };
       upsertScenario(s.id, s);
+      setUi(u => ({ ...u, scenarioId: s.id }));
+    } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
+      // Bundle: upsert scenario + linked characters by id (last write wins,
+      // same as the migration helpers).
+      const s = obj.data.scenario;
+      if (!s.id) s.id = uid();
+      upsertScenario(s.id, s);
+      for (const ch of obj.data.characters ?? [])
+        if (ch?.id && ch.name != null) upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
       const ch = { ...obj.data, id: uid() };
@@ -1203,8 +1271,68 @@ function Main({ storage, storageKind, storageFailed }) {
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export.');
+      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export. Full backups import via Settings → Connection.');
     }
+  };
+
+  // ---- full backup (Settings → Connection): everything in one JSON ----
+  // serverToken is per-device and NEVER leaves the machine — stripped here on
+  // export and ignored on import (same rule as the Meta/app.settings sync).
+  const onExportAll = () => {
+    const { serverToken, ...rest } = settingsRaw ?? {};
+    downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
+      type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
+      data: { scenarios, chats, personas, characters, settings: rest },
+    });
+  };
+  // Upserts everything by id (last write wins — entities absent from the file
+  // are kept). Returns { note, settings } for the Settings modal, null when
+  // the picker was cancelled; throws on invalid input.
+  const onImportAll = async () => {
+    const obj = await pickJSONFile();
+    if (!obj) return null;
+    if (obj.__error) throw new Error(`not valid JSON (${obj.__error})`);
+    if (obj.type !== 'fictionpad-backup' || !obj.data || typeof obj.data !== 'object')
+      throw new Error('not a FictionPad backup file (expected type "fictionpad-backup") — scenario/character/chat files import from the sidebar instead.');
+    const d = obj.data;
+    const counts = { scenarios: 0, chats: 0, characters: 0, personas: 0 };
+    for (const s of Object.values(d.scenarios ?? {}))
+      if (s?.id && s.name != null) { upsertScenario(s.id, s); counts.scenarios++; }
+    // Chats upsert through the same path as normal edits, so importing over
+    // the currently open chat replaces the live copy instead of forking state.
+    for (const c of Object.values(d.chats ?? {}))
+      if (c?.id && c.messages) { upsertChat(c.id, c); counts.chats++; }
+    for (const ch of Object.values(d.characters ?? {}))
+      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, ch); counts.characters++; }
+    for (const p of Object.values(d.personas ?? {}))
+      if (p?.id && p.name != null) { upsertPersona(p.id, p); counts.personas++; }
+    let applied = null;
+    if (d.settings && typeof d.settings === 'object') {
+      const { serverToken, ...rest } = d.settings; // any serverToken in the file is dropped
+      applied = rest;
+      // One setSettings commit → the settings-sync effect uploads it once.
+      setSettings(prev => ({ ...rest, serverToken: prev?.serverToken ?? '' }));
+    }
+    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`);
+    if (applied) parts.push('settings');
+    return { note: `Imported ${parts.join(', ')}.`, settings: applied };
+  };
+  // Server .db backup: fetch (anchor navigation can't send the Bearer header),
+  // then save the blob under the server's Content-Disposition filename. On a
+  // Basic-auth deployment a stale Bearer earns a 401 — retry bare so the
+  // browser's cached Basic creds take over (mirrors ServerDBAdapter).
+  const onServerBackup = async () => {
+    const tok = ref.current.settings.serverToken ?? '';
+    let res = await fetch('/backup', { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
+    if (res.status === 401 && tok) res = await fetch('/backup');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const m = (res.headers.get('Content-Disposition') ?? '').match(/filename="([^"]+)"/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m?.[1] ?? 'fictionpad-backup.db';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   };
 
   const onPreview = (chatId = ui.chatId) => {
@@ -1217,7 +1345,11 @@ function Main({ storage, storageKind, storageFailed }) {
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
-      chat: c, settings: { ...st, contextLength: c.settings?.contextLength ?? st.contextLength },
+      chat: c, settings: { ...st,
+        // Match runGeneration's merge: both per-chat overrides shadow the
+        // globals, or the preview's budget/reserve disagree with real sends.
+        contextLength: c.settings?.contextLength ?? st.contextLength,
+        maxTokens: c.settings?.maxTokens ?? st.maxTokens },
       platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });
@@ -1291,7 +1423,9 @@ function Main({ storage, storageKind, storageFailed }) {
         selectedScenarioId=${ui.scenarioId} selectedCharacterId=${ui.characterId ?? null} selectedChatId=${ui.chatId}
         onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
         onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
-        onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id }))}
+        onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id,
+          // On phones the sidebar is an overlay — close it so the chat shows.
+          ...(isMobile ? { sidebarCollapsed: true } : {}) }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
@@ -1370,6 +1504,7 @@ function Main({ storage, storageKind, storageFailed }) {
         accent=${accent} onAccentChange=${setAccent} initialDraft=${settingsDraft}
         onOpenLogitBias=${(draft) => { setSettingsDraft(draft ?? null); setModal({ kind: 'logitBias' }); }}
         storageKind=${storageKind} onUpload=${migrateUpload} onDownload=${migrateDownload}
+        onExportAll=${onExportAll} onImportAll=${onImportAll} onServerBackup=${onServerBackup}
         onSave=${(s) => { setSettingsDraft(null); setSettings(prev => ({ ...s, logitBias: prev?.logitBias ?? s.logitBias ?? {} })); setModal(null); }}
         onClose=${() => { setSettingsDraft(null); setModal(null); }} /><//>`}
     ${modal?.kind === 'logitBias' && html`

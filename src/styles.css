@@ -85,6 +85,27 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   border-left: 2px solid var(--c-border);
   padding: 4px 8px; margin-top: 4px;
   max-height: 220px; overflow-y: auto;
+  scrollbar-width: none; /* extent rail replaces the native scrollbar */
+}
+.think-body::-webkit-scrollbar { display: none; }
+/* Extent cues for the scrollable think body (native scrollbar auto-hides):
+   a bottom fade while more text remains, and a thin accent rail tracking
+   scroll position (thumb size = visible fraction, offset = scroll progress). */
+.think-body-wrap { position: relative; }
+.think-body-wrap .think-body { margin-top: 4px; }
+.think-body-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .think-body {
+  mask-image: linear-gradient(to bottom, black calc(100% - 16px), transparent);
+}
+.think-rail {
+  position: absolute; top: 2px; bottom: 2px; right: 1px; width: 3px;
+  border-radius: 2px; background: color-mix(in oklch, var(--c-border) 60%, transparent);
+  opacity: 0; transition: opacity 0.15s; pointer-events: none;
+}
+.think-body-wrap[data-scrollable="1"] .think-rail { opacity: 1; }
+.think-rail-thumb {
+  position: absolute; left: 0; right: 0;
+  top: calc(var(--th-off, 0) * 100%); height: calc(var(--th-frac, 1) * 100%);
+  border-radius: 2px; background: color-mix(in oklch, var(--c-accent) 55%, transparent);
 }
 
 /* ---------- sidebar (fixed overlay — consumes the slack margin, never shifts the chat column) ---------- */
@@ -197,6 +218,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 /* Multi-speaker segments: consecutive bubbles with a small speaker chip. */
 .msg .bubble + .bubble { margin-top: 6px; }
 .msg .bubble.seg { padding-top: 7px; }
+/* Reasoning bubble: visually auxiliary — dashed border, tighter padding, no
+   speaker chip. Sits ahead of the reply bubble(s) like a segment. */
+.msg .bubble.think-bubble { border-style: dashed; padding: 6px 14px; }
+.msg .bubble.think-bubble .think { margin-bottom: 0; }
 .msg .seg-who { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--c-faint); margin-bottom: 3px; }
 .msg .seg-who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
 .msg.user .bubble { background: color-mix(in oklch, var(--c-user) 9%, var(--c-bg-1)); }
@@ -251,6 +276,12 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .md > :last-child { margin-bottom: 0; }
 .msg .md pre { background: var(--c-bg-2); padding: 8px; border-radius: 6px; overflow-x: auto; }
 .msg .md code { background: var(--c-bg-2); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+/* Wide markdown elements: .chatlog clips overflow-x, so keep media inside the bubble. */
+.msg .md img, .msg .md video { max-width: 100%; border-radius: 6px; }
+.msg .md table { border-collapse: collapse; margin: 8px 0; }
+.msg .md th, .msg .md td { border: 1px solid var(--c-border); padding: 4px 10px; }
+.msg .md th { background: var(--c-bg-2); }
+.msg .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--c-accent); color: var(--c-dim); }
 .msg textarea.edit { width: 100%; min-height: 120px; margin-bottom: 6px; }
 .streaming-cursor::after { content: "▌"; color: var(--c-accent); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
