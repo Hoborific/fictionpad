@@ -129,6 +129,19 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .sidebar .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 .sidebar .foot { border-top: 1px solid var(--c-border); padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: flex; flex-wrap: wrap; gap: 4px; }
 .sidebar .foot .storage-hint { margin-left: auto; align-self: center; }
+.sidebar .foot .version { align-self: center; font-size: 11px; opacity: 0.65; }
+/* Edge-hover peek (desktop, settings.edgePeek): a thin hot zone at the screen
+   edge pops the collapsed pane out as a TEMPORARY overlay — the pane is the
+   normal fixed overlay rendered uncollapsed; pointer-leave closes it. */
+.pane-edge {
+  position: fixed; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
+  bottom: 0; width: 20px; z-index: 39; /* above chat content, under the panes (40) */
+}
+.pane-edge.left { left: 0; }
+.pane-edge.right { right: 0; }
+/* No resize handle on a peeked pane — a drag leaving the element would
+   pointer-leave it shut mid-resize. */
+.sidebar.peek .pane-handle, .drawer.peek .pane-handle { display: none; }
 /* Squished pane (tall-narrow windows): split the foot into two tidy rows —
    the buttons share row one evenly, the storage hint gets row two — instead
    of wrapping mid-cluster. */
@@ -157,6 +170,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   display: block; font-size: 11px; font-style: italic; opacity: 0.75;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.sidebar .chat-search::placeholder { opacity: 0.55; }
 
 /* ---------- right drawer (Inspector / Memory) — mirrors the left sidebar:
    fixed overlay consuming the slack margin, drag-resizable on its left edge,

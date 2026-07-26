@@ -46,3 +46,7 @@ marked.use({
   },
 });
 
+
+// App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
+// the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
+const APP_VERSION = '__APP_VERSION__';

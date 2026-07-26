@@ -16,7 +16,9 @@ const DEFAULT_SETTINGS = {
   embeddingModel: '', // semantic lore activation; empty = disabled
   semanticThreshold: 0.55, // cosine similarity needed for a smart piece to inject
   dateFormat: 'dd/mm/yyyy', // date order for stamps and chat names
+  defaultPersonaId: '', // persona preselected in New chat ('' = none; starred in the Personas menu)
   sidebarArrows: false, // desktop: «/» edge arrows instead of the brand/Inspector buttons as pane toggles (phones always use arrows)
+  edgePeek: true, // desktop: hovering a thin strip at the screen edge pops a collapsed pane out temporarily
   contextLength: 8192,
   maxTokens: LENGTH_PRESETS.medium.maxTokens,
   responseLength: 'medium',
@@ -263,6 +265,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         <label class="check">
           <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
           Pane toggles as «/» edge arrows instead of the FictionPad brand / Inspector buttons (desktop — phones always use arrows)
+        </label>
+        <label class="check">
+          <input type="checkbox" checked=${draft.edgePeek !== false} onChange=${(e) => set({ edgePeek: e.target.checked })} />
+          Hover the left/right screen edge to peek at a collapsed pane (desktop)
         </label>`}
 
       ${tab === 'connection' && html`

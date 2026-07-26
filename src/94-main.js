@@ -215,12 +215,26 @@ function Main({ storage, storageKind, storageFailed }) {
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
-  const toggleSidebar = () => setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed }));
+  const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
-  const toggleDrawer = (tab) => setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab }));
-  const closeDrawer = () => setUi(u => (u.drawer ? { ...u, drawer: null } : u));
+  const toggleDrawer = (tab) => { setPeek(null); setUi(u => ({ ...u, drawer: u.drawer === tab ? null : tab })); };
+  const closeDrawer = () => { setPeek(null); setUi(u => (u.drawer ? { ...u, drawer: null } : u)); };
   const lastDrawerTabRef = useRef('inspector'); // edge-swipe reopens the last-used tab
   if (ui.drawer) lastDrawerTabRef.current = ui.drawer;
+  // Desktop edge-hover peek (settings.edgePeek, default on): hovering a thin
+  // strip at the screen edge pops the collapsed pane out as a TEMPORARY
+  // overlay — no ui.* state changes, pointer-leave closes it, and any real
+  // toggle (above) pins/unpins as usual. A short entry delay keeps stray
+  // mouse sweeps past the edge from flashing the pane.
+  const [peek, setPeek] = useState(null); // 'left' | 'right' | null
+  const [peekTab, setPeekTab] = useState(null); // tab chosen inside a drawer peek — session-only, never pins
+  const peekTimer = useRef(null);
+  const peekEnter = (side) => (e) => {
+    if (e.pointerType !== 'mouse') return;
+    clearTimeout(peekTimer.current);
+    peekTimer.current = setTimeout(() => setPeek(side), 90);
+  };
+  const peekCancel = () => clearTimeout(peekTimer.current);
   // Shallow settings patch (e.g. samplers from the panel's Samplers tab).
   const updateSettings = (patch) => setSettings(prev => ({ ...(prev ?? {}), ...patch }));
   // touch:false for pure metadata edits (rename, options) — the sidebar sorts
@@ -259,6 +273,12 @@ function Main({ storage, storageKind, storageFailed }) {
   // At the phone breakpoint both panes are full overlays (scrim), no sharing.
   const MOBILE_BP = 700;
   const isMobile = viewportW <= MOBILE_BP;
+  // Edge-hover peek is desktop-only; a peek never changes the persisted pane
+  // state and must not shift the center column (sbW/dwW stay at their real
+  // values — the peeked pane is a pure overlay).
+  const peekLeft = peek === 'left' && sidebarCollapsed && !isMobile && settings.edgePeek !== false;
+  const peekRight = peek === 'right' && !ui.drawer && !isMobile && settings.edgePeek !== false;
+  useEffect(() => { if (isMobile || settings.edgePeek === false) setPeek(null); }, [isMobile, settings.edgePeek]);
   const padL = !isMobile && viewportW < chatW + 2 * sbW ? sbW : 0;
   const padR = !isMobile && viewportW < chatW + 2 * dwW ? dwW : 0;
   const [dragging, setDragging] = useState(false);
@@ -1227,9 +1247,11 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!scen && !char) return;
     const c = newChat({ scenario: scen, character: char, personaId: pid, dateFormat: settings?.dateFormat });
     upsertChat(c.id, c);
-    setUi(u => (scen
-      ? { ...u, chatId: c.id, scenarioId: scen.id, characterId: null, ...(isMobile ? { sidebarCollapsed: true } : {}) }
-      : { ...u, chatId: c.id, scenarioId: null, characterId: char.id, ...(isMobile ? { sidebarCollapsed: true } : {}) }));
+    // Remember the persona choice for the next New chat (per-device; the
+    // explicit default persona, when set, takes precedence — see NewChatModal).
+    setUi(u => ({ ...u, lastPersonaId: pid ?? null, ...(scen
+      ? { chatId: c.id, scenarioId: scen.id, characterId: null }
+      : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(isMobile ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
   const onDeleteCharacter = (id) => {
@@ -1433,7 +1455,7 @@ function Main({ storage, storageKind, storageFailed }) {
             style=${{ left: `${(isMobile ? 8 : 14) + padL + btnW.l + 6}px`, right: `${(isMobile ? 8 : 14) + padR + btnW.r + 6}px` }}>
             <span class="title">${chat.name}</span>
             <button class="btn small ghost" title="Close chat"
-              onClick=${() => setUi(u => ({ ...u, chatId: null, drawer: null }))}>✕</button>
+              onClick=${() => setUi(u => ({ ...u, chatId: null }))}>✕</button>
             <span class="sub">${chat.scenarioId
               ? (scenarios[chat.scenarioId]?.name ?? '(missing scenario)')
               : ((chat.characterIds ?? []).map(id => characters[id]?.name).filter(Boolean).join(', ') || '(no scenario)')} · ${personaName}</span>
@@ -1477,12 +1499,17 @@ function Main({ storage, storageKind, storageFailed }) {
         onOpenSettings=${() => setModal({ kind: 'settings' })}
         sideCollapsed=${ui.sideCollapsed ?? {}}
         onToggleSection=${(key) => setUi(u => ({ ...u, sideCollapsed: { ...(u.sideCollapsed ?? {}), [key]: !(u.sideCollapsed ?? {})[key] } }))}
-        collapsed=${sidebarCollapsed}
+        collapsed=${sidebarCollapsed && !peekLeft}
+        peek=${peekLeft} peekLeave=${peekLeft ? () => setPeek(null) : null}
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
         storageKind=${storageKind} saveRetrying=${saveRetrying}
-        width=${sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
+        width=${peekLeft ? clampPane(ui.sbWidth ?? autoPaneW) : sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
+      ${settings.edgePeek !== false && !isMobile && sidebarCollapsed && html`
+        <div class="pane-edge left" onPointerEnter=${peekEnter('left')} onPointerLeave=${peekCancel} />`}
+      ${settings.edgePeek !== false && !isMobile && !ui.drawer && html`
+        <div class="pane-edge right" onPointerEnter=${peekEnter('right')} onPointerLeave=${peekCancel} />`}
       <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${saveFailed && html`<div class="banner">${saveFailed}</div>`}
@@ -1507,7 +1534,9 @@ function Main({ storage, storageKind, storageFailed }) {
         </div>
       </div>
       <${RightDrawer}
-        chat=${chat} tab=${ui.drawer} onTab=${(t) => setUi(u => ({ ...u, drawer: t }))}
+        chat=${chat} tab=${ui.drawer ?? (peekRight ? peekTab ?? lastDrawerTabRef.current ?? 'inspector' : null)}
+        onTab=${(t) => peekRight ? setPeekTab(t) : setUi(u => ({ ...u, drawer: t }))}
+        peek=${peekRight} peekLeave=${peekRight ? () => setPeek(null) : null}
         manifest=${manifest} realCounts=${realCounts} onPreview=${() => onPreview()} auxLog=${shownAuxLog(ui.chatId)}
         cap=${settings.memoryCap ?? MEMORY_CAP}
         personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
@@ -1517,8 +1546,8 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
-        width=${dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
-        onClose=${closeDrawer} />
+        width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
+        onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
@@ -1529,10 +1558,15 @@ function Main({ storage, storageKind, storageFailed }) {
         onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona}
+        defaultPersonaId=${settings.defaultPersonaId ?? ''}
+        onSetDefault=${(id) => updateSettings({ defaultPersonaId: id })}
         onRemove=${(id) => {
           const refs = Object.values(ref.current.chats).filter(c => c.personaId === id).length;
           const name = ref.current.personas[id]?.name ?? id;
-          if (confirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`)) removePersona(id);
+          if (confirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`)) {
+            if ((settings.defaultPersonaId ?? '') === id) updateSettings({ defaultPersonaId: '' });
+            removePersona(id);
+          }
         }}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'settings' && html`
@@ -1552,6 +1586,8 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modal?.kind === 'newChat' && (scenarios[modal.scenarioId] || characters[modal.characterId]) && html`
       <${ErrorBoundary} name="new chat"><${NewChatModal} scenario=${scenarios[modal.scenarioId] ?? null}
         character=${characters[modal.characterId] ?? null} personas=${personas}
+        initialPersonaId=${(settings.defaultPersonaId && personas[settings.defaultPersonaId]) ? settings.defaultPersonaId
+          : (ui.lastPersonaId && personas[ui.lastPersonaId]) ? ui.lastPersonaId : ''}
         onCreate=${(pid, newName) => createChat({ scenarioId: modal.scenarioId ?? null, characterId: modal.characterId ?? null }, pid, newName)}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'recap' && html`

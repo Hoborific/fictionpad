@@ -174,7 +174,7 @@ trial('sidebar chat filter input renders, empty filter keeps pinned view (SSR sm
       onDeleteChat=${noop} sideCollapsed=${{ scenarios: false, characters: false, chats: true }}
       onToggleSection=${noop} storageKind="local" saveRetrying=${false}
       width=${300} onDragStart=${noop} onResetWidth=${noop} onChatAction=${noop} onChatContextMenu=${noop} />`);
-  if (!out.includes('Search chats')) throw new Error('filter input missing: ' + out);
+  if (!out.includes('Search…')) throw new Error('filter input missing: ' + out);
   // Chats section collapsed + empty filter → only the open chat pinned.
   if (!out.includes('Alpha run')) throw new Error('pinned open chat missing: ' + out);
   if (out.includes('Beta run')) throw new Error('empty filter must respect collapse: ' + out);

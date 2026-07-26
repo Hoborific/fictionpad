@@ -853,3 +853,21 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - A scenario can no longer be saved with a blank name - Save scenario is disabled until the name is filled in, matching the character card's guard.
+
+## v4.4 - Edge peek & persona defaults
+
+**Added**
+
+- Edge-hover peek (desktop, on by default, Settings → Appearance): hovering a 20 px strip at the left/right screen edge pops a collapsed sidebar/Inspector out as a temporary overlay - 90 ms entry delay, pointer-leave closes it, and clicking the real toggle pins it. Peek never persists UI state or shifts the chat column.
+- Persona flow: New chat now preselects the last used persona, and the Personas menu has a ★ toggle to make a persona the default for new chats (explicit default wins over last-used; syncs via settings on server storage).
+- Version label in the sidebar foot - derived from CHANGELOG.md at build time, no manual bump.
+
+**Changed**
+
+- The sidebar foot's storage indicator is shortened to `local` / `server`; the full explanation lives in its hover tooltip.
+- Sidebar search placeholder is now just "Search…".
+
+**Fixed**
+
+- Closing a chat no longer closes the Inspector drawer - it stays open with its "select a chat" empty state.
+- Clicking a tab (Inspector / Samplers / Memory / Chat) inside a drawer peek no longer pins the pane open; the tab choice is session-only.

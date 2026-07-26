@@ -74,11 +74,21 @@ async function assemble() {
   for (const f of SRC_FILES)
     parts.push((await readFile(join(SRC_DIR, f), 'utf8')).replace(/\n$/, ''));
   const js = parts.join('\n');
+  // Inject the app version: the newest CHANGELOG.md version heading (##
+  // vX.Y milestones, ### vX.Y.Z snapshots — the file is chronological, so
+  // the last heading is the current version). No manual bump to forget.
+  let appVersion = 'dev';
+  try {
+    const changelog = await readFile(join(ROOT, 'CHANGELOG.md'), 'utf8');
+    const heads = [...changelog.matchAll(/^#{2,3} v(\d+\.\d+(?:\.\d+)?)/gm)];
+    if (heads.length) appVersion = heads.at(-1)[1];
+  } catch { /* no CHANGELOG — stays 'dev' */ }
+  const versioned = js.replaceAll('__APP_VERSION__', appVersion);
   if (!template.includes('/*__STYLE__*/\n') || !template.includes('//__SCRIPT__\n'))
     throw new Error('template.html placeholders (/*__STYLE__*/ / //__SCRIPT__) not found');
   // Function replacers: src content may contain `$&`-style patterns that
   // String.replace would otherwise interpret in the replacement string.
-  return template.replace('/*__STYLE__*/\n', () => css + '\n').replace('//__SCRIPT__\n', () => js + '\n');
+  return template.replace('/*__STYLE__*/\n', () => css + '\n').replace('//__SCRIPT__\n', () => versioned + '\n');
 }
 
 const DEPS = [

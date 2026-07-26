@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: PERSONA MANAGER
 // ============================================================================
-function PersonaManager({ personas, onUpsert, onRemove, onClose }) {
+function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaId, onSetDefault }) {
   const [editing, setEditing] = useState(null); // draft persona or null
   const [dirty, setDirty] = useState(false);
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
@@ -29,8 +29,11 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose }) {
           ${list.length === 0 && html`<div class="hint">No personas yet. A persona feeds the {{user}} macro.</div>`}
           ${list.map(p => html`
             <div class="side-item" key=${p.id}>
-              <span class="name">${p.name}</span>
+              <span class="name">${p.name}${defaultPersonaId === p.id && html` <span class="pill">default</span>`}</span>
               <span class="tools" style=${{ display: 'flex' }}>
+                <button class="btn small ${defaultPersonaId === p.id ? 'primary' : ''}"
+                  title=${defaultPersonaId === p.id ? 'Default for new chats — click to clear' : 'Make default for new chats'}
+                  onClick=${() => onSetDefault(defaultPersonaId === p.id ? '' : p.id)}>★</button>
                 <button class="btn small" onClick=${() => startEdit(deepClone(p))}>edit</button>
                 <button class="btn small danger" onClick=${() => onRemove(p.id)}>✕</button>
               </span>

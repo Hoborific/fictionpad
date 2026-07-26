@@ -1,11 +1,11 @@
 // ============================================================================
 // COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
-function NewChatModal({ scenario, character, personas, onCreate, onClose }) {
+function NewChatModal({ scenario, character, personas, initialPersonaId, onCreate, onClose }) {
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
-  // Default '' (none), not list[0]: the inline name field below only applies
-  // when no persona is selected, so preselecting one silently trapped it.
-  const [personaId, setPersonaId] = useState('');
+  // Preselect the default/last-used persona when one is passed in — the
+  // inline name field still applies once the user selects "— none —".
+  const [personaId, setPersonaId] = useState(initialPersonaId ?? '');
   const [newName, setNewName] = useState('');
   return html`
     <${Modal} title=${`New chat — ${scenario?.name ?? character?.name ?? ''}`} onClose=${onClose}

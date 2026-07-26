@@ -52,10 +52,11 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings }) {
+                      settings, onUpdateSettings, peek, peekLeave }) {
   return html`
-    <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''}"
-      style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
+    <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
+      style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
+      onPointerLeave=${peekLeave}>
       <div class="head">
         <div class="ptabs">
           ${Object.entries(PANEL_TABS).map(([t, label]) => html`

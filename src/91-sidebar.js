@@ -41,7 +41,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                   onOpenPersonas, onOpenSettings, collapsed, onDeleteChat,
                   sideCollapsed, onToggleSection,
                   storageKind, saveRetrying,
-                  width, onDragStart, onResetWidth, onChatAction, onChatContextMenu }) {
+                  width, onDragStart, onResetWidth, onChatAction, onChatContextMenu, peek, peekLeave }) {
   const openChat = chats[selectedChatId] ?? null;
   const chatList = Object.values(chats)
     .filter(c => selectedScenarioId ? c.scenarioId === selectedScenarioId
@@ -106,8 +106,9 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
       ${onAdd && html`<button class="btn small ghost" title=${addTitle} onClick=${onAdd}>＋</button>`}
     </div>`;
   return html`
-    <div class="sidebar ${collapsed ? 'collapsed' : ''} ${!collapsed && width < PANE_NARROW ? 'narrow' : ''}"
-      style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
+    <div class="sidebar ${collapsed ? 'collapsed' : ''} ${!collapsed && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
+      style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}
+      onPointerLeave=${peekLeave}>
       <div class="scroll">
         <div class="side-section">
           ${sectionTitle('scenarios', 'Scenarios', onNewScenario, 'New scenario')}
@@ -151,7 +152,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         </div>
         <div class="side-section">
           ${sectionTitle('chats', `Chats${(selectedScenarioId || selectedCharacterId) ? '' : ' (all)'}`, null, null)}
-          <input type="text" placeholder="Search chats — names & message text…" value=${chatFilter}
+          <input type="text" class="chat-search" placeholder="Search…" value=${chatFilter}
             onInput=${(e) => setChatFilter(e.target.value)}
             style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
           ${shownChats.length === 0 && chatQuery
@@ -193,7 +194,8 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
             : storageKind === 'server'
               ? 'Scenarios, personas, characters and chats are stored on this server (shared).'
               : 'Data is stored locally in this browser.'}>
-          ${saveRetrying ? '⚠\uFE0E saving…' : storageKind === 'server' ? 'server storage' : 'local storage'}</span>
+          ${saveRetrying ? '⚠\uFE0E saving…' : storageKind === 'server' ? 'server' : 'local'}</span>
+        <span class="hint version" title="FictionPad version">v${APP_VERSION}</span>
       </div>
       ${!collapsed && html`<div class="pane-handle right" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
