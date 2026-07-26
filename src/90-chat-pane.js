@@ -1,4 +1,4 @@
-function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
+function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
                   onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
@@ -149,7 +149,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
         ${path.map((node, i) => html`
           <${MessageItemMemo} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
-            personaName=${personaName} characterNames=${characterNames}
+            personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             dateFormat=${dateFormat} showThinking=${showThinking}

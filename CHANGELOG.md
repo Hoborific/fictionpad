@@ -881,3 +881,9 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Changed**
 
 - On phones, all sidebar rows (scenarios, characters, chats) show a single always-visible ⋯ menu button instead of four squished hover buttons, and row text is no longer selectable so long-press opens the menu without fighting text selection.
+
+### v4.4.2
+
+**Added**
+
+- Character name colour override: global character cards get an optional colour picker in the editor (clearable back to the auto name-hash hue), and the character generator can suggest a colour (validated hex only). Applies to speaker names and multi-speaker bubbles everywhere the card is linked.

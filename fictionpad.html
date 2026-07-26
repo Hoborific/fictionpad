@@ -703,7 +703,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.4.1';
+const APP_VERSION = '4.4.2';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1769,7 +1769,7 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 // the macro. The reply contract is one JSON object; parsing is tolerant
 // (first { to last } — see extractGenJSON in src/97-generator.js).
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
-const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
+const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 // === PURE CORE END ===
 
 // ============================================================================
@@ -4020,7 +4020,7 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -4120,6 +4120,12 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
+  // Speaker-name colour: a character card's explicit colour wins; otherwise
+  // the hue is hashed from the name (theme supplies saturation/lightness).
+  const speakerStyle = (name) => {
+    const col = name && characterColors?.[String(name).toLowerCase()];
+    return col ? { color: col } : { '--speaker-h': hueForName(name) };
+  };
   // Multi-speaker split: one swipe, several `Name:` parts → one
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
@@ -4142,9 +4148,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
               class="who ${name !== 'Narrator' ? 'speaker' : ''}"
-              style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
+              style=${name !== 'Narrator' ? speakerStyle(name) : null}>${name}</span>`)
           : html`<span class="who ${isCharacter ? 'speaker' : ''}"
-              style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
+              style=${isCharacter ? speakerStyle(speaker) : null}>${speaker}</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
           <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
@@ -4211,7 +4217,7 @@ ${showNav && html`
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-            style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
+            style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
         </div>`)}` : html`
       ${thinkBubble}
@@ -4364,7 +4370,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     </div>`;
 }
 
-function ChatPane({ chat, persona, characterNames, generating, suggestions, onPickSuggestion, onRerollSuggestions,
+function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
                   onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
@@ -4515,7 +4521,7 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
         ${path.map((node, i) => html`
           <${MessageItemMemo} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
-            personaName=${personaName} characterNames=${characterNames}
+            personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             dateFormat=${dateFormat} showThinking=${showThinking}
@@ -4934,6 +4940,7 @@ function newCharacter() {
   return {
     id: uid(), name: '', content: '', keys: [],
     pinned: false, weight: 0, smart: false, enabled: true,
+    color: '', // speaker-name colour override (hex); '' = auto (hashed from the name)
     greeting: '', // first assistant message of chats started directly with this character
     createdAt: Date.now(), updatedAt: Date.now(),
   };
@@ -4966,6 +4973,16 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
           onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
+      <div class="field"><span>Name colour — for the speaker name in chats; empty = auto (hashed from the name)</span>
+        <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <input type="color" value=${editing.color || '#8ab4f8'}
+            onInput=${(e) => edit({ ...editing, color: e.target.value })}
+            style=${{ width: '40px', height: '28px', padding: '0 2px' }} />
+          ${editing.color
+            ? html`<button class="btn small" onClick=${() => edit({ ...editing, color: '' })}>Clear — back to auto</button>`
+            : html`<span class="hint">auto — pick a colour to override</span>`}
+        </div>
+      </div>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
         <textarea rows=${6} value=${editing.content} onInput=${(e) => edit({ ...editing, content: e.target.value })} /></label>
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
@@ -5062,6 +5079,9 @@ function sanitizeCharacterGen(obj) {
     if (s) patch[key] = s;
   }
   if (Array.isArray(obj.keys)) patch.keys = genKeys(obj.keys);
+  // Optional speaker-name colour override — hex only, anything else dropped.
+  const col = String(obj.color ?? '').trim();
+  if (/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(col)) patch.color = col.toLowerCase();
   return patch;
 }
 
@@ -5296,6 +5316,12 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterNames = useMemo(
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
+  // Speaker-name colour overrides (global character cards with an explicit
+  // colour), keyed by lowercase name — everything else falls back to the
+  // name-hash hue in MessageItem.
+  const characterColors = useMemo(() => Object.fromEntries(
+    Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
+      .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
@@ -6612,7 +6638,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
-            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
+            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               suggestions=${suggestions}

@@ -9,6 +9,7 @@ function newCharacter() {
   return {
     id: uid(), name: '', content: '', keys: [],
     pinned: false, weight: 0, smart: false, enabled: true,
+    color: '', // speaker-name colour override (hex); '' = auto (hashed from the name)
     greeting: '', // first assistant message of chats started directly with this character
     createdAt: Date.now(), updatedAt: Date.now(),
   };
@@ -41,6 +42,16 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
           onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
+      <div class="field"><span>Name colour — for the speaker name in chats; empty = auto (hashed from the name)</span>
+        <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <input type="color" value=${editing.color || '#8ab4f8'}
+            onInput=${(e) => edit({ ...editing, color: e.target.value })}
+            style=${{ width: '40px', height: '28px', padding: '0 2px' }} />
+          ${editing.color
+            ? html`<button class="btn small" onClick=${() => edit({ ...editing, color: '' })}>Clear — back to auto</button>`
+            : html`<span class="hint">auto — pick a colour to override</span>`}
+        </div>
+      </div>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
         <textarea rows=${6} value=${editing.content} onInput=${(e) => edit({ ...editing, content: e.target.value })} /></label>
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>

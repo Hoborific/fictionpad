@@ -63,6 +63,9 @@ function sanitizeCharacterGen(obj) {
     if (s) patch[key] = s;
   }
   if (Array.isArray(obj.keys)) patch.keys = genKeys(obj.keys);
+  // Optional speaker-name colour override — hex only, anything else dropped.
+  const col = String(obj.color ?? '').trim();
+  if (/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(col)) patch.color = col.toLowerCase();
   return patch;
 }
 

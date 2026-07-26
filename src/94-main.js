@@ -214,6 +214,12 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterNames = useMemo(
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
+  // Speaker-name colour overrides (global character cards with an explicit
+  // colour), keyed by lowercase name — everything else falls back to the
+  // name-hash hue in MessageItem.
+  const characterColors = useMemo(() => Object.fromEntries(
+    Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
+      .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
@@ -1530,7 +1536,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
-            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames}
+            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               suggestions=${suggestions}

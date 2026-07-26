@@ -75,7 +75,7 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -175,6 +175,12 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
     onPointerUp: () => { gestureRef.current = null; setDragX(0); },
     onPointerCancel: () => { gestureRef.current = null; setDragX(0); },
   };
+  // Speaker-name colour: a character card's explicit colour wins; otherwise
+  // the hue is hashed from the name (theme supplies saturation/lightness).
+  const speakerStyle = (name) => {
+    const col = name && characterColors?.[String(name).toLowerCase()];
+    return col ? { color: col } : { '--speaker-h': hueForName(name) };
+  };
   // Multi-speaker split: one swipe, several `Name:` parts → one
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
@@ -197,9 +203,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
               class="who ${name !== 'Narrator' ? 'speaker' : ''}"
-              style=${name !== 'Narrator' ? { '--speaker-h': hueForName(name) } : null}>${name}</span>`)
+              style=${name !== 'Narrator' ? speakerStyle(name) : null}>${name}</span>`)
           : html`<span class="who ${isCharacter ? 'speaker' : ''}"
-              style=${isCharacter ? { '--speaker-h': hueForName(speaker) } : null}>${speaker}</span>`}
+              style=${isCharacter ? speakerStyle(speaker) : null}>${speaker}</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
           <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
@@ -266,7 +272,7 @@ ${showNav && html`
           style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
           ...${gestureHandlers}>
           <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-            style=${seg.speaker ? { '--speaker-h': hueForName(seg.speaker) } : null}>${seg.speaker ?? 'Narrator'}</div>
+            style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${seg.speaker ?? 'Narrator'}</div>
           <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
         </div>`)}` : html`
       ${thinkBubble}
