@@ -922,3 +922,14 @@ Note: this only changes the default prompt text; existing chats with a customize
 - Escape closes only the topmost modal instead of the whole stack.
 - Character-enrichment writes could be silently clobbered - a sibling enrichment or the next generation's commit rebuilt from the pre-write snapshot; the write now syncs immediately and no longer teleports the chat up the sidebar.
 - The piece popout's primary button reads "Save" (was "Save piece").
+
+### v4.4.5
+
+**Changed**
+
+- Settings has a new **Storage tab**: storage-mode status, server token, server migration, server `.db` backup, and export/import all moved out of Connection, which is now just endpoint, API key, route-via-server, and Test connection.
+- Every settings tab is now built from one structural unit — a `section()` block (dim uppercase header with a rule, an optional hint under it, then the content) — replacing the mix of ad-hoc headers and bare fields. Prompts are grouped into Core / Aux calls / ✦ Generator; the custom-samplers "+ add" button lives in its section header.
+
+**Fixed**
+
+- Uneven field heights across the Models tab: labels are now short one-liners with explanations as hints under the inputs, and the embedding threshold hint no longer renders as a phantom third grid cell.

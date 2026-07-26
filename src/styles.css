@@ -499,6 +499,12 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .modal .m-tab.active { color: var(--c-accent); border-bottom-color: var(--c-accent); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 12px; }
+/* settings sections: one structural unit for every tab */
+.s-sec { margin: 10px 0 2px; }
+.s-sec-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--c-dim); border-bottom: 1px solid var(--c-border); padding-bottom: 3px; margin-bottom: 6px; }
+.s-sec-h .btn { text-transform: none; letter-spacing: 0; font-weight: 400; }
 /* sampler rows: checkbox label left, fixed value slot right — enabled rows
    hold the input/select there, disabled rows show the kept value dimmed, so
    the column edge stays aligned; the grid fills the modal width */

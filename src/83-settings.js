@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS = {
 const SETTINGS_TABS = [
   ['appearance', 'Appearance'],
   ['connection', 'Connection'],
+  ['storage', 'Storage'],
   ['models', 'Models'],
   ['generation', 'Generation'],
   ['features', 'Features'],
@@ -239,6 +240,16 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       <${NumInput} value=${draft[key] ?? def} min=${min} max=${max} step=${step} fallback=${def}
         onCommit=${(n) => set({ [key]: n })} /></label>`;
 
+  // Uniform section wrapper — every tab is a stack of these: dim uppercase
+  // header with a rule, an optional hint right under it, then the content.
+  // `extra` renders at the right end of the header (e.g. an add button).
+  const section = (title, content, hint, extra) => html`
+    <div class="s-sec">
+      <div class="s-sec-h"><span>${title}</span>${extra}</div>
+      ${hint && html`<div class="hint" style=${{ margin: '-2px 0 6px' }}>${hint}</div>`}
+      ${content}
+    </div>`;
+
   return html`
     <${Modal} title="Settings" wide onClose=${guardClose}
       footer=${html`<button class="btn ghost" onClick=${guardClose}>Cancel</button>
@@ -251,131 +262,150 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
 
       ${tab === 'appearance' && html`
-        <label class="field"><span>Theme — applies immediately, saved automatically</span>
-          <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
-            ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
-          </select></label>
-        ${THEMES[theme]?.accentable && html`
-          <label class="field"><span>Accent — drives quotes, names on bubbles, buttons</span>
-            <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <span style=${{ width: '14px', height: '14px', borderRadius: '50%', flex: 'none',
-                background: (CTP_ACCENTS[theme] ?? {})[accent] ?? 'transparent', border: '1px solid var(--c-border)' }}></span>
-              <select value=${accent} onChange=${(e) => onAccentChange(e.target.value)} style=${{ flex: 1 }}>
-                ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
-              </select>
-            </div></label>`}
-        <label class="field"><span>Date format — message stamps, memories, chat names</span>
-          <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
-            ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-          </select></label>
-        <label class="check">
-          <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
-          Pane toggles as «/» edge arrows instead of the FictionPad brand / Inspector buttons (desktop — phones always use arrows)
-        </label>
-        <label class="check">
-          <input type="checkbox" checked=${draft.edgePeek !== false} onChange=${(e) => set({ edgePeek: e.target.checked })} />
-          Hover the left/right screen edge to peek at a collapsed pane (desktop)
-        </label>`}
+        ${section('Theme', html`
+          <div class="grid2">
+            <label class="field"><span>Theme</span>
+              <select value=${theme} onChange=${(e) => onThemeChange(e.target.value)}>
+                ${Object.entries(THEMES).map(([id, t]) => html`<option key=${id} value=${id}>${t.name}</option>`)}
+              </select></label>
+            ${THEMES[theme]?.accentable && html`
+              <label class="field"><span>Accent — drives quotes, names on bubbles, buttons</span>
+                <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <span style=${{ width: '14px', height: '14px', borderRadius: '50%', flex: 'none',
+                    background: (CTP_ACCENTS[theme] ?? {})[accent] ?? 'transparent', border: '1px solid var(--c-border)' }}></span>
+                  <select value=${accent} onChange=${(e) => onAccentChange(e.target.value)} style=${{ flex: 1 }}>
+                    ${Object.keys(CTP_ACCENTS[theme] ?? {}).map(a => html`<option key=${a} value=${a}>${a}</option>`)}
+                  </select>
+                </div></label>`}
+          </div>`,
+          'Applies immediately, saved automatically.')}
+        ${section('Display', html`
+          <label class="field"><span>Date format — message stamps, memories, chat names</span>
+            <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
+              ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
+            </select></label>`)}
+        ${section('Panes', html`
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
+            Pane toggles as «/» edge arrows instead of the FictionPad brand / Inspector buttons (desktop — phones always use arrows)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.edgePeek !== false} onChange=${(e) => set({ edgePeek: e.target.checked })} />
+            Hover the left/right screen edge to peek at a collapsed pane (desktop)
+          </label>`)}`}
 
       ${tab === 'connection' && html`
-        <div class="grid2">
-          <label class="field"><span>Endpoint (OpenAI-compatible; with or without /v1)</span>
-            <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
-            ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
-              <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
-          </label>
-          <label class="field"><span>API key (sent as Bearer token; ${storageKind === 'server' ? 'synced via server settings' : 'stored locally in this browser'})</span>
-            <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} /></label>
-        </div>
-        ${storageKind === 'server' && html`
-          <label class="check">
-            <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
-            Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
-          </label>`}
-        <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
-          <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
-            ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
-          ${testState && testState !== 'busy' && html`
-            <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
-        </div>
-        <div class="field"><span>Storage</span>
+        ${section('API connection', html`
+          <div class="grid2">
+            <label class="field"><span>Endpoint</span>
+              <input type="text" value=${draft.endpoint} onInput=${(e) => set({ endpoint: e.target.value })} />
+              <span class="hint">OpenAI-compatible, with or without /v1.</span>
+              ${storageKind === 'server' && draft.routeViaServer !== false && draft.endpoint?.trim() && !draft.endpoint.trim().startsWith('/proxy/') && html`
+                <span class="hint">Requests will go via this server: /proxy/${draft.endpoint.trim()}</span>`}
+            </label>
+            <label class="field"><span>API key</span>
+              <input type="password" value=${draft.apiKey} onInput=${(e) => set({ apiKey: e.target.value })} />
+              <span class="hint">Sent as Bearer token; ${storageKind === 'server' ? 'synced via server settings' : 'stored locally in this browser'}.</span>
+            </label>
+          </div>
+          ${storageKind === 'server' && html`
+            <label class="check">
+              <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
+              Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
+            </label>`}
+          <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
+            <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
+              ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
+            ${testState && testState !== 'busy' && html`
+              <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
+          </div>`)}`}
+
+      ${tab === 'storage' && html`
+        ${section('Storage', html`
           <div class="hint">${storageKind === 'server'
             ? 'Server storage active — scenarios, personas and chats are shared via this server. Settings synced via server.'
             : 'Local storage — data lives in this browser only.'}</div>
-          <label class="field" style=${{ marginTop: '6px' }}>
-            <span>Server token (only when the server sets FICTIONPAD_TOKEN; applies after reload)</span>
-            <input type="password" value=${draft.serverToken ?? ''} onInput=${(e) => set({ serverToken: e.target.value })} /></label>
-          ${storageKind === 'server' && html`
-            <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('up')}>
-                ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
-              <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
-                ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
-              <button class="btn small" disabled=${!!bakBusy} title="Snapshot of the server's SQLite database (all users of this server)"
-                onClick=${serverBackup}>
-                ${bakBusy === 'db' ? 'Downloading…' : 'Download server backup (.db)'}</button>
-            </div>
-            ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`}
-        </div>
-        <div class="field"><span>Export / import everything — one JSON with all scenarios, chats, personas, characters and settings</span>
+          <label class="field" style=${{ marginTop: '6px' }}><span>Server token</span>
+            <input type="password" value=${draft.serverToken ?? ''} onInput=${(e) => set({ serverToken: e.target.value })} />
+            <span class="hint">Only when the server sets FICTIONPAD_TOKEN; applies after reload. Never leaves this device — stripped from exports, ignored on imports.</span>
+          </label>`)}
+        ${storageKind === 'server' && section('Server data', html`
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('up')}>
+              ${migBusy === 'up' ? 'Uploading…' : 'Upload local data to server'}</button>
+            <button class="btn small" disabled=${!!migBusy} onClick=${() => migrate('down')}>
+              ${migBusy === 'down' ? 'Downloading…' : 'Download server data to local'}</button>
+            <button class="btn small" disabled=${!!bakBusy} title="Snapshot of the server's SQLite database (all users of this server)"
+              onClick=${serverBackup}>
+              ${bakBusy === 'db' ? 'Downloading…' : 'Download server backup (.db)'}</button>
+          </div>
+          ${migNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${migNote}</div>`}`,
+          'Move data between this browser and the server. Rows with the same keys are overwritten (last write wins, no merging).')}
+        ${section('Export / import', html`
           <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
             <button class="btn small" onClick=${onExportAll}>Export everything (.json)</button>
             <button class="btn small" disabled=${!!bakBusy} onClick=${importBackup}>
               ${bakBusy === 'import' ? 'Importing…' : 'Import backup…'}</button>
           </div>
-          <div class="hint" style=${{ marginTop: '4px' }}>Import upserts by id (last write wins) — data missing from the file is kept. The server token never leaves this device: stripped from exports, ignored on imports.</div>
-          ${bakNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${bakNote}</div>`}
-        </div>`}
+          ${bakNote && html`<div class="hint" style=${{ marginTop: '4px' }}>${bakNote}</div>`}`,
+          'One JSON with all scenarios, chats, personas, characters and settings. Import upserts by id (last write wins) — data missing from the file is kept.')}`}
 
       ${tab === 'models' && html`
-        <div class="grid3">
-          <label class="field"><span>Chat model</span>
-            <div style=${{ display: 'flex', gap: '6px' }}>
-              <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
-              <button class="btn" onClick=${fetchModels}>Fetch</button>
-            </div>
-            ${modelsError && html`<span class="warn">${modelsError}</span>`}
-            ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
-          </label>
-          <label class="field"><span>Aux model (memory summaries, suggestions, /improve, /recap; blank = chat model)</span>
-            <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
-          <label class="field"><span>Generator model (✦ scenario/character/piece; blank = aux model)</span>
-            <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} /></label>
-        </div>
-        <div class="grid2">
-          <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
-            <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
-              onInput=${(e) => set({ embeddingModel: e.target.value })} />
-            <span class="hint">Often a separate model name from the chat model; Fetch above populates the list.</span>
-          </label>
-          ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
-          <div class="hint" style=${{ margin: '-6px 0 6px' }}>Cosine similarity a semantic ("smart") lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.</div>
-        </div>`}
+        ${section('Models', html`
+          <div class="grid3">
+            <label class="field"><span>Chat model</span>
+              <div style=${{ display: 'flex', gap: '6px' }}>
+                <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
+                <button class="btn" onClick=${fetchModels}>Fetch</button>
+              </div>
+              ${modelsError && html`<span class="warn">${modelsError}</span>`}
+              ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
+            </label>
+            <label class="field"><span>Aux model</span>
+              <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} />
+              <span class="hint">Memory summaries, suggestions, /improve, /recap. Blank = chat model.</span>
+            </label>
+            <label class="field"><span>Generator model</span>
+              <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} />
+              <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
+            </label>
+          </div>`)}
+        ${section('Embeddings', html`
+          <div class="grid2">
+            <label class="field"><span>Embedding model</span>
+              <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
+                onInput=${(e) => set({ embeddingModel: e.target.value })} />
+              <span class="hint">Semantic lore activation; blank = off. Often a separate model name — Fetch above populates the list.</span>
+            </label>
+            ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
+          </div>`,
+          'Cosine similarity a semantic ("smart") lore piece needs to inject. Near-misses show in the Inspector. Blank resets to 0.55.')}`}
 
       ${tab === 'generation' && html`
-        <div class="grid3">
-          <label class="field"><span>Context length (tokens)</span>
-            <${NumInput} value=${draft.contextLength} min=${256} step=${512} fallback=${8192}
-              onCommit=${(n) => set({ contextLength: n })} /></label>
-          <label class="field"><span>Response length preset</span>
-            <select value=${draft.responseLength}
-              onChange=${(e) => set({
-                responseLength: e.target.value,
-                maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
-                lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
-              })}>
-              <option value="short">Short (~150 tokens)</option>
-              <option value="medium">Medium (~400 tokens)</option>
-              <option value="long">Long (~800 tokens)</option>
-            </select></label>
-          <label class="field"><span>Max tokens (response reserve)</span>
-            <${NumInput} value=${draft.maxTokens} min=${1} fallback=${LENGTH_PRESETS.medium.maxTokens}
-              onCommit=${(n) => set({ maxTokens: n })} /></label>
-        </div>
-        <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
-          <textarea rows=${2} value=${draft.lengthDirective ?? ''}
-            onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>
-        <div class="field"><span>Samplers</span>
+        ${section('Length', html`
+          <div class="grid3">
+            <label class="field"><span>Context length (tokens)</span>
+              <${NumInput} value=${draft.contextLength} min=${256} step=${512} fallback=${8192}
+                onCommit=${(n) => set({ contextLength: n })} /></label>
+            <label class="field"><span>Response length preset</span>
+              <select value=${draft.responseLength}
+                onChange=${(e) => set({
+                  responseLength: e.target.value,
+                  maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
+                  lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
+                })}>
+                <option value="short">Short (~150 tokens)</option>
+                <option value="medium">Medium (~400 tokens)</option>
+                <option value="long">Long (~800 tokens)</option>
+              </select></label>
+            <label class="field"><span>Max tokens (response reserve)</span>
+              <${NumInput} value=${draft.maxTokens} min=${1} fallback=${LENGTH_PRESETS.medium.maxTokens}
+                onCommit=${(n) => set({ maxTokens: n })} /></label>
+          </div>
+          <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
+            <textarea rows=${2} value=${draft.lengthDirective ?? ''}
+              onInput=${(e) => set({ lengthDirective: e.target.value })} /></label>`)}
+        ${section('Samplers', html`
           <div class="sampler-grid">
             ${allSamplerFields(draft).map(f => {
               const active = draft.samplers?.[f.key] != null && !(draft.disabledSamplers ?? []).includes(f.key);
@@ -396,14 +426,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                   </span>
                 </div>`;
             })}
-          </div>
-          <div class="hint">Unchecked params are not sent.</div>
-        </div>
-        <label class="field"><span>Stop strings — one per line; generation halts at these (server-side)</span>
+          </div>`,
+          'Unchecked params are not sent.')}
+        ${section('Stop strings', html`
           <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${draft.stopStrings ?? []}
             placeholder="e.g. your EOS marker, if your model emits one"
-            onChange=${(stopStrings) => set({ stopStrings })} /></label>
-        <div class="field"><span>Per-chat overrides — the knobs offered in the chat panel's Samplers tab</span>
+            onChange=${(stopStrings) => set({ stopStrings })} />`,
+          'One per line; generation halts at these (server-side).')}
+        ${section('Per-chat overrides', html`
           <div class="sampler-grid">
             ${allSamplerFields(draft).map(f => html`
               <label class="check" key=${f.key} style=${{ margin: 0 }}>
@@ -412,13 +442,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                     ? [...(draft.samplerFields ?? []), f.key]
                     : (draft.samplerFields ?? []).filter(k => k !== f.key) })} />
                 ${f.label}${f.custom ? ' ✦' : ''}</label>`)}
-          </div>
-          <div class="hint">A per-chat override replaces the global value for that chat only; knobs unchecked here aren't overridable per chat. Context length and max tokens are always overridable.</div>
-        </div>
-        <div class="field"><span>Custom samplers (${(draft.customSamplers ?? []).length})
-          <button class="btn small" style=${{ marginLeft: '8px' }}
-            onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button></span>
-          <div class="hint">Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>. Built-in keys are reserved. Registered samplers join the lists above.</div>
+          </div>`,
+          'The knobs offered in the chat panel\'s Samplers tab. A per-chat override replaces the global value for that chat only; knobs unchecked here aren\'t overridable per chat. Context length and max tokens are always overridable.')}
+        ${section(`Custom samplers (${(draft.customSamplers ?? []).length})`, html`
           ${(draft.customSamplers ?? []).map(d => html`
             <${CustomSamplerCard} key=${d.id} def=${d}
               keyClash=${!!SAMPLER_FIELD_MAP[(d.key ?? '').trim()]}
@@ -429,15 +455,18 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 samplers: Object.fromEntries(Object.entries(draft.samplers ?? {}).filter(([k]) => k !== (d.key ?? '').trim())),
                 disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
                 samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
-              })} />`)}
-        </div>
-        <div class="grid3">
-          <label class="field"><span>Top logprobs — alternatives stored per token</span>
-            <${NumInput} value=${draft.topLogprobs ?? 10} min=${1} max=${20} fallback=${10}
-              onCommit=${(n) => set({ topLogprobs: n })} />
-            <span class="hint">Sent as top_logprobs when token probabilities are on (Features tab).</span></label>
-        </div>
-        <div class="field"><span>Context budget split (%) — static / lore / memory; chat history gets the remainder</span>
+              })} />`)}`,
+          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>. Built-in keys are reserved. Registered samplers join the lists above.`,
+          html`<button class="btn small"
+            onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button>`)}
+        ${section('Logprobs', html`
+          <div class="grid3">
+            <label class="field"><span>Top logprobs — alternatives stored per token</span>
+              <${NumInput} value=${draft.topLogprobs ?? 10} min=${1} max=${20} fallback=${10}
+                onCommit=${(n) => set({ topLogprobs: n })} />
+              <span class="hint">Sent as top_logprobs when token probabilities are on (Features tab).</span></label>
+          </div>`)}
+        ${section('Context budget split (%)', html`
           <div class="grid3">
             <label class="field"><span>Static</span>
               <${NumInput} value=${Math.round(((draft.layerCaps ?? LAYER_CAPS).static ?? 0.3) * 100)} min=${0} max=${90}
@@ -449,23 +478,23 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <${NumInput} value=${Math.round(((draft.layerCaps ?? LAYER_CAPS).memory ?? 0.1) * 100)} min=${0} max=${90}
                 fallback=${Math.round(LAYER_CAPS.memory * 100)} onCommit=${(n) => setCap('memory', n)} /></label>
           </div>
-          <button class="btn small" onClick=${() => set({ layerCaps: { ...LAYER_CAPS } })}>Reset split to default</button>
-        </div>
-        <div class="field"><span>Estimates & lore scanning</span>
+          <button class="btn small" onClick=${() => set({ layerCaps: { ...LAYER_CAPS } })}>Reset split to default</button>`,
+          'Static / lore / memory — chat history gets the remainder.')}
+        ${section('Estimates & lore scanning', html`
           <div class="grid3">
             ${numField('tokenChars', 'Chars per token (estimate fallback)', TOKEN_CHARS, { min: 1, max: 8, step: 0.1 })}
             ${numField('loreSearchDepth', 'Lore search depth (est. tokens)', DEFAULT_SEARCH_DEPTH, { min: 0, step: 128 })}
             ${numField('loreLinkBoost', 'Lore link boost (weight bonus)', LINK_BOOST, { min: 0, max: 20 })}
-          </div>
-          <div class="hint">Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.</div>
-        </div>
-        <div style=${{ marginTop: '4px' }}>
-          <button class="btn small" onClick=${() => onOpenLogitBias(draft)}>Edit logit bias…</button>
-          <span class="hint" style=${{ marginLeft: '8px' }}>${lbCount} ${lbCount === 1 ? 'entry' : 'entries'}</span>
-        </div>`}
+          </div>`,
+          'Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.')}
+        ${section('Logit bias', html`
+          <div>
+            <button class="btn small" onClick=${() => onOpenLogitBias(draft)}>Edit logit bias…</button>
+            <span class="hint" style=${{ marginLeft: '8px' }}>${lbCount} ${lbCount === 1 ? 'entry' : 'entries'}</span>
+          </div>`)}`}
 
       ${tab === 'features' && html`
-        <div class="field"><span>Enable features</span>
+        ${section('Features', html`
           <label class="check">
             <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
             Token probabilities (logprobs + alternatives per token; count in Generation tab)
@@ -490,32 +519,32 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
-          </label>
-        </div>
-        ${draft.suggestions && html`
-          <div class="field"><span>Response suggestions</span>
-            <div class="grid2">
-              <label class="field"><span>Number of suggestions (1–5)</span>
-                <${NumInput} value=${draft.suggestionsCount ?? 2} min=${1} max=${5} fallback=${2}
-                  onCommit=${(n) => set({ suggestionsCount: n })} /></label>
-              <label class="field"><span>Max words per suggestion</span>
-                <${NumInput} value=${draft.suggestionsWords ?? 20} min=${5} max=${60} fallback=${20}
-                  onCommit=${(n) => set({ suggestionsWords: n })} /></label>
-            </div>
-            <div class="grid2">
-              ${numField('suggestionsTemp', 'Temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
-              ${numField('suggestionsDepth', 'Context messages sent', 6, { min: 1, max: 30 })}
-            </div>
-            <div class="hint">Uses the aux model; the prompt is editable in the Prompts tab.</div>
-            <label class="check">
-              <input type="checkbox" checked=${!!draft.auxShowSuggestions} onChange=${(e) => set({ auxShowSuggestions: e.target.checked })} />
-              Show suggestion calls in the Inspector's Aux calls log
-            </label>
-          </div>`}
-        <div class="field"><span>Memory</span>
-          <label class="field"><span>Auto-summarize every N messages (also the lore-extraction cadence)</span>
-            <${NumInput} value=${draft.memoryEvery ?? MEMORY_EVERY} min=${5} max=${200} fallback=${MEMORY_EVERY}
-              onCommit=${(n) => set({ memoryEvery: n })} /></label>
+          </label>`)}
+        ${draft.suggestions && section('Response suggestions', html`
+          <div class="grid2">
+            <label class="field"><span>Number of suggestions (1–5)</span>
+              <${NumInput} value=${draft.suggestionsCount ?? 2} min=${1} max=${5} fallback=${2}
+                onCommit=${(n) => set({ suggestionsCount: n })} /></label>
+            <label class="field"><span>Max words per suggestion</span>
+              <${NumInput} value=${draft.suggestionsWords ?? 20} min=${5} max=${60} fallback=${20}
+                onCommit=${(n) => set({ suggestionsWords: n })} /></label>
+          </div>
+          <div class="grid2">
+            ${numField('suggestionsTemp', 'Temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
+            ${numField('suggestionsDepth', 'Context messages sent', 6, { min: 1, max: 30 })}
+          </div>
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.auxShowSuggestions} onChange=${(e) => set({ auxShowSuggestions: e.target.checked })} />
+            Show suggestion calls in the Inspector's Aux calls log
+          </label>`,
+          'Uses the aux model; the prompt is editable in the Prompts tab.')}
+        ${section('Memory', html`
+          <div class="grid3">
+            <label class="field"><span>Auto-summarize every N messages</span>
+              <${NumInput} value=${draft.memoryEvery ?? MEMORY_EVERY} min=${5} max=${200} fallback=${MEMORY_EVERY}
+                onCommit=${(n) => set({ memoryEvery: n })} />
+              <span class="hint">Also the lore-extraction cadence.</span></label>
+          </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
             ${numField('memoryMaxTokens', 'Summary max tokens', 220, { min: 50, max: 2000, step: 10 })}
@@ -523,63 +552,62 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div>
           <div class="grid3">
             ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}
-          </div>
-          <div class="hint">Summarize / extraction prompts are editable in the Prompts tab. Pinned cards are exempt from the card cap.</div>
-        </div>
-        <div class="field"><span>Lore extraction (runs on the memory cadence)</span>
+          </div>`,
+          'Summarize / extraction prompts are editable in the Prompts tab. Pinned cards are exempt from the card cap.')}
+        ${section('Lore extraction', html`
           <div class="grid3">
             ${numField('loreExtractTemp', 'Temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
             ${numField('loreExtractMaxTokens', 'Max tokens', 400, { min: 50, max: 2000, step: 10 })}
             ${numField('loreExtractMax', 'Max pieces per pass', 3, { min: 1, max: 10 })}
-          </div>
-          <div class="hint">If you raise max pieces, also raise the "up to 3" in the extraction prompt (Prompts tab).</div>
-        </div>
-        <div class="field"><span>Slash commands (aux model)</span>
-          <div class="grid3">
+          </div>`,
+          'Runs on the memory cadence. If you raise max pieces, also raise the "up to 3" in the extraction prompt (Prompts tab).')}
+        ${section('Slash commands', html`
+          <div class="grid2">
             ${numField('improveTemp', '/improve temperature', 0.7, { min: 0, max: 2, step: 0.05 })}
             ${numField('improveMaxTokens', '/improve max tokens', 400, { min: 50, max: 4000, step: 10 })}
           </div>
-          <div class="grid3">
+          <div class="grid2">
             ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
-          </div>
-        </div>
-        <div class="field"><span>Scenario/character generator</span>
+          </div>`,
+          'Both use the aux model.')}
+        ${section('✦ Generator', html`
           <div class="grid3">
             ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
-          </div>
-          <div class="hint">Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab.</div>
-        </div>
-        <div class="field"><span>Tool calling</span>
+          </div>`,
+          'Scenario/character/piece generator. Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab.')}
+        ${section('Tool calling', html`
           ${draft.toolsEnabled === false
             ? html`<div class="hint">Off — enable it above.</div>`
             : html`
-            <div class="hint" style=${{ margin: '4px 0' }}>Protocol instructions are editable in the Prompts tab.</div>
             <div class="grid3">
               ${numField('toolCallCap', 'Max tool calls per generation', TOOL_CALL_CAP, { min: 1, max: 25 })}
-            </div>`}
-        </div>`}
+            </div>`}`,
+          'Protocol instructions are editable in the Prompts tab.')}`}
 
       ${tab === 'prompts' && html`
-        ${promptField('platformPrompt', 'Platform system prompt — lowest instruction rank; {{user}} works here', DEFAULT_PLATFORM_PROMPT, 5)}
-        ${promptField('suggestionsPrompt', 'Suggestions prompt — asks the aux model for reply options', DEFAULT_SUGGESTIONS_PROMPT, 3,
-          '{{user}} = persona name, {{count}} and {{words}} = the values from the Features tab. Used when suggestions are on.')}
-        ${promptField('memoryPrompt', 'Memory summary prompt — auto-summaries and /memory', DEFAULT_MEMORY_PROMPT, 3)}
-        ${promptField('loreExtractPrompt', 'Lore extraction prompt — proposes new lore pieces on the memory cadence', DEFAULT_LORE_EXTRACT_PROMPT, 4)}
-        ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
-          '{{user}} = persona name (+ description, when set).')}
-        ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}
-        ${promptField('scenarioGenPrompt', 'Scenario generator prompt — ✦ Generate in the scenario editor', DEFAULT_SCENARIO_GEN_PROMPT, 6,
-          'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
-        ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
-          'The reply contract is one JSON object with name, content, keys and greeting.')}
-        ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
-          'The reply contract is one JSON object with type, title, content, keys and pinned.')}
-        ${draft.toolsEnabled !== false
-          ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
-          : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
-        ${draft.multiSpeaker !== false
-          ? promptField('speakerPrompt', 'Multi-speaker instructions — appended to the platform prompt.', SPEAKER_PROMPT, 4)
-          : html`<div class="hint">Multi-speaker prompt hidden — multi-speaker is off (Features tab).</div>`}`}
+        ${section('Core', html`
+          ${promptField('platformPrompt', 'Platform system prompt — lowest instruction rank; {{user}} works here', DEFAULT_PLATFORM_PROMPT, 5)}
+          ${draft.toolsEnabled !== false
+            ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
+            : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
+          ${draft.multiSpeaker !== false
+            ? promptField('speakerPrompt', 'Multi-speaker instructions — appended to the platform prompt.', SPEAKER_PROMPT, 4)
+            : html`<div class="hint">Multi-speaker prompt hidden — multi-speaker is off (Features tab).</div>`}`)}
+        ${section('Aux calls', html`
+          ${promptField('suggestionsPrompt', 'Suggestions prompt — asks the aux model for reply options', DEFAULT_SUGGESTIONS_PROMPT, 3,
+            '{{user}} = persona name, {{count}} and {{words}} = the values from the Features tab. Used when suggestions are on.')}
+          ${promptField('memoryPrompt', 'Memory summary prompt — auto-summaries and /memory', DEFAULT_MEMORY_PROMPT, 3)}
+          ${promptField('loreExtractPrompt', 'Lore extraction prompt — proposes new lore pieces on the memory cadence', DEFAULT_LORE_EXTRACT_PROMPT, 4)}
+          ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
+            '{{user}} = persona name (+ description, when set).')}
+          ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}`)}
+        ${section('✦ Generator', html`
+          ${promptField('scenarioGenPrompt', 'Scenario generator prompt — ✦ Generate in the scenario editor', DEFAULT_SCENARIO_GEN_PROMPT, 6,
+            'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
+          ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
+            'The reply contract is one JSON object with name, content, keys and greeting.')}
+          ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
+            'The reply contract is one JSON object with type, title, content, keys and pinned.')}`)}`}
     <//>`;
 }
