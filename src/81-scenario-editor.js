@@ -116,7 +116,7 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
 
 function newScenario() {
   return {
-    id: uid(), name: 'New scenario', description: '', tags: [],
+    id: uid(), name: '', description: '', tags: [],
     backstory: '', greeting: '', scenarioInstructions: '', lorePieces: [],
     emergentLore: 'queue', // off | queue (review) | auto — model/extractor-proposed lore routing
     createdAt: Date.now(),
@@ -148,7 +148,7 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
   return html`
     <${Modal} title="Scenario editor" wide onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
+        <button class="btn primary" disabled=${!draft.name.trim()} onClick=${() => onSave(draft)}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
           <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>

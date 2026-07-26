@@ -838,3 +838,18 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Regenerating the greeting (root message) now works: the prompt-leaf selection used `??`, which swallowed the root's `null` parentId, so the model was asked to continue the whole conversation and that continuation was stored as a greeting swipe. A greeting regenerate now generates from the system prompt only.
 - Leaf regenerate no longer crashes with `undefined is not an object (evaluating 'pruned.lorePieces.length')` in chats where tools never wrote lore - and a synchronous throw in that path can no longer wedge the UI in "generating", since the generation slot is claimed only after the synchronous rollback.
+
+### v4.3.1
+
+**Added**
+
+- Chat filter is now a full-text search: the sidebar box also matches against every node's every swipe (inactive takes included), and content-only hits show a one-line match excerpt under the chat name. Search text is built lazily and cached per chat, so typing stays cheap.
+
+**Changed**
+
+- The character card editor's actions moved into the modal footer, identical to the scenario editor: ✦ Generate + Save character, right-aligned; the separate Cancel button is gone (the header ✕ with the unsaved-changes guard covers it).
+- New scenarios no longer prefill "New scenario" as the name - the field starts blank like a new character card.
+
+**Fixed**
+
+- A scenario can no longer be saved with a blank name - Save scenario is disabled until the name is filled in, matching the character card's guard.

@@ -17,7 +17,8 @@ src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
-  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate };`);
+  Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
+  chatSearchText, matchExcerpt };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -173,10 +174,31 @@ trial('sidebar chat filter input renders, empty filter keeps pinned view (SSR sm
       onDeleteChat=${noop} sideCollapsed=${{ scenarios: false, characters: false, chats: true }}
       onToggleSection=${noop} storageKind="local" saveRetrying=${false}
       width=${300} onDragStart=${noop} onResetWidth=${noop} onChatAction=${noop} onChatContextMenu=${noop} />`);
-  if (!out.includes('Filter chats')) throw new Error('filter input missing: ' + out);
+  if (!out.includes('Search chats')) throw new Error('filter input missing: ' + out);
   // Chats section collapsed + empty filter → only the open chat pinned.
   if (!out.includes('Alpha run')) throw new Error('pinned open chat missing: ' + out);
   if (out.includes('Beta run')) throw new Error('empty filter must respect collapse: ' + out);
+});
+
+// Full-text chat search helpers: the haystack covers every swipe of every
+// node, the cache key tracks updatedAt, and excerpts give one-line context.
+trial('chat search: haystack spans all swipes, cache keys on updatedAt, excerpt context', () => {
+  const chat = {
+    id: 'C1', updatedAt: 7,
+    messages: {
+      root: { id: 'root', parentId: null, swipes: [{ text: 'Welcome to the docks.' }] },
+      u1: { id: 'u1', parentId: 'root', swipes: [{ text: 'first take' }, { text: 'I bribe the harbormaster.' }] },
+    },
+  };
+  const { raw, lower } = fp.chatSearchText(chat);
+  if (!lower.includes('harbormaster')) throw new Error('inactive swipe text missing from haystack: ' + raw);
+  if (lower !== raw.toLowerCase()) throw new Error('lowercase copy diverged');
+  // Same id + updatedAt → cached (same object); bumped updatedAt → rebuilt.
+  if (fp.chatSearchText(chat) !== fp.chatSearchText(chat)) throw new Error('cache did not memoize');
+  const excerpt = fp.matchExcerpt(raw, lower.indexOf('harbormaster'), 'harbormaster'.length);
+  if (!excerpt.includes('harbormaster') || excerpt.includes('\n')) throw new Error('bad excerpt: ' + excerpt);
+  const long = fp.matchExcerpt('x'.repeat(500), 250, 1);
+  if (!long.startsWith('…') || !long.endsWith('…')) throw new Error('mid-text excerpt not ellipsized: ' + long);
 });
 
 // Smoke: character editor, scenario-editor link section, and the

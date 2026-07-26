@@ -8,6 +8,31 @@
 // fit on one line — components add a `narrow` class and CSS stacks the ribbons
 // instead of squishing/clipping them.
 const PANE_NARROW = 270;
+// Full-text chat search: the haystack is every swipe text of every node,
+// built lazily (only while a query is active) and cached per chat keyed by
+// id + updatedAt — a chat's contents only change with updatedAt. Both the raw
+// join (for match excerpts) and its lowercase (for matching) are kept.
+const chatTextCache = new Map();
+function chatSearchText(chat) {
+  const key = `${chat.id}@${chat.updatedAt ?? 0}`;
+  let hit = chatTextCache.get(key);
+  if (!hit) {
+    const raw = Object.values(chat.messages ?? {})
+      .flatMap(n => (n.swipes ?? []).map(s => s?.text ?? ''))
+      .join('\n');
+    hit = { raw, lower: raw.toLowerCase() };
+    if (chatTextCache.size > 500) chatTextCache.clear();
+    chatTextCache.set(key, hit);
+  }
+  return hit;
+}
+// ~60 chars of one-line context around a content match, ellipsized at cuts.
+function matchExcerpt(raw, i, qlen) {
+  const start = Math.max(0, i - 20);
+  const end = Math.min(raw.length, i + qlen + 40);
+  return (start > 0 ? '…' : '') + raw.slice(start, end).replace(/\s+/g, ' ').trim()
+    + (end < raw.length ? '…' : '');
+}
 function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCharacterId, selectedChatId,
                   onSelectScenario, onSelectCharacter, onSelectChat,
                   onNewScenario, onEditScenario, onDeleteScenario, onNewChat,
@@ -39,16 +64,23 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   const baseChats = sideCollapsed.chats ? chatList.filter(c => c.id === selectedChatId) : chatList;
   const pinnedChats = openChat && !baseChats.includes(openChat) ? [openChat, ...baseChats] : baseChats;
   // Chat filter: case-insensitive substring on the chat name, its scenario's
-  // name, or any linked character's name. Non-empty filter ignores the
-  // section's collapse state; empty filter = the pinned view above, untouched.
+  // name, any linked character's name — or the full message text (every node,
+  // every swipe). Name hits render plain; content-only hits show a match
+  // excerpt. Non-empty filter ignores the section's collapse state; empty
+  // filter = the pinned view above, untouched.
   const [chatFilter, setChatFilter] = useState('');
   const chatQuery = chatFilter.trim().toLowerCase();
-  const shownChats = chatQuery
-    ? chatList.filter(c =>
-        (c.name ?? '').toLowerCase().includes(chatQuery)
-        || (scenarios[c.scenarioId]?.name ?? '').toLowerCase().includes(chatQuery)
-        || (c.characterIds ?? []).some(id => (characters?.[id]?.name ?? '').toLowerCase().includes(chatQuery)))
-    : pinnedChats;
+  const matchFor = (c) => {
+    const nameHit = (c.name ?? '').toLowerCase().includes(chatQuery)
+      || (scenarios[c.scenarioId]?.name ?? '').toLowerCase().includes(chatQuery)
+      || (c.characterIds ?? []).some(id => (characters?.[id]?.name ?? '').toLowerCase().includes(chatQuery));
+    if (nameHit) return { hit: true, excerpt: null };
+    const { raw, lower } = chatSearchText(c);
+    const i = lower.indexOf(chatQuery);
+    return i === -1 ? { hit: false, excerpt: null } : { hit: true, excerpt: matchExcerpt(raw, i, chatQuery.length) };
+  };
+  const chatMatches = chatQuery ? new Map(chatList.map(c => [c.id, matchFor(c)])) : null;
+  const shownChats = chatQuery ? chatList.filter(c => chatMatches.get(c.id).hit) : pinnedChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
@@ -119,7 +151,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         </div>
         <div class="side-section">
           ${sectionTitle('chats', `Chats${(selectedScenarioId || selectedCharacterId) ? '' : ' (all)'}`, null, null)}
-          <input type="text" placeholder="Filter chats…" value=${chatFilter}
+          <input type="text" placeholder="Search chats — names & message text…" value=${chatFilter}
             onInput=${(e) => setChatFilter(e.target.value)}
             style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
           ${shownChats.length === 0 && chatQuery
@@ -136,7 +168,8 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
-              <span class="name">${c.name}</span>
+              <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
+                && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">
                 <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
                   onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>

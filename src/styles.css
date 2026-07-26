@@ -152,6 +152,11 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .side-item:hover .tools { display: flex; }
 .side-item.chat { padding-left: 22px; font-size: 13.5px; color: var(--c-dim); }
 .side-item.chat.selected { color: var(--c-text); }
+/* Full-text search hit excerpt under the chat name (content-only matches). */
+.side-item.chat .chat-match {
+  display: block; font-size: 11px; font-style: italic; opacity: 0.75;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ---------- right drawer (Inspector / Memory) — mirrors the left sidebar:
    fixed overlay consuming the slack margin, drag-resizable on its left edge,

@@ -35,7 +35,10 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
   const totalLinks = linkCount(editing.id) + chatLinkCount;
   return html`
     <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide
-      onClose=${genOpen ? () => setGenOpen(false) : guardClose}>
+      onClose=${genOpen ? () => setGenOpen(false) : guardClose}
+      footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
+        <button class="btn primary" disabled=${!editing.name.trim()}
+          onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
@@ -64,12 +67,6 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       </div>
       ${totalLinks > 0 && html`
         <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
-      <div style=${{ display: 'flex', gap: '8px' }}>
-        ${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" disabled=${!editing.name.trim()}
-          onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save</button>
-        <button class="btn" onClick=${guardClose}>Cancel</button>
-      </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate character" busy=${genBusy} error=${genError}
           onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
