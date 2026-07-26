@@ -378,6 +378,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
   const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
+  // Merged once here — the lore layer below reuses this same list.
+  const lorePieces = mergedLorePieces(scenario, chat, characters);
+  // Registered speakers, spelled out in the prompt: weak models shorten long
+  // names ("The Auctioneer" → "Auctioneer:") and the display split is an
+  // exact name match, so the full names are listed explicitly. Mirrors
+  // characterNamesOf (display side).
+  const speakerNames = [...new Set(lorePieces
+    .filter(p => p?.type === 'character' && p.enabled !== false)
+    .map(p => (p.title ?? '').trim()).filter(Boolean))];
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
   if (plat) leadParts.push(plat);
@@ -397,6 +406,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   if (directive) tailParts.push(directive);
   // /pov reframe: one generation written from another character's perspective.
   const povName = String(pov?.name ?? '').trim();
+  if (speakerNames.length)
+    tailParts.push(`Characters who may speak in this scene: ${speakerNames.join(', ')}. When one speaks or acts, begin that part with the exact full name and a colon ("${speakerNames[0]}:") — once, at the start of the part; later lines stay with that character.`);
   if (povName)
     tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
   let backstory = sub(scenario?.backstory ?? '').trim();
@@ -429,9 +440,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const conversationText = path.map(activeText).join('\n');
 
   // 3. lore layer (scenario pieces + linked global characters + per-chat
-  //    overlay, chat wins on id)
+  //    overlay, chat wins on id) — list merged above the static layer.
   const loreCap = Math.floor(budget * caps.lore);
-  const lorePieces = mergedLorePieces(scenario, chat, characters);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
   // Resolved global characters carry origin: 'character' from resolveCharacters
@@ -826,12 +836,12 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
 
 // Prose formatting conventions — single source of truth, woven into the
 // platform prompt (src/83-settings.js) and both generator prompts below, so
 // the RP reply format and generated greetings/lore can't drift apart.
-const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s name followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the prefix from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also

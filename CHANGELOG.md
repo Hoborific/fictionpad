@@ -887,3 +887,14 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Added**
 
 - Character name colour override: global character cards get an optional colour picker in the editor (clearable back to the auto name-hash hue), and the character generator can suggest a colour (validated hex only). Applies to speaker names and multi-speaker bubbles everywhere the card is linked.
+
+### v4.4.3
+
+**Added**
+
+- Registered speakers are listed in the system prompt of every generation ("Characters who may speak in this scene: …"), so the model uses exact full character names for `Name:` prefixes - no more shortened "Auctioneer:" when the card says "The Auctioneer".
+- The ✦ generator now rides the global registered sampler set (custom samplers like `chat_template_kwargs.enable_thinking` included), passes the active length directive through as prose-length guidance, and has its temperature exposed as a setting (`genTemp`, Features tab).
+
+**Changed**
+
+- The speaker-format prompts (`PROSE_FORMAT_RULES`, multi-speaker instructions) now demand the full registered name and state the one-prefix-per-part rule explicitly - prefixes are never repeated for the same character.

@@ -133,6 +133,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
+    // The RP length preset otherwise only reaches the chat assembler — aux
+    // calls never see it, so pass the directive through as prose guidance
+    // (the greeting is the field it matters for).
+    const directive = (st.lengthDirective ?? LENGTH_PRESETS[st.responseLength ?? 'medium']?.directive)?.trim();
     const context = JSON.stringify(isScenario
       ? { name: draft.name, description: draft.description, tags: draft.tags,
           scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
@@ -143,8 +147,16 @@ function Main({ storage, storageKind, storageFailed }) {
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
         : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
-      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}`,
-      maxTokens: 3000, temperature: 0.9,
+      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
+      maxTokens: 3000, temperature: st.genTemp ?? 0.9,
+      // The generator rides the user's GLOBAL sampler set — registered
+      // built-ins plus custom samplers (e.g. chat_template_kwargs.enable_thinking)
+      // — filtered to registered keys like the RP path; the generator's own
+      // temperature wins. Per-chat overrides don't apply outside a chat.
+      samplers: { ...Object.fromEntries(
+        Object.entries(enabledSamplers(st))
+          .filter(([k]) => new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+        temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');

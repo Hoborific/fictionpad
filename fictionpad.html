@@ -703,7 +703,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.4.2';
+const APP_VERSION = '4.4.3';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1301,6 +1301,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
   const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
+  // Merged once here — the lore layer below reuses this same list.
+  const lorePieces = mergedLorePieces(scenario, chat, characters);
+  // Registered speakers, spelled out in the prompt: weak models shorten long
+  // names ("The Auctioneer" → "Auctioneer:") and the display split is an
+  // exact name match, so the full names are listed explicitly. Mirrors
+  // characterNamesOf (display side).
+  const speakerNames = [...new Set(lorePieces
+    .filter(p => p?.type === 'character' && p.enabled !== false)
+    .map(p => (p.title ?? '').trim()).filter(Boolean))];
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
   if (plat) leadParts.push(plat);
@@ -1320,6 +1329,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   if (directive) tailParts.push(directive);
   // /pov reframe: one generation written from another character's perspective.
   const povName = String(pov?.name ?? '').trim();
+  if (speakerNames.length)
+    tailParts.push(`Characters who may speak in this scene: ${speakerNames.join(', ')}. When one speaks or acts, begin that part with the exact full name and a colon ("${speakerNames[0]}:") — once, at the start of the part; later lines stay with that character.`);
   if (povName)
     tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
   let backstory = sub(scenario?.backstory ?? '').trim();
@@ -1352,9 +1363,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const conversationText = path.map(activeText).join('\n');
 
   // 3. lore layer (scenario pieces + linked global characters + per-chat
-  //    overlay, chat wins on id)
+  //    overlay, chat wins on id) — list merged above the static layer.
   const loreCap = Math.floor(budget * caps.lore);
-  const lorePieces = mergedLorePieces(scenario, chat, characters);
   const chatPieceIds = new Set(
     (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
   // Resolved global characters carry origin: 'character' from resolveCharacters
@@ -1749,12 +1759,12 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
 
 // Prose formatting conventions — single source of truth, woven into the
 // platform prompt (src/83-settings.js) and both generator prompts below, so
 // the RP reply format and generated greetings/lore can't drift apart.
-const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s name followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the prefix from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
@@ -2401,8 +2411,10 @@ const cosine = (a, b) => {
 };
 
 // Single NON-streaming chat completion for auxiliary tasks (memory, recap,
-// suggestions, /improve). Returns trimmed text; throws on HTTP/API errors.
-async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
+// suggestions, /improve, ✦ generator). Returns trimmed text; throws on
+// HTTP/API errors. `samplers` (optional) is merged into the request like the
+// streaming path does — dotted custom-sampler keys nest (expandSamplerParams).
+async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null }) {
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -2416,6 +2428,7 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
       max_tokens: maxTokens,
       temperature,
       ...(Array.isArray(stop) && stop.length ? { stop } : {}),
+      ...(samplers ? expandSamplerParams(samplers) : {}),
     }),
   });
   if (!res.ok) {
@@ -2963,6 +2976,7 @@ const DEFAULT_SETTINGS = {
   recapMaxTokens: 700,
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
+  genTemp: 0.9, // ✦ Generate temperature (aux model)
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -3433,6 +3447,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
           </div>
+        </div>
+        <div class="field"><span>Scenario/character generator (aux model)</span>
+          <div class="grid3">
+            ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
+          </div>
+          <div class="hint">Prompts are editable in the Prompts tab.</div>
         </div>
         <div class="field"><span>Tool calling</span>
           ${draft.toolsEnabled === false
@@ -5235,6 +5255,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = st.auxModel || st.model;
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
+    // The RP length preset otherwise only reaches the chat assembler — aux
+    // calls never see it, so pass the directive through as prose guidance
+    // (the greeting is the field it matters for).
+    const directive = (st.lengthDirective ?? LENGTH_PRESETS[st.responseLength ?? 'medium']?.directive)?.trim();
     const context = JSON.stringify(isScenario
       ? { name: draft.name, description: draft.description, tags: draft.tags,
           scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
@@ -5245,8 +5269,16 @@ function Main({ storage, storageKind, storageFailed }) {
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
         : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
-      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}`,
-      maxTokens: 3000, temperature: 0.9,
+      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
+      maxTokens: 3000, temperature: st.genTemp ?? 0.9,
+      // The generator rides the user's GLOBAL sampler set — registered
+      // built-ins plus custom samplers (e.g. chat_template_kwargs.enable_thinking)
+      // — filtered to registered keys like the RP path; the generator's own
+      // temperature wins. Per-chat overrides don't apply outside a chat.
+      samplers: { ...Object.fromEntries(
+        Object.entries(enabledSamplers(st))
+          .filter(([k]) => new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+        temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');

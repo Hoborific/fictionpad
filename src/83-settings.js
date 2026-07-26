@@ -61,6 +61,7 @@ const DEFAULT_SETTINGS = {
   recapMaxTokens: 700,
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
+  genTemp: 0.9, // ✦ Generate temperature (aux model)
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -531,6 +532,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
           </div>
+        </div>
+        <div class="field"><span>Scenario/character generator (aux model)</span>
+          <div class="grid3">
+            ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
+          </div>
+          <div class="hint">Prompts are editable in the Prompts tab.</div>
         </div>
         <div class="field"><span>Tool calling</span>
           ${draft.toolsEnabled === false

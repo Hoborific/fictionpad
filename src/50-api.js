@@ -421,8 +421,10 @@ const cosine = (a, b) => {
 };
 
 // Single NON-streaming chat completion for auxiliary tasks (memory, recap,
-// suggestions, /improve). Returns trimmed text; throws on HTTP/API errors.
-async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null }) {
+// suggestions, /improve, ✦ generator). Returns trimmed text; throws on
+// HTTP/API errors. `samplers` (optional) is merged into the request like the
+// streaming path does — dotted custom-sampler keys nest (expandSamplerParams).
+async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null }) {
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -436,6 +438,7 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
       max_tokens: maxTokens,
       temperature,
       ...(Array.isArray(stop) && stop.length ? { stop } : {}),
+      ...(samplers ? expandSamplerParams(samplers) : {}),
     }),
   });
   if (!res.ok) {
