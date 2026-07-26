@@ -977,3 +977,11 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Docs**
 
 - `.repro/fp-module.mjs` (generated repro artifact) untracked from git; DESIGN.md's stale "user-defined tools" claim and `~/Downloads` teardown path fixed; README/server.mjs `FICTIONPAD_PROXY_ALLOW` default corrected (loopback-only without auth).
+
+
+### v4.5.2
+
+**Fixed**
+
+- Message right-click menu separators render as a visible full-bleed hairline - the old inset 13%-contrast line read as an unexplained gap between items (e.g. "Branch from here" / "Rewind to here").
+- Sidebar rows (chats, scenarios, characters) no longer paint a text-selection highlight when a right-click drags across them on desktop - `user-select: none` moved out of the mobile-only media block (long-press already needed it there).

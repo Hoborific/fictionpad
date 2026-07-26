@@ -183,6 +183,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .side-item .tools { display: none; gap: 2px; }
 .side-item .tools .tools-full { display: contents; }
 .side-item:hover .tools { display: flex; }
+/* Right-click/long-press opens the row's context menu — text selection must
+   not win (applies on desktop too: a dragging right-click must not paint a
+   highlight over the rows). */
+.side-item { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 /* Phones: no hover — rows get one always-visible ⋯ that opens the same
    context menu as long-press, instead of four squished buttons. */
 .side-item .tools-menu { display: none; }
@@ -190,8 +194,6 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   .side-item .tools { display: flex; }
   .side-item .tools .tools-full { display: none; }
   .side-item .tools-menu { display: block; }
-  /* Long-press opens the row's context menu — text selection must not win. */
-  .side-item { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 }
 .side-item.chat { padding-left: 22px; font-size: 13.5px; color: var(--c-dim); }
 .side-item.chat.selected { color: var(--c-text); }
@@ -423,7 +425,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .ctx-item:disabled { opacity: 0.4; cursor: default; }
 .ctx-item:disabled:hover { background: none; }
 .ctx-item.danger { color: var(--c-danger); }
-.ctx-sep { border-top: 1px solid var(--c-border); margin: 4px 2px; }
+/* Full-bleed hairline: an inset 13%-contrast line read as an unexplained gap
+   between items — span the menu padding and lift the contrast a touch. */
+.ctx-sep { border-top: 1px solid color-mix(in oklch, var(--c-text) 20%, var(--c-bg-0)); margin: 4px -4px; }
 .scrim {
   position: fixed; inset: 0; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
   background: rgba(0,0,0,0.45); z-index: 35;
@@ -721,7 +725,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.5.1';
+const APP_VERSION = '4.5.2';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
