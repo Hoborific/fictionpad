@@ -162,7 +162,18 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .side-item.selected { background: var(--c-accent-dim); }
 .side-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-item .tools { display: none; gap: 2px; }
+.side-item .tools .tools-full { display: contents; }
 .side-item:hover .tools { display: flex; }
+/* Phones: no hover — rows get one always-visible ⋯ that opens the same
+   context menu as long-press, instead of four squished buttons. */
+.side-item .tools-menu { display: none; }
+@media (max-width: 700px) {
+  .side-item .tools { display: flex; }
+  .side-item .tools .tools-full { display: none; }
+  .side-item .tools-menu { display: block; }
+  /* Long-press opens the row's context menu — text selection must not win. */
+  .side-item { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
 .side-item.chat { padding-left: 22px; font-size: 13.5px; color: var(--c-dim); }
 .side-item.chat.selected { color: var(--c-text); }
 /* Full-text search hit excerpt under the chat name (content-only matches). */

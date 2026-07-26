@@ -871,3 +871,13 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Closing a chat no longer closes the Inspector drawer - it stays open with its "select a chat" empty state.
 - Clicking a tab (Inspector / Samplers / Memory / Chat) inside a drawer peek no longer pins the pane open; the tab choice is session-only.
+
+### v4.4.1
+
+**Added**
+
+- Scenario and character rows now have context menus like chat rows (⋯ button, long-press, or right-click): New chat / Edit / Export JSON / Delete.
+
+**Changed**
+
+- On phones, all sidebar rows (scenarios, characters, chats) show a single always-visible ⋯ menu button instead of four squished hover buttons, and row text is no longer selectable so long-press opens the menu without fighting text selection.

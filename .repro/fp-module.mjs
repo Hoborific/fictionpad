@@ -50,7 +50,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.4';
+const APP_VERSION = '4.4.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -3934,6 +3934,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                   onNewCharacter, onEditCharacter, onDeleteCharacter, onNewCharacterChat,
                   onExportScenario, onExportCharacter, onImport,
                   onOpenPersonas, onOpenSettings, collapsed, onDeleteChat,
+                  onScenarioContextMenu, onCharacterContextMenu,
                   sideCollapsed, onToggleSection,
                   storageKind, saveRetrying,
                   width, onDragStart, onResetWidth, onChatAction, onChatContextMenu, peek, peekLeave }) {
@@ -3979,11 +3980,16 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
-  const lpStart = (e, id) => {
+  const lpStart = (e, id, onMenu = onChatContextMenu) => {
     if (e.pointerType === 'mouse') return;
     lpMenuRef.current = false; // a fresh press supersedes any stale swallow flag
     const { clientX: x, clientY: y } = e;
-    lp.current = { x, y, timer: setTimeout(() => { lp.current = null; lpMenuRef.current = true; onChatContextMenu(id, x, y); }, 500) };
+    lp.current = { x, y, timer: setTimeout(() => { lp.current = null; lpMenuRef.current = true; onMenu(id, x, y); }, 500) };
+  };
+  // Row click after a long-press must not also fire (the menu just opened).
+  const rowClick = (fn) => () => {
+    if (lpMenuRef.current) { lpMenuRef.current = false; return; }
+    fn();
   };
   const lpCancel = (e) => {
     if (!lp.current) return;
@@ -4011,17 +4017,24 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
             && html`<div class="hint" style=${{ padding: '0 6px' }}>No scenarios yet.</div>`}
           ${shownScenarios.map(s => html`
             <div class="side-item ${s.id === selectedScenarioId ? 'selected' : ''}" key=${s.id}
-              onClick=${() => onSelectScenario(s.id === selectedScenarioId ? null : s.id)}>
+              onClick=${rowClick(() => onSelectScenario(s.id === selectedScenarioId ? null : s.id))}
+              onContextMenu=${(e) => { e.preventDefault(); onScenarioContextMenu(s.id, e.clientX, e.clientY); }}
+              onPointerDown=${(e) => lpStart(e, s.id, onScenarioContextMenu)}
+              onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               <span class="name">${s.name}</span>
               <span class="tools">
-                <button class="btn small ghost" title="New chat from this scenario"
-                  onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✉\uFE0E</button>
-                <button class="btn small ghost" title="Edit"
-                  onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
-                <button class="btn small ghost" title="Export JSON"
-                  onClick=${(e) => { e.stopPropagation(); onExportScenario(s.id); }}>⤓</button>
-                <button class="btn small ghost" title="Delete"
-                  onClick=${(e) => { e.stopPropagation(); onDeleteScenario(s.id); }}>✕</button>
+                <span class="tools-full">
+                  <button class="btn small ghost" title="New chat from this scenario"
+                    onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✉\uFE0E</button>
+                  <button class="btn small ghost" title="Edit"
+                    onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
+                  <button class="btn small ghost" title="Export JSON"
+                    onClick=${(e) => { e.stopPropagation(); onExportScenario(s.id); }}>⤓</button>
+                  <button class="btn small ghost" title="Delete"
+                    onClick=${(e) => { e.stopPropagation(); onDeleteScenario(s.id); }}>✕</button>
+                </span>
+                <button class="btn small ghost tools-menu" title="Scenario actions"
+                  onClick=${(e) => { e.stopPropagation(); onScenarioContextMenu(s.id, e.clientX, e.clientY); }}>⋯</button>
               </span>
             </div>`)}
         </div>
@@ -4031,17 +4044,24 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
             && html`<div class="hint" style=${{ padding: '0 6px' }}>No characters yet.</div>`}
           ${shownCharacters.map(c => html`
             <div class="side-item ${c.id === selectedCharacterId ? 'selected' : ''}" key=${c.id}
-              onClick=${() => onSelectCharacter(c.id === selectedCharacterId ? null : c.id)}>
+              onClick=${rowClick(() => onSelectCharacter(c.id === selectedCharacterId ? null : c.id))}
+              onContextMenu=${(e) => { e.preventDefault(); onCharacterContextMenu(c.id, e.clientX, e.clientY); }}
+              onPointerDown=${(e) => lpStart(e, c.id, onCharacterContextMenu)}
+              onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               <span class="name">${c.name}</span>
               <span class="tools">
-                <button class="btn small ghost" title="New chat with this character"
-                  onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✉\uFE0E</button>
-                <button class="btn small ghost" title="Edit"
-                  onClick=${(e) => { e.stopPropagation(); onEditCharacter(c.id); }}>✎</button>
-                <button class="btn small ghost" title="Export JSON"
-                  onClick=${(e) => { e.stopPropagation(); onExportCharacter(c.id); }}>⤓</button>
-                <button class="btn small ghost" title="Delete"
-                  onClick=${(e) => { e.stopPropagation(); onDeleteCharacter(c.id); }}>✕</button>
+                <span class="tools-full">
+                  <button class="btn small ghost" title="New chat with this character"
+                    onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✉\uFE0E</button>
+                  <button class="btn small ghost" title="Edit"
+                    onClick=${(e) => { e.stopPropagation(); onEditCharacter(c.id); }}>✎</button>
+                  <button class="btn small ghost" title="Export JSON"
+                    onClick=${(e) => { e.stopPropagation(); onExportCharacter(c.id); }}>⤓</button>
+                  <button class="btn small ghost" title="Delete"
+                    onClick=${(e) => { e.stopPropagation(); onDeleteCharacter(c.id); }}>✕</button>
+                </span>
+                <button class="btn small ghost tools-menu" title="Character actions"
+                  onClick=${(e) => { e.stopPropagation(); onCharacterContextMenu(c.id, e.clientX, e.clientY); }}>⋯</button>
               </span>
             </div>`)}
         </div>
@@ -4067,14 +4087,18 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">
-                <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
-                  onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
-                <button class="btn small ghost" title="Rename"
-                  onClick=${(e) => act(e, c.id, 'rename')}>✎</button>
-                <button class="btn small ghost" title="Export JSON"
-                  onClick=${(e) => act(e, c.id, 'export')}>⤓</button>
-                <button class="btn small ghost" title="Delete chat"
-                  onClick=${(e) => act(e, c.id, 'delete')}>✕</button>
+                <span class="tools-full">
+                  <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
+                    onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
+                  <button class="btn small ghost" title="Rename"
+                    onClick=${(e) => act(e, c.id, 'rename')}>✎</button>
+                  <button class="btn small ghost" title="Export JSON"
+                    onClick=${(e) => act(e, c.id, 'export')}>⤓</button>
+                  <button class="btn small ghost" title="Delete chat"
+                    onClick=${(e) => act(e, c.id, 'delete')}>✕</button>
+                </span>
+                <button class="btn small ghost tools-menu" title="Chat actions"
+                  onClick=${(e) => { e.stopPropagation(); onChatContextMenu(c.id, e.clientX, e.clientY); }}>⋯</button>
               </span>
             </div>`)}
         </div>
@@ -5909,6 +5933,20 @@ function Main({ storage, storageKind, storageFailed }) {
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
+        onScenarioContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
+          { label: 'New chat', fn: () => setModal({ kind: 'newChat', scenarioId: id }) },
+          { label: 'Edit', fn: () => setModal({ kind: 'scenario', scenario: scenarios[id] }) },
+          { label: 'Export JSON', fn: () => onExportScenario(id) },
+          '-',
+          { label: 'Delete…', fn: () => onDeleteScenario(id), danger: true },
+        ] })}
+        onCharacterContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
+          { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
+          { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
+          { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          '-',
+          { label: 'Delete…', fn: () => onDeleteCharacter(id), danger: true },
+        ] })}
         storageKind=${storageKind} saveRetrying=${saveRetrying}
         width=${peekLeft ? clampPane(ui.sbWidth ?? autoPaneW) : sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
       ${settings.edgePeek !== false && !isMobile && sidebarCollapsed && html`
@@ -6021,7 +6059,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onClose=${() => setModal(null)} /><//>`}
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
-        items=${[
+        items=${ctxMenu.items ?? [
           { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },

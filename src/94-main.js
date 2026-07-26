@@ -1504,6 +1504,20 @@ function Main({ storage, storageKind, storageFailed }) {
         onDeleteChat=${onDeleteChat}
         onChatAction=${chatAction}
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
+        onScenarioContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
+          { label: 'New chat', fn: () => setModal({ kind: 'newChat', scenarioId: id }) },
+          { label: 'Edit', fn: () => setModal({ kind: 'scenario', scenario: scenarios[id] }) },
+          { label: 'Export JSON', fn: () => onExportScenario(id) },
+          '-',
+          { label: 'Delete…', fn: () => onDeleteScenario(id), danger: true },
+        ] })}
+        onCharacterContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
+          { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
+          { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
+          { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          '-',
+          { label: 'Delete…', fn: () => onDeleteCharacter(id), danger: true },
+        ] })}
         storageKind=${storageKind} saveRetrying=${saveRetrying}
         width=${peekLeft ? clampPane(ui.sbWidth ?? autoPaneW) : sbW} onDragStart=${paneDragStart('left')} onResetWidth=${() => resetPaneWidth('left')} />
       ${settings.edgePeek !== false && !isMobile && sidebarCollapsed && html`
@@ -1616,7 +1630,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onClose=${() => setModal(null)} /><//>`}
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
-        items=${[
+        items=${ctxMenu.items ?? [
           { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
