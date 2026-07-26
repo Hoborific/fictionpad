@@ -144,7 +144,7 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
 // generate. The generator's patch fills the local draft only; persistence
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
 function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
-  const [draft, setDraft] = useState(() => deepClone(piece));
+  const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -182,7 +182,9 @@ function newScenario() {
 }
 
 function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
-  const [draft, setDraft] = useState(() => deepClone(scenario));
+  // normalizeScenario: imports upsert JSON verbatim — heal missing fields
+  // (lorePieces etc.) here too, or the draft reads below crash on open.
+  const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);

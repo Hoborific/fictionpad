@@ -130,7 +130,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               <span class="tools">
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat from this scenario"
-                    onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✉\uFE0E</button>
+                    onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✚</button>
                   <button class="btn small ghost" title="Edit"
                     onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
                   <button class="btn small ghost" title="Export JSON"
@@ -157,7 +157,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               <span class="tools">
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat with this character"
-                    onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✉\uFE0E</button>
+                    onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✚</button>
                   <button class="btn small ghost" title="Edit"
                     onClick=${(e) => { e.stopPropagation(); onEditCharacter(c.id); }}>✎</button>
                   <button class="btn small ghost" title="Export JSON"
@@ -177,7 +177,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
             style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
           ${shownChats.length === 0 && chatQuery
             && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats match.</div>`}
-          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
+          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✚ on a scenario or character.</div>`}
           ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => {
@@ -193,7 +193,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">
                 <span class="tools-full">
-                  <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
+                  <button class="btn small ghost" title="Inspector"
                     onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
                   <button class="btn small ghost" title="Rename"
                     onClick=${(e) => act(e, c.id, 'rename')}>✎</button>

@@ -20,7 +20,9 @@
 //                       /health). The proxy never forwards these creds upstream;
 //                       the app sends its LLM key as X-Real-Authorization instead.
 //   FICTIONPAD_PROXY_ALLOW  comma-separated target host allowlist for /proxy
-//                       (e.g. "proxy.example.com,10.0.0.6"). Default: any host.
+//                       (e.g. "proxy.example.com,10.0.0.6"). Default: any host
+//                       when auth is configured; loopback-only with no auth
+//                       (see the policy below).
 // Proxy access policy:
 //   - FICTIONPAD_AUTH set   → /proxy is behind Basic like everything else.
 //   - only FICTIONPAD_TOKEN → /proxy requires the same Bearer token.
@@ -39,8 +41,10 @@
 //   only when the request's Origin header is absent (same-origin/curl) or
 //   exactly "null" (the file:// build — the only reason CORS exists). Any
 //   other Origin is still served but gets no ACAO header, so browsers refuse
-//   to let that page read the response (a no-auth deployment would otherwise
-//   let any website drive the victim's browser through /proxy).
+//   to let that page read the response. Writes are guarded separately: the
+//   storage and /proxy routes reject any request carrying a foreign Origin —
+//   simple cross-site POSTs bypass ACAO, so a no-auth deployment would
+//   otherwise let any website overwrite a visitor's data via their browser.
 // Shutdown: SIGINT/SIGTERM close the db — closing the last WAL connection
 //   checkpoints it and removes the -wal/-shm sidecars — then exit 0.
 
@@ -119,7 +123,11 @@ try {
 // recent complete snapshot, and a clean db.close() on shutdown — closing the
 // last WAL connection checkpoints and removes the -wal/-shm sidecars.
 const CHECKPOINT_MS = Number(process.env.FICTIONPAD_CHECKPOINT_MS) || 60_000;
+// A streaming /backup pins the .db file (its Content-Length was stat'd after
+// its own checkpoint) — a mid-stream checkpoint would grow the file under it.
+let backupsActive = 0;
 const checkpointTimer = setInterval(() => {
+  if (backupsActive > 0) return;
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); }
   catch (err) { console.warn(`WAL checkpoint failed: ${err?.message || err}`); }
 }, CHECKPOINT_MS);
@@ -140,13 +148,25 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 // literal string "null". Same-origin pages and curl send no Origin and need
 // nothing. Any OTHER Origin is served normally but gets no
 // Access-Control-Allow-Origin header — the browser then refuses to let that
-// page read the response, so a random website can't drive a visitor's
-// browser through /proxy or the storage routes on a no-auth deployment.
+// page READ the response.
 const acaoFor = (req) => {
   const origin = req.headers.origin;
   return (origin === undefined || origin === 'null')
     ? { 'Access-Control-Allow-Origin': '*' }
     : {};
+};
+// But ACAO only gates reading: browsers can still SEND simple cross-site
+// requests (a form POST is CORS-safelisted), and Origin is a forbidden header
+// a web page can neither forge nor omit. So the mutating routes (storage +
+// /proxy) reject any request carrying a foreign Origin outright — otherwise
+// any website could overwrite kv rows (incl. Meta/app.settings, which the app
+// adopts at boot) on a no-auth deployment via a visitor's browser. Absent
+// (curl, apps, same-origin navigations), "null" (file://), or this server's
+// own Host all pass.
+const originOk = (req) => {
+  const o = req.headers.origin;
+  if (o === undefined || o === 'null') return true;
+  try { return new URL(o).host === req.headers.host; } catch { return false; }
 };
 const sendJson = (req, res, status, obj) => {
   const headers = { 'Content-Type': 'application/json', ...acaoFor(req) };
@@ -257,6 +277,7 @@ async function handleRequest(req, res) {
   if (url.pathname === '/backup') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     if (req.method !== 'GET') return sendJson(req, res, 405, { error: 'GET required' });
+    backupsActive++;
     try {
       db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
       const { size } = statSync(DB_PATH);
@@ -267,14 +288,19 @@ async function handleRequest(req, res) {
         'Content-Length': size,
         ...acaoFor(req),
       });
+      // 'close' fires on completion AND on client disconnect — either way the
+      // pin lifts and the periodic checkpoint may run again.
+      res.on('close', () => { backupsActive--; });
       createReadStream(DB_PATH).pipe(res);
     } catch (err) {
+      backupsActive--;
       return sendJson(req, res, 500, { error: `backup failed: ${err?.message || err}` });
     }
     return;
   }
 
   if (['/load', '/save', '/all', '/delete', '/list'].includes(url.pathname)) {
+    if (!originOk(req)) return sendJson(req, res, 403, { error: 'cross-site writes are not accepted (foreign Origin)' });
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     if (req.method !== 'POST') return sendJson(req, res, 405, { error: 'POST required' });
     let body;
@@ -333,6 +359,7 @@ async function handleRequest(req, res) {
   if (url.pathname.startsWith('/proxy/')) {
     // Gated by either configured credential, same as the storage routes; open
     // only when the server has no auth at all (and then loopback-only below).
+    if (!originOk(req)) return sendJson(req, res, 403, { error: 'cross-site requests are not accepted (foreign Origin)' });
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     let target;
     try {

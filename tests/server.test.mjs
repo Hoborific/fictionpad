@@ -219,6 +219,20 @@ try {
     preEvil.headers.get('access-control-allow-headers') === null,
     'CORS: preflight from a foreign Origin carries no CORS headers');
 
+  // CSRF write guard: ACAO only gates READING — simple cross-site POSTs (a
+  // form with text/plain) still reach the server — so the mutating routes
+  // reject any request carrying a foreign Origin outright.
+  const csrfSave = await post(portA, '/save', { store: 'Meta', key: 'csrf', data: { pwned: true } }, evil);
+  ok(csrfSave.status === 403, 'CSRF: /save with a foreign Origin → 403');
+  ok((await post(portA, '/load', { store: 'Meta', key: 'csrf' })).status === 404,
+    'CSRF: the foreign-origin write did not land');
+  ok((await post(portA, '/save', { store: 'Meta', key: 'csrf', data: { ok: 1 } }, { Origin: 'null' })).ok,
+    'CSRF: Origin "null" (file:// app) may still write');
+  ok((await post(portA, '/save', { store: 'Meta', key: 'csrf', data: { ok: 2 } },
+    { Origin: `http://127.0.0.1:${portA}` })).ok, 'CSRF: same-host Origin may still write');
+  ok((await post(portB, '/save', { store: 'Meta', key: 'csrf', data: {} }, evil)).status === 403,
+    'CSRF: guard runs before auth — foreign Origin → 403 even on the token server');
+
   // ---- proxy credential hygiene (mock upstream echoes headers) ----
   upstream = http.createServer((req, res) => {
     if (req.url === '/redirect') {
@@ -300,8 +314,9 @@ try {
   // CORS lockdown on proxied responses: ACAO only for the allowed origins.
   ok((await proxyTo(portA, loop, { Origin: 'null' })).headers.get('access-control-allow-origin') === '*',
     'CORS: proxied response to Origin "null" carries ACAO');
-  ok((await proxyTo(portA, loop, evil)).headers.get('access-control-allow-origin') === null,
-    'CORS: proxied response to a foreign Origin carries no ACAO');
+  const csrfProxy = await proxyTo(portA, loop, evil);
+  ok(csrfProxy.status === 403 && csrfProxy.headers.get('access-control-allow-origin') === null,
+    'CSRF: /proxy with a foreign Origin → 403 (rejected before proxying, no ACAO)');
 
   // An allowlisted host 302-ing elsewhere must not be followed past the
   // policy — the 3xx passes through to the client as-is.

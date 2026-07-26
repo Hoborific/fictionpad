@@ -948,3 +948,32 @@ Note: this only changes the default prompt text; existing chats with a customize
 - Response length presets are prose guidance only: Short/Medium/Long no longer set max tokens, and the labels dropped the "(~N tokens)" text. The token reserve is the auto/manual knob above.
 - Settings tabs are all built from one section component (since v4.4.5), and Storage is its own tab.
 - Aux prompts no longer hardcode tunable limits: the memory prompt takes `{{chars}}` (note max characters), the lore-extraction prompt `{{max}}` (pieces per pass), and the recap prompt `{{words}}` (word target) - substituted from the Features-tab values at call time, like the suggestions prompt's `{{count}}`/`{{words}}`. Saved custom prompts keep their static numbers until "Reset to default" on the Prompts tab.
+
+
+### v4.5.1
+
+**Changed**
+
+- Chat right-click "Chat panel" is now "Inspector" and opens the chat panel on the Inspector tab (previously identical to "Chat settings"); the sidebar ▦ button lands there too.
+- New-chat icon on scenario/character rows (and the empty-state hint) is now ✚ - the envelope glyph rendered half-size next to the other icons.
+
+**Fixed**
+
+- Imported scenarios/characters/chats are normalized (pure core) at every import path and at editor draft init: missing `lorePieces`/`keys`/`tags` heal instead of crashing the editor, and chat nodes always get a valid `swipes` array with an in-range `activeSwipe` (the `draft.lorePieces` crash class).
+- `saveChat` mirrors every write into `ref.current.chats` immediately (same rule as `commit()`): background memory/lore passes landing near-simultaneously can no longer rebuild from a stale snapshot and silently clobber each other's writes.
+- `pruneInterrupted` carries a cycle guard - a crafted chat import with a parentId cycle no longer hangs the app.
+- Regenerate buttons, token-pick regeneration and the message context menu respect the aux-busy gate (they disable while aux calls run).
+- Lore whole-word key matching is Unicode-aware (`\b` was ASCII-only): accented and CJK keys now match at real word boundaries.
+- Speaker prefix matching accepts digit-leading names ("2B", "7 of 9") and names up to the 60-char registration cap - they split, dedupe and attribute like any other.
+- A literal ```` ```tools ```` / ```` ```toolbox ```` in prose is no longer mistaken for a tool fence (which dropped the rest of the reply from the stored swipe).
+- CSRF guard: the storage and `/proxy` routes reject any request carrying a foreign `Origin` (403). Simple cross-site POSTs bypass ACAO, so on a no-auth deployment any website could previously overwrite kv data (including the synced settings) via a visitor's browser.
+- Storage flushes are serialized: a write landing mid-flush on a slow server can no longer be overwritten out of order by the older value.
+- `/tokenize` no longer caches transient failures - one network blip doesn't poison the key into estimates for the rest of the session.
+- `/backup` pins the `.db` against periodic checkpoints while it streams (no torn downloads under concurrent writes).
+- The lore budget now applies to the macro-substituted (rendered) text - `{{user}}` expansion can't silently inflate the layer past its share.
+- Generation promise rejections that escape internal handling surface as an error banner instead of an unhandled rejection.
+- Titles on the swipe-nav buttons and the icon-only ✕ buttons; the `/pov` reason pill has its own colour; dead `sb-open` class removed.
+
+**Docs**
+
+- `.repro/fp-module.mjs` (generated repro artifact) untracked from git; DESIGN.md's stale "user-defined tools" claim and `~/Downloads` teardown path fixed; README/server.mjs `FICTIONPAD_PROXY_ALLOW` default corrected (loopback-only without auth).

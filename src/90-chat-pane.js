@@ -152,6 +152,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
+            auxBusy=${auxBusy.length > 0}
             dateFormat=${dateFormat} showThinking=${showThinking}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}

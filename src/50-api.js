@@ -342,13 +342,15 @@ function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text
 // (keyed by textHash — full prompt text must never sit in the cache key).
 // Aborts (generation Stop) return null WITHOUT caching — a canceled count
-// isn't a "tokenize unavailable" verdict.
+// isn't a "tokenize unavailable" verdict. Neither is a transient failure
+// (network blip, 5xx): only a definitive HTTP answer is cached, so one
+// hiccup doesn't poison the key into estimates for the rest of the session.
 const tokenizeCache = new Map();
 async function tokenize({ endpoint, apiKey, serverToken, model, prompt, signal }) {
   const key = `${endpoint}|${model}|${textHash(prompt)}`;
   if (tokenizeCache.has(key)) return tokenizeCache.get(key);
   if (tokenizeCache.size > 500) tokenizeCache.clear();
-  let out = null;
+  let out = null, cacheable = false;
   try {
     const res = await fetchAPI(endpoint, `${normalizeEndpoint(endpoint)}/tokenize`, {
       method: 'POST',
@@ -368,10 +370,13 @@ async function tokenize({ endpoint, apiKey, serverToken, model, prompt, signal }
       if (Number.isFinite(json?.count)) count = json.count;
       if (count != null || ids || strings) out = { ids, strings, count };
     }
+    // Definitive answers only: ok, or a client-error status meaning this
+    // endpoint doesn't do /tokenize. A 5xx stays uncached (retried next time).
+    cacheable = res.ok || [400, 404, 405, 501].includes(res.status);
   } catch (e) {
     if (e?.name === 'AbortError') return null;
   }
-  tokenizeCache.set(key, out);
+  if (cacheable) tokenizeCache.set(key, out);
   return out;
 }
 

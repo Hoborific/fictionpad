@@ -35,7 +35,16 @@ class AbstractStorage extends EventTarget {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.flush(), 500);
   }
-  async flush() {
+  // Serialized: a set() mid-flush schedules another flush 500 ms later, and
+  // two concurrent flushes against a slow server can complete same-key puts
+  // out of order (the older value would win). Chaining starts a later flush
+  // only after the earlier one has finished.
+  flush() {
+    const p = (this._flushChain ?? Promise.resolve()).then(() => this.#flushOnce());
+    this._flushChain = p.catch(() => {}); // a failed flush must not poison the chain
+    return p;
+  }
+  async #flushOnce() {
     clearTimeout(this.saveTimer);
     clearTimeout(this.retryTimer);
     const items = [...this.saveQueue.values()];

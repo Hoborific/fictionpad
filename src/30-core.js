@@ -161,13 +161,23 @@ function pruneInterrupted(chat) {
   // whose parentId must change are CLONED first — `out` otherwise shares node
   // objects by reference with the input chat, and mutating them would corrupt
   // the caller's tree.
+  // Both walks below carry a seen-set: a parentId cycle (only creatable via a
+  // crafted import — chat import validates little) must terminate, not hang
+  // the tab. A walk that ends on a node outside `out` re-parents to root.
   for (const [id, n] of Object.entries(out)) {
     let cur = n.parentId;
-    while (cur && !out[cur]) cur = chat.messages[cur]?.parentId ?? null;
+    const seen = new Set();
+    while (cur && !out[cur] && !seen.has(cur)) { seen.add(cur); cur = chat.messages[cur]?.parentId ?? null; }
+    if (cur && !out[cur]) cur = null; // the chain closed a cycle
     if (cur !== n.parentId) out[id] = { ...n, parentId: cur };
   }
   let activeLeafId = chat.activeLeafId;
-  while (activeLeafId && !out[activeLeafId]) activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  const leafSeen = new Set();
+  while (activeLeafId && !out[activeLeafId] && !leafSeen.has(activeLeafId)) {
+    leafSeen.add(activeLeafId);
+    activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  }
+  if (activeLeafId && !out[activeLeafId]) activeLeafId = null; // cycle
   return { ...chat, messages: out, activeLeafId };
 }
 
@@ -233,14 +243,18 @@ function branchChat(chat, nodeId) {
 // (e.g. /pov forcing a character piece in with reason 'pov').
 // Keyword triggers. Keys are regexes; per-piece options: `caseSensitive`
 // (default off → 'i' flag) and `wholeWord` (default off → wraps the key in
-// \b…\b so "cat" doesn't match "cathedral"). Keys shorter than
+// word boundaries so "cat" doesn't match "cathedral"). Keys shorter than
 // MIN_KEY_LENGTH never match (single-char triggers fire on everything —
 // FictionLab arrived at the same floor).
 const MIN_KEY_LENGTH = 2;
+// wholeWord boundary is Unicode-aware: \b is ASCII-only even with the u flag,
+// so a key starting/ending in a non-ASCII word char ("café", CJK) would never
+// match. The leading alternative consumes the preceding char instead of a
+// lookbehind — keyMatches only .test()s, so match positions don't matter.
 function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}) {
   if (!key || !text || String(key).length < MIN_KEY_LENGTH) return false;
-  const pattern = wholeWord ? `\\b(?:${key})\\b` : key;
-  try { return new RegExp(pattern, caseSensitive ? '' : 'i').test(text); } catch { return false; }
+  const pattern = wholeWord ? `(?:^|[^\\p{L}\\p{M}\\p{N}_])(?:${key})(?![\\p{L}\\p{M}\\p{N}_])` : key;
+  try { return new RegExp(pattern, (caseSensitive ? '' : 'i') + (wholeWord ? 'u' : '')).test(text); } catch { return false; }
 }
 
 // Determine which pieces are active this turn.
@@ -281,8 +295,12 @@ function scanLore(lorePieces, conversationText, preActivated = null,
 // opts.scanned: a precomputed scanLore result (assemblePrompt scans once and
 // passes it in) — omitted, selectLore scans itself. Per-piece cost includes
 // the `[title]\n` header exactly as rendered into the World Info block.
+// opts.sub: macro substitution applied at render time ({{user}}, {{var:}}) —
+// budget against the RENDERED text, or macro expansion silently inflates the
+// layer past budgetTokens. Defaults to identity.
 function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
   const scan = opts.scanned ?? scanLore(lorePieces, conversationText, preActivated, opts);
+  const subFn = typeof opts.sub === 'function' ? opts.sub : (t) => t;
   const candidates = [...scan.values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
@@ -291,7 +309,7 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
     reason: a.reason,
     boost: a.boost,
     effWeight: (Number(a.piece.weight) || 0) + a.boost,
-    tokens: estimateTokens(`[${a.piece.title ?? ''}]\n${a.piece.content ?? ''}`, opts.chars),
+    tokens: estimateTokens(`[${a.piece.title ?? ''}]\n${subFn(a.piece.content ?? '')}`, opts.chars),
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
@@ -494,7 +512,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // Scan once: the same result drives both budget selection and the
   // inactive-list reasons below.
   const loreScanned = scanLore(lorePieces, conversationText, preAct, loreOpts);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, { ...loreOpts, scanned: loreScanned });
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, { ...loreOpts, scanned: loreScanned, sub });
   const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
   // Count the full block as sent (incl. the literal [World Info] header) so the
   // layer estimate matches the exact /tokenize count and the history headroom.
@@ -508,7 +526,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
       origin: originOf(p),
-      tokens: est(`[${p.title ?? ''}]\n${p.content ?? ''}`),
+      tokens: est(`[${p.title ?? ''}]\n${sub(p.content ?? '')}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
   }
@@ -589,7 +607,10 @@ const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
 const TOOL_NAME_MAX = 60;
 const TOOL_TEXT_MAX = 2000;
 
-const TOOL_BLOCK_RE = /```tool[ \t]*\r?\n?([\s\S]*?)```/g;
+// The opener must be exactly ```tool — a word char or dash right after
+// (```tools, ```tool-call in prose) is not a tool fence.
+const TOOL_BLOCK_RE = /```tool(?![\w-])[ \t]*\r?\n?([\s\S]*?)```/g;
+const TOOL_OPEN_RE = /```tool(?![\w-])/g; // bare opener, for trailing-fence scans
 
 // Split finished reply text into display text + parsed calls. Malformed JSON
 // inside a well-formed fence = call with error: still stripped from display
@@ -638,8 +659,10 @@ function stripToolBlocksMapped(text) {
   // must never truncate the display text that follows the block.
   const scanFrom = removed.length ? removed[removed.length - 1][1] : 0;
   let cut = s.length;
-  const p = s.lastIndexOf('```tool');
-  if (p >= scanFrom) cut = p;
+  let p = -1, om;
+  TOOL_OPEN_RE.lastIndex = scanFrom;
+  while ((om = TOOL_OPEN_RE.exec(s))) p = om.index; // last opener ≥ scanFrom
+  if (p !== -1) cut = p;
   const map = []; // keptIdx -> rawIdx
   let pos = 0;
   const take = (a, b) => { for (let i = a; i < b; i++) map.push(i); };
@@ -678,7 +701,9 @@ function stripToolBlocks(text) {
   let m;
   while ((m = TOOL_BLOCK_RE.exec(s))) { out += s.slice(last, m.index); last = m.index + m[0].length; }
   out += s.slice(last);
-  const open = out.lastIndexOf('```tool');
+  let open = -1, om;
+  TOOL_OPEN_RE.lastIndex = 0;
+  while ((om = TOOL_OPEN_RE.exec(out))) open = om.index;
   if (open !== -1) out = out.slice(0, open);
   return out;
 }
@@ -847,11 +872,17 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // prompt assembler, so the stored swipe keeps the raw text (logprobs stay
 // aligned) but fed-back history shows the clean form — the model doesn't
 // learn the repeat habit from its own output.
+// Line-start speaker prefix matcher, shared by dedupe + split below. The name
+// class allows digit-leading names ("2B", "7 of 9") and caps at TOOL_NAME_MAX
+// (60 chars) so every registrable name can split; matches are always verified
+// against the known-names list (or "narrator"), so the loose class can't
+// false-split prose like "2024: a recap".
+const SPEAKER_LINE_RE = /^\s*\*{0,2}\s*([\p{L}\p{N}][\p{L}\p{M}\p{N}'. \-]{0,59}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
 function dedupeSpeakerPrefixes(text, names) {
   const s = String(text ?? '');
   if (!s || !names?.length) return s;
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
-  const lineRe = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const lineRe = SPEAKER_LINE_RE;
   const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const midReFor = (spk) => new RegExp(`(\\s)\\*{0,2}${escRe(spk)}\\*{0,2}:[ \\t]+`, 'giu');
   let cur = 'Narrator'; // leading text is narration
@@ -885,7 +916,7 @@ function splitSpeakerSegments(text, names) {
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
-  const re = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const re = SPEAKER_LINE_RE;
   const segments = [];
   let cur = { speaker: null, text: '' };
   const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };
@@ -929,5 +960,48 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
+// ---- import normalization ----
+// Imports (sidebar files, bundles, full backups) upsert JSON nearly verbatim —
+// a hand-edited or third-party file can lack fields the editors and the
+// message UI assume (the `draft.lorePieces.length` crash class). These coerce
+// just the shape and pass unknown fields through; applied at every import
+// path AND at editor draft init, so already-stored malformed entities heal
+// on open. Idempotent — a well-formed entity passes through unchanged.
+const asStr = (v) => (v == null ? '' : String(v));
+const asArr = (v) => (Array.isArray(v) ? v : []);
+function normalizeLorePiece(p) {
+  const o = (p && typeof p === 'object') ? p : {};
+  return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
+    keys: asArr(o.keys).map(String) };
+}
+function normalizeScenario(s) {
+  const o = (s && typeof s === 'object') ? s : {};
+  return { ...o,
+    name: asStr(o.name), description: asStr(o.description),
+    tags: asArr(o.tags).map(String),
+    backstory: asStr(o.backstory), greeting: asStr(o.greeting),
+    scenarioInstructions: asStr(o.scenarioInstructions),
+    lorePieces: asArr(o.lorePieces).map(normalizeLorePiece),
+    characterIds: asArr(o.characterIds).map(String) };
+}
+function normalizeCharacter(c) {
+  const o = (c && typeof c === 'object') ? c : {};
+  return { ...o, name: asStr(o.name), content: asStr(o.content),
+    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color) };
+}
+// Node shape: every node needs a swipes array (≥1 swipe) and an in-range
+// activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
+function normalizeChat(c) {
+  const o = (c && typeof c === 'object') ? c : {};
+  const messages = {};
+  for (const [id, n] of Object.entries((o.messages && typeof o.messages === 'object') ? o.messages : {})) {
+    if (!n || typeof n !== 'object') continue;
+    const swipes = asArr(n.swipes).filter(s => s && typeof s === 'object');
+    if (!swipes.length) swipes.push({ text: '', createdAt: Date.now(), modelId: null });
+    const activeSwipe = Number.isInteger(n.activeSwipe)
+      ? Math.min(Math.max(n.activeSwipe, 0), swipes.length - 1) : 0;
+    messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
+  }
+  return { ...o, messages };
+}
 // === PURE CORE END ===
-

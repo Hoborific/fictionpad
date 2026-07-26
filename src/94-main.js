@@ -271,8 +271,16 @@ function Main({ storage, storageKind, storageFailed }) {
   const updateSettings = (patch) => setSettings(prev => ({ ...(prev ?? {}), ...patch }));
   // touch:false for pure metadata edits (rename, options) — the sidebar sorts
   // by updatedAt, and a rename shouldn't teleport the chat to the top.
-  const saveChat = useCallback((c, { touch = true } = {}) =>
-    upsertChat(c.id, touch ? { ...c, updatedAt: Date.now() } : c), [upsertChat]);
+  // The write is ALSO mirrored into ref.current.chats immediately (same rule
+  // as commit()): React flushes state only after the current task, so an
+  // async merge-on-write pass (memory, extraction, enrichment) or the next
+  // generation reading ref in between would rebuild from the pre-write
+  // snapshot and silently clobber this write.
+  const saveChat = useCallback((c, { touch = true } = {}) => {
+    const next = touch ? { ...c, updatedAt: Date.now() } : c;
+    ref.current.chats = { ...ref.current.chats, [next.id]: next };
+    upsertChat(next.id, next);
+  }, [upsertChat]);
 
   // Writes that failed to persist and are queued for retry (Task: never drop).
   // failed = non-null once the storage layer gives up (quota / repeated
@@ -399,9 +407,9 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
-      case 'inspector': return openChatPanel(chatId, 'chat'); // panel opens on the Chat tab; Inspector is one tab over
+      case 'inspector': return openChatPanel(chatId, 'inspector'); // panel overview: context inspector
       case 'memory': return openChatPanel(chatId, 'memory');
-      case 'settings': return openChatPanel(chatId, 'chat');
+      case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
         const name = prompt('Rename chat', c.name);
         if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
@@ -597,12 +605,10 @@ function Main({ storage, storageKind, storageFailed }) {
               keys: [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5) }
           : p) };
         // touch:false — a background lore write shouldn't re-sort the sidebar.
-        // Sync ref immediately (same reason as commit() in the generation
-        // finally): React flushes the write later, so a sibling enrichment or
-        // the next generation's commit() reading ref.current.chats in between
-        // would rebuild from the pre-enrichment snapshot and drop this write.
+        // saveChat syncs ref.current.chats itself, so a sibling enrichment or
+        // the next generation's commit() can't rebuild from the pre-write
+        // snapshot and drop this piece.
         saveChat(next, { touch: false });
-        ref.current.chats = { ...ref.current.chats, [chatObj.id]: next };
       } catch (e) { console.warn(`Character enrichment failed for "${name}":`, e); }
     }));
   }
@@ -1024,6 +1030,15 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
 
+  // runGeneration is fire-and-forget at every call site: a rejection that
+  // escapes its internal error handling (a bug, not an API error) must not
+  // die as an unhandled promise rejection — log it and surface a banner.
+  const fireGeneration = (...args) =>
+    runGeneration(...args).catch((e) => {
+      console.error('Generation failed unexpectedly:', e);
+      setError(`Generation failed: ${e?.message ?? e}`);
+    });
+
   // ---- response suggestions (aux model; ephemeral, silent on failure) ----
   async function fetchSuggestions(chatObj, nodeId) {
     const { personas: pe, settings: st } = ref.current;
@@ -1073,18 +1088,18 @@ function Main({ storage, storageKind, storageFailed }) {
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
     upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
-    runGeneration(c2, asstId, { fresh: true });
+    fireGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
     if (!generationReady(c)) return;
     const path = getActivePath(c.messages, c.activeLeafId);
     const last = path[path.length - 1];
     if (last?.role === 'assistant' && activeText(last)) {
-      runGeneration(c, last.id, { continuation: true });
+      fireGeneration(c, last.id, { continuation: true });
     } else {
       const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
       upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-      runGeneration(c1, id, { fresh: true });
+      fireGeneration(c1, id, { fresh: true });
     }
   }
   function handleInput(raw) {
@@ -1115,7 +1130,7 @@ function Main({ storage, storageKind, storageFailed }) {
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-        runGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
+        fireGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
         return null;
       }
       if (cmd === '/improve') {
@@ -1233,18 +1248,18 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onRegenerate = (nodeId) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current || !generationReady(c)) return;
+    if (!n || genRef.current || auxBusy.length || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
-    runGeneration(c1, nodeId);
+    fireGeneration(c1, nodeId);
   };
   // Regenerate from a token: new swipe whose text starts with tokens[0..i]
   // (+ chosen alternative), then continue generation from that prefix via the
   // existing continuation machinery (trailing assistant message = prefill).
   const onRegenFromToken = (nodeId, tokIdx, alt) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current) return;
+    if (!n || genRef.current || auxBusy.length) return;
     const src = n.swipes[n.activeSwipe];
     const toks = src?.tokens;
     if (!toks?.length || !generationReady(c)) return;
@@ -1254,7 +1269,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
-    runGeneration(c1, nodeId, { continuation: true });
+    fireGeneration(c1, nodeId, { continuation: true });
   };
   const onSwipe = (nodeId, dir) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
@@ -1350,7 +1365,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
     upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-    runGeneration(c1, id, { fresh: true });
+    fireGeneration(c1, id, { fresh: true });
   };
 
   // ---- export / import ----
@@ -1367,6 +1382,10 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  // ---- import/export: files from the sidebar's ↑ button. Imported JSON is
+  // normalized (pure core) before upsert — a hand-edited/third-party file can
+  // lack fields the editors and message UI assume (the draft.lorePieces crash
+  // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
@@ -1375,24 +1394,24 @@ function Main({ storage, storageKind, storageFailed }) {
     if (obj.__error) return setError(`Import failed: ${obj.__error}`);
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
       // Legacy single-scenario export: fresh id, never clobbers an existing one.
-      const s = { ...obj.data, id: uid() };
+      const s = normalizeScenario({ ...obj.data, id: uid() });
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
       // Bundle: upsert scenario + linked characters by id (last write wins,
       // same as the migration helpers).
-      const s = obj.data.scenario;
+      const s = normalizeScenario(obj.data.scenario);
       if (!s.id) s.id = uid();
       upsertScenario(s.id, s);
       for (const ch of obj.data.characters ?? [])
-        if (ch?.id && ch.name != null) upsertCharacter(ch.id, ch);
+        if (ch?.id && ch.name != null) upsertCharacter(ch.id, normalizeCharacter(ch));
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
-      const ch = { ...obj.data, id: uid() };
+      const ch = normalizeCharacter({ ...obj.data, id: uid() });
       upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, characterId: ch.id, scenarioId: null }));
     } else if (obj.type === 'fictionpad-chat' && obj.data?.messages) {
-      const c = { ...obj.data, id: uid() };
+      const c = normalizeChat({ ...obj.data, id: uid() });
       upsertChat(c.id, c);
       setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId ?? null }));
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
@@ -1424,13 +1443,13 @@ function Main({ storage, storageKind, storageFailed }) {
     const d = obj.data;
     const counts = { scenarios: 0, chats: 0, characters: 0, personas: 0 };
     for (const s of Object.values(d.scenarios ?? {}))
-      if (s?.id && s.name != null) { upsertScenario(s.id, s); counts.scenarios++; }
+      if (s?.id && s.name != null) { upsertScenario(s.id, normalizeScenario(s)); counts.scenarios++; }
     // Chats upsert through the same path as normal edits, so importing over
     // the currently open chat replaces the live copy instead of forking state.
     for (const c of Object.values(d.chats ?? {}))
-      if (c?.id && c.messages) { upsertChat(c.id, c); counts.chats++; }
+      if (c?.id && c.messages) { upsertChat(c.id, normalizeChat(c)); counts.chats++; }
     for (const ch of Object.values(d.characters ?? {}))
-      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, ch); counts.characters++; }
+      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, normalizeCharacter(ch)); counts.characters++; }
     for (const p of Object.values(d.personas ?? {}))
       if (p?.id && p.name != null) { upsertPersona(p.id, p); counts.personas++; }
     let applied = null;
@@ -1510,7 +1529,7 @@ function Main({ storage, storageKind, storageFailed }) {
   }, [viewportW, ribbonArrows]);
 
   return html`
-    <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
+    <div class="app ${dragging ? 'dragging' : ''}">
       ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
@@ -1705,7 +1724,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${ctxMenu.items ?? [
-          { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

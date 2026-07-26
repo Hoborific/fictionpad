@@ -16,7 +16,7 @@ function newCharacter() {
 }
 
 function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
-  const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
+  const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);

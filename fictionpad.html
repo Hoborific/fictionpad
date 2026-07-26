@@ -443,6 +443,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
 .pill.chat { border-color: var(--c-good); color: var(--c-good); }
 .pill.character { border-color: var(--c-dialogue); color: var(--c-dialogue); }
+.pill.pov { border-color: var(--c-warning); color: var(--c-warning); }
 /* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative).
    Styled like the dim meta row around it, not the inspector's colored reason pills. */
 button.pill.tools-toggle {
@@ -720,7 +721,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.5.0';
+const APP_VERSION = '4.5.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -904,8 +905,11 @@ function autoCloseProse(text) {
 // Unreliable when the model doesn't prefix names — purely cosmetic.
 function detectSpeaker(text, names) {
   if (!text || !names?.length) return null;
-  const m = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:/u.exec(text)
-        ?? /^\s*\*{1,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{1,2}/u.exec(text);
+  // Name class allows digit-leading names ("2B") and caps at TOOL_NAME_MAX
+  // (60 chars) so every registrable name can attribute — keep in sync with
+  // SPEAKER_LINE_RE in 30-core.js (loaded later, so no shared const).
+  const m = /^\s*\*{0,2}\s*([\p{L}\p{N}][\p{L}\p{M}\p{N}'. \-]{0,59}?)\s*\*{0,2}\s*:/u.exec(text)
+        ?? /^\s*\*{1,2}\s*([\p{L}\p{N}][\p{L}\p{M}\p{N}'. \-]{0,59}?)\s*\*{1,2}/u.exec(text);
   if (!m) return null;
   const candidate = m[1].trim().toLowerCase();
   return names.find(n => n.toLowerCase() === candidate) ?? null;
@@ -1101,13 +1105,23 @@ function pruneInterrupted(chat) {
   // whose parentId must change are CLONED first — `out` otherwise shares node
   // objects by reference with the input chat, and mutating them would corrupt
   // the caller's tree.
+  // Both walks below carry a seen-set: a parentId cycle (only creatable via a
+  // crafted import — chat import validates little) must terminate, not hang
+  // the tab. A walk that ends on a node outside `out` re-parents to root.
   for (const [id, n] of Object.entries(out)) {
     let cur = n.parentId;
-    while (cur && !out[cur]) cur = chat.messages[cur]?.parentId ?? null;
+    const seen = new Set();
+    while (cur && !out[cur] && !seen.has(cur)) { seen.add(cur); cur = chat.messages[cur]?.parentId ?? null; }
+    if (cur && !out[cur]) cur = null; // the chain closed a cycle
     if (cur !== n.parentId) out[id] = { ...n, parentId: cur };
   }
   let activeLeafId = chat.activeLeafId;
-  while (activeLeafId && !out[activeLeafId]) activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  const leafSeen = new Set();
+  while (activeLeafId && !out[activeLeafId] && !leafSeen.has(activeLeafId)) {
+    leafSeen.add(activeLeafId);
+    activeLeafId = chat.messages[activeLeafId]?.parentId ?? null;
+  }
+  if (activeLeafId && !out[activeLeafId]) activeLeafId = null; // cycle
   return { ...chat, messages: out, activeLeafId };
 }
 
@@ -1173,14 +1187,18 @@ function branchChat(chat, nodeId) {
 // (e.g. /pov forcing a character piece in with reason 'pov').
 // Keyword triggers. Keys are regexes; per-piece options: `caseSensitive`
 // (default off → 'i' flag) and `wholeWord` (default off → wraps the key in
-// \b…\b so "cat" doesn't match "cathedral"). Keys shorter than
+// word boundaries so "cat" doesn't match "cathedral"). Keys shorter than
 // MIN_KEY_LENGTH never match (single-char triggers fire on everything —
 // FictionLab arrived at the same floor).
 const MIN_KEY_LENGTH = 2;
+// wholeWord boundary is Unicode-aware: \b is ASCII-only even with the u flag,
+// so a key starting/ending in a non-ASCII word char ("café", CJK) would never
+// match. The leading alternative consumes the preceding char instead of a
+// lookbehind — keyMatches only .test()s, so match positions don't matter.
 function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}) {
   if (!key || !text || String(key).length < MIN_KEY_LENGTH) return false;
-  const pattern = wholeWord ? `\\b(?:${key})\\b` : key;
-  try { return new RegExp(pattern, caseSensitive ? '' : 'i').test(text); } catch { return false; }
+  const pattern = wholeWord ? `(?:^|[^\\p{L}\\p{M}\\p{N}_])(?:${key})(?![\\p{L}\\p{M}\\p{N}_])` : key;
+  try { return new RegExp(pattern, (caseSensitive ? '' : 'i') + (wholeWord ? 'u' : '')).test(text); } catch { return false; }
 }
 
 // Determine which pieces are active this turn.
@@ -1221,8 +1239,12 @@ function scanLore(lorePieces, conversationText, preActivated = null,
 // opts.scanned: a precomputed scanLore result (assemblePrompt scans once and
 // passes it in) — omitted, selectLore scans itself. Per-piece cost includes
 // the `[title]\n` header exactly as rendered into the World Info block.
+// opts.sub: macro substitution applied at render time ({{user}}, {{var:}}) —
+// budget against the RENDERED text, or macro expansion silently inflates the
+// layer past budgetTokens. Defaults to identity.
 function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
   const scan = opts.scanned ?? scanLore(lorePieces, conversationText, preActivated, opts);
+  const subFn = typeof opts.sub === 'function' ? opts.sub : (t) => t;
   const candidates = [...scan.values()].map(a => ({
     id: a.piece.id,
     title: a.piece.title ?? '',
@@ -1231,7 +1253,7 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
     reason: a.reason,
     boost: a.boost,
     effWeight: (Number(a.piece.weight) || 0) + a.boost,
-    tokens: estimateTokens(`[${a.piece.title ?? ''}]\n${a.piece.content ?? ''}`, opts.chars),
+    tokens: estimateTokens(`[${a.piece.title ?? ''}]\n${subFn(a.piece.content ?? '')}`, opts.chars),
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
@@ -1434,7 +1456,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // Scan once: the same result drives both budget selection and the
   // inactive-list reasons below.
   const loreScanned = scanLore(lorePieces, conversationText, preAct, loreOpts);
-  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, { ...loreOpts, scanned: loreScanned });
+  const loreSel = selectLore(lorePieces, conversationText, loreCap, preAct, { ...loreOpts, scanned: loreScanned, sub });
   const loreText = loreSel.map(s => `[${s.title}]\n${sub(s.content)}`).join('\n\n');
   // Count the full block as sent (incl. the literal [World Info] header) so the
   // layer estimate matches the exact /tokenize count and the history headroom.
@@ -1448,7 +1470,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       id: p.id, title: p.title ?? '',
       reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
       origin: originOf(p),
-      tokens: est(`[${p.title ?? ''}]\n${p.content ?? ''}`),
+      tokens: est(`[${p.title ?? ''}]\n${sub(p.content ?? '')}`),
       preview: toPreview(p.content), content: p.content ?? '',
     });
   }
@@ -1529,7 +1551,10 @@ const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
 const TOOL_NAME_MAX = 60;
 const TOOL_TEXT_MAX = 2000;
 
-const TOOL_BLOCK_RE = /```tool[ \t]*\r?\n?([\s\S]*?)```/g;
+// The opener must be exactly ```tool — a word char or dash right after
+// (```tools, ```tool-call in prose) is not a tool fence.
+const TOOL_BLOCK_RE = /```tool(?![\w-])[ \t]*\r?\n?([\s\S]*?)```/g;
+const TOOL_OPEN_RE = /```tool(?![\w-])/g; // bare opener, for trailing-fence scans
 
 // Split finished reply text into display text + parsed calls. Malformed JSON
 // inside a well-formed fence = call with error: still stripped from display
@@ -1578,8 +1603,10 @@ function stripToolBlocksMapped(text) {
   // must never truncate the display text that follows the block.
   const scanFrom = removed.length ? removed[removed.length - 1][1] : 0;
   let cut = s.length;
-  const p = s.lastIndexOf('```tool');
-  if (p >= scanFrom) cut = p;
+  let p = -1, om;
+  TOOL_OPEN_RE.lastIndex = scanFrom;
+  while ((om = TOOL_OPEN_RE.exec(s))) p = om.index; // last opener ≥ scanFrom
+  if (p !== -1) cut = p;
   const map = []; // keptIdx -> rawIdx
   let pos = 0;
   const take = (a, b) => { for (let i = a; i < b; i++) map.push(i); };
@@ -1618,7 +1645,9 @@ function stripToolBlocks(text) {
   let m;
   while ((m = TOOL_BLOCK_RE.exec(s))) { out += s.slice(last, m.index); last = m.index + m[0].length; }
   out += s.slice(last);
-  const open = out.lastIndexOf('```tool');
+  let open = -1, om;
+  TOOL_OPEN_RE.lastIndex = 0;
+  while ((om = TOOL_OPEN_RE.exec(out))) open = om.index;
   if (open !== -1) out = out.slice(0, open);
   return out;
 }
@@ -1787,11 +1816,17 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // prompt assembler, so the stored swipe keeps the raw text (logprobs stay
 // aligned) but fed-back history shows the clean form — the model doesn't
 // learn the repeat habit from its own output.
+// Line-start speaker prefix matcher, shared by dedupe + split below. The name
+// class allows digit-leading names ("2B", "7 of 9") and caps at TOOL_NAME_MAX
+// (60 chars) so every registrable name can split; matches are always verified
+// against the known-names list (or "narrator"), so the loose class can't
+// false-split prose like "2024: a recap".
+const SPEAKER_LINE_RE = /^\s*\*{0,2}\s*([\p{L}\p{N}][\p{L}\p{M}\p{N}'. \-]{0,59}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
 function dedupeSpeakerPrefixes(text, names) {
   const s = String(text ?? '');
   if (!s || !names?.length) return s;
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
-  const lineRe = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const lineRe = SPEAKER_LINE_RE;
   const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const midReFor = (spk) => new RegExp(`(\\s)\\*{0,2}${escRe(spk)}\\*{0,2}:[ \\t]+`, 'giu');
   let cur = 'Narrator'; // leading text is narration
@@ -1825,7 +1860,7 @@ function splitSpeakerSegments(text, names) {
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
-  const re = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const re = SPEAKER_LINE_RE;
   const segments = [];
   let cur = { speaker: null, text: '' };
   const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };
@@ -1869,8 +1904,51 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
+// ---- import normalization ----
+// Imports (sidebar files, bundles, full backups) upsert JSON nearly verbatim —
+// a hand-edited or third-party file can lack fields the editors and the
+// message UI assume (the `draft.lorePieces.length` crash class). These coerce
+// just the shape and pass unknown fields through; applied at every import
+// path AND at editor draft init, so already-stored malformed entities heal
+// on open. Idempotent — a well-formed entity passes through unchanged.
+const asStr = (v) => (v == null ? '' : String(v));
+const asArr = (v) => (Array.isArray(v) ? v : []);
+function normalizeLorePiece(p) {
+  const o = (p && typeof p === 'object') ? p : {};
+  return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
+    keys: asArr(o.keys).map(String) };
+}
+function normalizeScenario(s) {
+  const o = (s && typeof s === 'object') ? s : {};
+  return { ...o,
+    name: asStr(o.name), description: asStr(o.description),
+    tags: asArr(o.tags).map(String),
+    backstory: asStr(o.backstory), greeting: asStr(o.greeting),
+    scenarioInstructions: asStr(o.scenarioInstructions),
+    lorePieces: asArr(o.lorePieces).map(normalizeLorePiece),
+    characterIds: asArr(o.characterIds).map(String) };
+}
+function normalizeCharacter(c) {
+  const o = (c && typeof c === 'object') ? c : {};
+  return { ...o, name: asStr(o.name), content: asStr(o.content),
+    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color) };
+}
+// Node shape: every node needs a swipes array (≥1 swipe) and an in-range
+// activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
+function normalizeChat(c) {
+  const o = (c && typeof c === 'object') ? c : {};
+  const messages = {};
+  for (const [id, n] of Object.entries((o.messages && typeof o.messages === 'object') ? o.messages : {})) {
+    if (!n || typeof n !== 'object') continue;
+    const swipes = asArr(n.swipes).filter(s => s && typeof s === 'object');
+    if (!swipes.length) swipes.push({ text: '', createdAt: Date.now(), modelId: null });
+    const activeSwipe = Number.isInteger(n.activeSwipe)
+      ? Math.min(Math.max(n.activeSwipe, 0), swipes.length - 1) : 0;
+    messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
+  }
+  return { ...o, messages };
+}
 // === PURE CORE END ===
-
 // ============================================================================
 // STORAGE — AbstractStorage (EventTarget + 500 ms debounced save queue) with
 // an IndexedDB adapter. Entities are stored one-key-per-entity; the adapter
@@ -1908,7 +1986,16 @@ class AbstractStorage extends EventTarget {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.flush(), 500);
   }
-  async flush() {
+  // Serialized: a set() mid-flush schedules another flush 500 ms later, and
+  // two concurrent flushes against a slow server can complete same-key puts
+  // out of order (the older value would win). Chaining starts a later flush
+  // only after the earlier one has finished.
+  flush() {
+    const p = (this._flushChain ?? Promise.resolve()).then(() => this.#flushOnce());
+    this._flushChain = p.catch(() => {}); // a failed flush must not poison the chain
+    return p;
+  }
+  async #flushOnce() {
     clearTimeout(this.saveTimer);
     clearTimeout(this.retryTimer);
     const items = [...this.saveQueue.values()];
@@ -2421,13 +2508,15 @@ function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text
 // (keyed by textHash — full prompt text must never sit in the cache key).
 // Aborts (generation Stop) return null WITHOUT caching — a canceled count
-// isn't a "tokenize unavailable" verdict.
+// isn't a "tokenize unavailable" verdict. Neither is a transient failure
+// (network blip, 5xx): only a definitive HTTP answer is cached, so one
+// hiccup doesn't poison the key into estimates for the rest of the session.
 const tokenizeCache = new Map();
 async function tokenize({ endpoint, apiKey, serverToken, model, prompt, signal }) {
   const key = `${endpoint}|${model}|${textHash(prompt)}`;
   if (tokenizeCache.has(key)) return tokenizeCache.get(key);
   if (tokenizeCache.size > 500) tokenizeCache.clear();
-  let out = null;
+  let out = null, cacheable = false;
   try {
     const res = await fetchAPI(endpoint, `${normalizeEndpoint(endpoint)}/tokenize`, {
       method: 'POST',
@@ -2447,10 +2536,13 @@ async function tokenize({ endpoint, apiKey, serverToken, model, prompt, signal }
       if (Number.isFinite(json?.count)) count = json.count;
       if (count != null || ids || strings) out = { ids, strings, count };
     }
+    // Definitive answers only: ok, or a client-error status meaning this
+    // endpoint doesn't do /tokenize. A 5xx stays uncached (retried next time).
+    cacheable = res.ok || [400, 404, 405, 501].includes(res.status);
   } catch (e) {
     if (e?.name === 'AbortError') return null;
   }
-  tokenizeCache.set(key, out);
+  if (cacheable) tokenizeCache.set(key, out);
   return out;
 }
 
@@ -2945,7 +3037,7 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
 // generate. The generator's patch fills the local draft only; persistence
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
 function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
-  const [draft, setDraft] = useState(() => deepClone(piece));
+  const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -2983,7 +3075,9 @@ function newScenario() {
 }
 
 function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
-  const [draft, setDraft] = useState(() => deepClone(scenario));
+  // normalizeScenario: imports upsert JSON verbatim — heal missing fields
+  // (lorePieces etc.) here too, or the draft reads below crash on open.
+  const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -3100,7 +3194,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
                   title=${defaultPersonaId === p.id ? 'Default for new chats — click to clear' : 'Make default for new chats'}
                   onClick=${() => onSetDefault(defaultPersonaId === p.id ? '' : p.id)}>★</button>
                 <button class="btn small" onClick=${() => startEdit(deepClone(p))}>edit</button>
-                <button class="btn small danger" onClick=${() => onRemove(p.id)}>✕</button>
+                <button class="btn small danger" title="Delete persona" onClick=${() => onRemove(p.id)}>✕</button>
               </span>
             </div>`)}
         </div>`}
@@ -4030,7 +4124,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
             <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt, dateFormat)}</span>
             <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
               ${m.pinned ? 'unpin' : 'pin'}</button>
-            <button class="btn small danger" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
+            <button class="btn small danger" title="Delete memory" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
           </div>
           <div class="text">${m.text}</div>
         </div>`)}
@@ -4082,7 +4176,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
                 <span class="t">${q.title || '(untitled)'}</span>
                 <span class="pill">${q.source === 'extract' ? 'extracted' : 'tool'}</span>
                 <button class="btn small" onClick=${() => update(acceptQueuedLore(chat, q.id))}>accept</button>
-                <button class="btn small danger" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
+                <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
               <div class="hint" style=${{ padding: '2px 8px 6px' }}>${toPreview(q.content, 160)}</div>
             </div>`)}
@@ -4296,7 +4390,7 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -4456,9 +4550,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
             onClick=${() => setShowProbs(!showProbs)}>▦</button>`}
           <button class="btn small ghost" title="Edit" disabled=${generating}
             onClick=${() => { setDraft(swipe.text); setEditing(true); }}>✎</button>
-          ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating}
+          ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating || auxBusy}
             onClick=${() => onRegenerate(node.id)}>↻</button>`}
-          ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating}
+          ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating || auxBusy}
             onClick=${() => onReply(node.id)}>↻</button>`}
           <button class="btn small ghost" title="Branch from here" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
@@ -4471,16 +4565,16 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
           onClick=${() => setActionsOpen(!actionsOpen)}>${actionsOpen ? '‹' : '›'}</button>
 ${showNav && html`
           <span class="swipes">
-            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
+            <button class="btn small ghost" title="Previous swipe" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
             <span>${n}/${m}</span>
             ${usedIdx != null && html`
               <span class="used-dot ${atUsed ? '' : 'jump'}"
                 title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
                 onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
             ${n < m
-              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
+              ? html`<button class="btn small ghost" title="Next swipe" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
               : isLeafAssistant
-                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
+                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating || auxBusy}
                     onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
                 : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
           </span>`}
@@ -4522,8 +4616,8 @@ ${showNav && html`
             ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
             { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); }, disabled: generating },
             isUser
-              ? { label: 'Reply from here', fn: () => onReply(node.id) }
-              : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id) },
+              ? { label: 'Reply from here', fn: () => onReply(node.id), disabled: generating || auxBusy }
+              : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id), disabled: generating || auxBusy },
             { label: 'Branch from here', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
@@ -4801,6 +4895,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
+            auxBusy=${auxBusy.length > 0}
             dateFormat=${dateFormat} showThinking=${showThinking}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}
@@ -4961,7 +5056,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               <span class="tools">
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat from this scenario"
-                    onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✉\uFE0E</button>
+                    onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✚</button>
                   <button class="btn small ghost" title="Edit"
                     onClick=${(e) => { e.stopPropagation(); onEditScenario(s.id); }}>✎</button>
                   <button class="btn small ghost" title="Export JSON"
@@ -4988,7 +5083,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               <span class="tools">
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat with this character"
-                    onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✉\uFE0E</button>
+                    onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✚</button>
                   <button class="btn small ghost" title="Edit"
                     onClick=${(e) => { e.stopPropagation(); onEditCharacter(c.id); }}>✎</button>
                   <button class="btn small ghost" title="Export JSON"
@@ -5008,7 +5103,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
             style=${{ margin: '0 0 6px', padding: '3px 8px', fontSize: '13px' }} />
           ${shownChats.length === 0 && chatQuery
             && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats match.</div>`}
-          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✉\uFE0E on a scenario or character.</div>`}
+          ${shownChats.length === 0 && !chatQuery && !sideCollapsed.chats && html`<div class="hint" style=${{ padding: '0 6px' }}>No chats yet. Use ✚ on a scenario or character.</div>`}
           ${shownChats.map(c => html`
             <div class="side-item chat ${c.id === selectedChatId ? 'selected' : ''}" key=${c.id}
               onClick=${() => {
@@ -5024,7 +5119,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">
                 <span class="tools-full">
-                  <button class="btn small ghost" title="Chat panel (options / inspector / memory)"
+                  <button class="btn small ghost" title="Inspector"
                     onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
                   <button class="btn small ghost" title="Rename"
                     onClick=${(e) => act(e, c.id, 'rename')}>✎</button>
@@ -5224,7 +5319,7 @@ function newCharacter() {
 }
 
 function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
-  const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
+  const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -5668,8 +5763,16 @@ function Main({ storage, storageKind, storageFailed }) {
   const updateSettings = (patch) => setSettings(prev => ({ ...(prev ?? {}), ...patch }));
   // touch:false for pure metadata edits (rename, options) — the sidebar sorts
   // by updatedAt, and a rename shouldn't teleport the chat to the top.
-  const saveChat = useCallback((c, { touch = true } = {}) =>
-    upsertChat(c.id, touch ? { ...c, updatedAt: Date.now() } : c), [upsertChat]);
+  // The write is ALSO mirrored into ref.current.chats immediately (same rule
+  // as commit()): React flushes state only after the current task, so an
+  // async merge-on-write pass (memory, extraction, enrichment) or the next
+  // generation reading ref in between would rebuild from the pre-write
+  // snapshot and silently clobber this write.
+  const saveChat = useCallback((c, { touch = true } = {}) => {
+    const next = touch ? { ...c, updatedAt: Date.now() } : c;
+    ref.current.chats = { ...ref.current.chats, [next.id]: next };
+    upsertChat(next.id, next);
+  }, [upsertChat]);
 
   // Writes that failed to persist and are queued for retry (Task: never drop).
   // failed = non-null once the storage layer gives up (quota / repeated
@@ -5796,9 +5899,9 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
-      case 'inspector': return openChatPanel(chatId, 'chat'); // panel opens on the Chat tab; Inspector is one tab over
+      case 'inspector': return openChatPanel(chatId, 'inspector'); // panel overview: context inspector
       case 'memory': return openChatPanel(chatId, 'memory');
-      case 'settings': return openChatPanel(chatId, 'chat');
+      case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
         const name = prompt('Rename chat', c.name);
         if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
@@ -5994,12 +6097,10 @@ function Main({ storage, storageKind, storageFailed }) {
               keys: [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5) }
           : p) };
         // touch:false — a background lore write shouldn't re-sort the sidebar.
-        // Sync ref immediately (same reason as commit() in the generation
-        // finally): React flushes the write later, so a sibling enrichment or
-        // the next generation's commit() reading ref.current.chats in between
-        // would rebuild from the pre-enrichment snapshot and drop this write.
+        // saveChat syncs ref.current.chats itself, so a sibling enrichment or
+        // the next generation's commit() can't rebuild from the pre-write
+        // snapshot and drop this piece.
         saveChat(next, { touch: false });
-        ref.current.chats = { ...ref.current.chats, [chatObj.id]: next };
       } catch (e) { console.warn(`Character enrichment failed for "${name}":`, e); }
     }));
   }
@@ -6421,6 +6522,15 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
 
+  // runGeneration is fire-and-forget at every call site: a rejection that
+  // escapes its internal error handling (a bug, not an API error) must not
+  // die as an unhandled promise rejection — log it and surface a banner.
+  const fireGeneration = (...args) =>
+    runGeneration(...args).catch((e) => {
+      console.error('Generation failed unexpectedly:', e);
+      setError(`Generation failed: ${e?.message ?? e}`);
+    });
+
   // ---- response suggestions (aux model; ephemeral, silent on failure) ----
   async function fetchSuggestions(chatObj, nodeId) {
     const { personas: pe, settings: st } = ref.current;
@@ -6470,18 +6580,18 @@ function Main({ storage, storageKind, storageFailed }) {
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
     upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
-    runGeneration(c2, asstId, { fresh: true });
+    fireGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
     if (!generationReady(c)) return;
     const path = getActivePath(c.messages, c.activeLeafId);
     const last = path[path.length - 1];
     if (last?.role === 'assistant' && activeText(last)) {
-      runGeneration(c, last.id, { continuation: true });
+      fireGeneration(c, last.id, { continuation: true });
     } else {
       const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
       upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-      runGeneration(c1, id, { fresh: true });
+      fireGeneration(c1, id, { fresh: true });
     }
   }
   function handleInput(raw) {
@@ -6512,7 +6622,7 @@ function Main({ storage, storageKind, storageFailed }) {
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-        runGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
+        fireGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
         return null;
       }
       if (cmd === '/improve') {
@@ -6630,18 +6740,18 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onRegenerate = (nodeId) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current || !generationReady(c)) return;
+    if (!n || genRef.current || auxBusy.length || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
-    runGeneration(c1, nodeId);
+    fireGeneration(c1, nodeId);
   };
   // Regenerate from a token: new swipe whose text starts with tokens[0..i]
   // (+ chosen alternative), then continue generation from that prefix via the
   // existing continuation machinery (trailing assistant message = prefill).
   const onRegenFromToken = (nodeId, tokIdx, alt) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current) return;
+    if (!n || genRef.current || auxBusy.length) return;
     const src = n.swipes[n.activeSwipe];
     const toks = src?.tokens;
     if (!toks?.length || !generationReady(c)) return;
@@ -6651,7 +6761,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
-    runGeneration(c1, nodeId, { continuation: true });
+    fireGeneration(c1, nodeId, { continuation: true });
   };
   const onSwipe = (nodeId, dir) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
@@ -6747,7 +6857,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
     upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-    runGeneration(c1, id, { fresh: true });
+    fireGeneration(c1, id, { fresh: true });
   };
 
   // ---- export / import ----
@@ -6764,6 +6874,10 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onExportChat = (c) =>
     downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  // ---- import/export: files from the sidebar's ↑ button. Imported JSON is
+  // normalized (pure core) before upsert — a hand-edited/third-party file can
+  // lack fields the editors and message UI assume (the draft.lorePieces crash
+  // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
@@ -6772,24 +6886,24 @@ function Main({ storage, storageKind, storageFailed }) {
     if (obj.__error) return setError(`Import failed: ${obj.__error}`);
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
       // Legacy single-scenario export: fresh id, never clobbers an existing one.
-      const s = { ...obj.data, id: uid() };
+      const s = normalizeScenario({ ...obj.data, id: uid() });
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
       // Bundle: upsert scenario + linked characters by id (last write wins,
       // same as the migration helpers).
-      const s = obj.data.scenario;
+      const s = normalizeScenario(obj.data.scenario);
       if (!s.id) s.id = uid();
       upsertScenario(s.id, s);
       for (const ch of obj.data.characters ?? [])
-        if (ch?.id && ch.name != null) upsertCharacter(ch.id, ch);
+        if (ch?.id && ch.name != null) upsertCharacter(ch.id, normalizeCharacter(ch));
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
-      const ch = { ...obj.data, id: uid() };
+      const ch = normalizeCharacter({ ...obj.data, id: uid() });
       upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, characterId: ch.id, scenarioId: null }));
     } else if (obj.type === 'fictionpad-chat' && obj.data?.messages) {
-      const c = { ...obj.data, id: uid() };
+      const c = normalizeChat({ ...obj.data, id: uid() });
       upsertChat(c.id, c);
       setUi(u => ({ ...u, chatId: c.id, scenarioId: c.scenarioId ?? null }));
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
@@ -6821,13 +6935,13 @@ function Main({ storage, storageKind, storageFailed }) {
     const d = obj.data;
     const counts = { scenarios: 0, chats: 0, characters: 0, personas: 0 };
     for (const s of Object.values(d.scenarios ?? {}))
-      if (s?.id && s.name != null) { upsertScenario(s.id, s); counts.scenarios++; }
+      if (s?.id && s.name != null) { upsertScenario(s.id, normalizeScenario(s)); counts.scenarios++; }
     // Chats upsert through the same path as normal edits, so importing over
     // the currently open chat replaces the live copy instead of forking state.
     for (const c of Object.values(d.chats ?? {}))
-      if (c?.id && c.messages) { upsertChat(c.id, c); counts.chats++; }
+      if (c?.id && c.messages) { upsertChat(c.id, normalizeChat(c)); counts.chats++; }
     for (const ch of Object.values(d.characters ?? {}))
-      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, ch); counts.characters++; }
+      if (ch?.id && ch.name != null) { upsertCharacter(ch.id, normalizeCharacter(ch)); counts.characters++; }
     for (const p of Object.values(d.personas ?? {}))
       if (p?.id && p.name != null) { upsertPersona(p.id, p); counts.personas++; }
     let applied = null;
@@ -6907,7 +7021,7 @@ function Main({ storage, storageKind, storageFailed }) {
   }, [viewportW, ribbonArrows]);
 
   return html`
-    <div class="app ${sidebarCollapsed ? '' : 'sb-open'} ${dragging ? 'dragging' : ''}">
+    <div class="app ${dragging ? 'dragging' : ''}">
       ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
@@ -7102,7 +7216,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${ctxMenu.items ?? [
-          { label: 'Chat panel', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

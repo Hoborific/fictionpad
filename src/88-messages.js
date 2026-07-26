@@ -55,7 +55,7 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -215,9 +215,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
             onClick=${() => setShowProbs(!showProbs)}>▦</button>`}
           <button class="btn small ghost" title="Edit" disabled=${generating}
             onClick=${() => { setDraft(swipe.text); setEditing(true); }}>✎</button>
-          ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating}
+          ${!isUser && html`<button class="btn small ghost" title="Regenerate (new swipe)" disabled=${generating || auxBusy}
             onClick=${() => onRegenerate(node.id)}>↻</button>`}
-          ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating}
+          ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating || auxBusy}
             onClick=${() => onReply(node.id)}>↻</button>`}
           <button class="btn small ghost" title="Branch from here" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
@@ -230,16 +230,16 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
           onClick=${() => setActionsOpen(!actionsOpen)}>${actionsOpen ? '‹' : '›'}</button>
 ${showNav && html`
           <span class="swipes">
-            <button class="btn small ghost" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
+            <button class="btn small ghost" title="Previous swipe" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
             <span>${n}/${m}</span>
             ${usedIdx != null && html`
               <span class="used-dot ${atUsed ? '' : 'jump'}"
                 title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
                 onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
             ${n < m
-              ? html`<button class="btn small ghost" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
+              ? html`<button class="btn small ghost" title="Next swipe" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
               : isLeafAssistant
-                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating}
+                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating || auxBusy}
                     onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
                 : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
           </span>`}
@@ -281,8 +281,8 @@ ${showNav && html`
             ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
             { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); }, disabled: generating },
             isUser
-              ? { label: 'Reply from here', fn: () => onReply(node.id) }
-              : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id) },
+              ? { label: 'Reply from here', fn: () => onReply(node.id), disabled: generating || auxBusy }
+              : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id), disabled: generating || auxBusy },
             { label: 'Branch from here', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',

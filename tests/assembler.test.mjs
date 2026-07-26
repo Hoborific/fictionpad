@@ -19,7 +19,8 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams };`;
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
+  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -30,6 +31,7 @@ const {
   dedupeSpeakerPrefixes,
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
+  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -1127,6 +1129,111 @@ section('auto limits');
   l = resolveLimits({ modelCtxs: { a: 65536, b: 8192 }, model: 'a' }, 'b');
   ok(l.contextLength === 8192, 'model argument selects the detected entry');
   ok(autoReserve(262144) === 16384 && autoReserve(100) === 6 && autoReserve(0) === 1, 'autoReserve = ctx/16, min 1');
+}
+
+// ---- pruneInterrupted: cycle guard ----
+section('pruneInterrupted cycle guard');
+{
+  // A parentId 2-cycle of empty-swipe assistant nodes (only creatable via a
+  // crafted import) — the seen-set guards must terminate, not hang the tab.
+  const cyc = {
+    id: 'C', rootMessageId: 'root', activeLeafId: 'a',
+    messages: {
+      root: node('root', null, 'assistant', 'hi', 1),
+      a: { id: 'a', parentId: 'b', role: 'assistant', activeSwipe: 0, swipes: [{ text: '', createdAt: 2, modelId: null }] },
+      b: { id: 'b', parentId: 'a', role: 'assistant', activeSwipe: 0, swipes: [{ text: '', createdAt: 3, modelId: null }] },
+    },
+  };
+  const pruned = pruneInterrupted(cyc); // hung forever before the guard
+  ok(!pruned.messages.a && !pruned.messages.b, 'cyclic placeholder nodes dropped');
+  ok(pruned.activeLeafId === null, 'leaf walk into a cycle terminates detached');
+  // Kept node whose parent chain enters the cycle re-parents to root.
+  const cyc2 = {
+    id: 'C', rootMessageId: 'root', activeLeafId: 'k',
+    messages: {
+      root: node('root', null, 'assistant', 'hi', 1),
+      a: { id: 'a', parentId: 'b', role: 'assistant', activeSwipe: 0, swipes: [{ text: '', createdAt: 2, modelId: null }] },
+      b: { id: 'b', parentId: 'a', role: 'assistant', activeSwipe: 0, swipes: [{ text: '', createdAt: 3, modelId: null }] },
+      k: { id: 'k', parentId: 'a', role: 'user', activeSwipe: 0, swipes: [{ text: 'kept', createdAt: 4, modelId: null }] },
+    },
+  };
+  const pruned2 = pruneInterrupted(cyc2);
+  ok(pruned2.messages.k?.parentId === null, 'kept child of a cycle re-parents to root');
+}
+
+// ---- keyMatches: unicode whole-word ----
+section('keyMatches unicode whole-word');
+{
+  ok(keyMatches('café', 'un café au lait', { wholeWord: true }) === true, 'wholeWord: accented key edge matches');
+  ok(keyMatches('café', 'cafeteria', { wholeWord: true }) === false, 'wholeWord: accented key inside a longer word rejected');
+  ok(keyMatches('cat', 'the cathedral', { wholeWord: true }) === false, 'wholeWord: ASCII regression — no substring match');
+  ok(keyMatches('cat', 'a cat!', { wholeWord: true }) === true, 'wholeWord: ASCII match beside punctuation');
+  ok(keyMatches('猫咪', '说 猫咪 好', { wholeWord: true }) === true, 'wholeWord: CJK key bounded by spaces matches');
+  ok(keyMatches('猫咪', '有猫咪在', { wholeWord: true }) === false, 'wholeWord: CJK key inside a longer run rejected');
+  ok(keyMatches('cat', 'concatenate', {}) === true, 'non-wholeWord path unchanged (substring)');
+}
+
+// ---- tool fence: opener boundary ----
+section('tool fence opener boundary');
+{
+  const lit = parseToolCalls('using ```tools here\nmore text after');
+  ok(lit.calls.length === 0 && lit.text === 'using ```tools here\nmore text after',
+    '```tools literal is not a fence — text kept verbatim');
+  const lit2 = parseToolCalls('a ```toolbox\n b');
+  ok(lit2.calls.length === 0 && lit2.text.includes('```toolbox'), '```toolbox literal is not a fence');
+  ok(stripToolBlocks('keep ```tools around') === 'keep ```tools around',
+    'streaming strip leaves ```tools alone');
+  const real = parseToolCalls('x ```tool\n{"tool":"add_lore","args":{"title":"T","content":"c"}}\n``` y');
+  ok(real.calls.length === 1 && real.calls[0].name === 'add_lore' && real.text === 'x  y',
+    'a real ```tool fence still parses and strips');
+}
+
+// ---- speaker splitting: digit-leading / long names ----
+section('speaker splitting: digit-leading and long names');
+{
+  ok(splitSpeakerSegments('2B: hello there', ['2B'])[0].speaker === '2B', 'digit-leading name splits');
+  ok(splitSpeakerSegments('7 of 9: resist', ['7 of 9'])[0].speaker === '7 of 9', 'digit-leading multi-word name splits');
+  const long45 = `Commander ${'A'.repeat(39)}`; // 50 chars — over the old 40 cap, under TOOL_NAME_MAX
+  ok(splitSpeakerSegments(`${long45}: at ease`, [long45])[0].speaker === long45, '50-char name splits');
+  ok(splitSpeakerSegments('2024: a recap', ['Mia']).length === 1
+    && splitSpeakerSegments('2024: a recap', ['Mia'])[0].speaker === null,
+    'unknown digit-leading line never splits');
+  ok(dedupeSpeakerPrefixes('2B: one\n2B: two', ['2B']) === '2B: one\ntwo', 'digit-leading repeat prefix deduped');
+  ok(detectSpeaker('2B: beep boop', ['2B']) === '2B', 'detectSpeaker attributes digit-leading names');
+}
+
+// ---- selectLore: macro-substituted budgeting ----
+section('selectLore substituted budgeting');
+{
+  const pieces = [lore({ id: 'L1', title: 'A', content: '{{user}} '.repeat(80).trim(), keys: ['apple'] })];
+  // Raw content ≈ 218 tokens (719 chars) — fits the 250 budget; substituted
+  // (each {{user}} → 20 chars) ≈ 509 tokens — must NOT fit.
+  const sel = selectLore(pieces, 'apple', 250, null, { sub: (t) => t.replaceAll('{{user}}', 'A'.repeat(20)) });
+  ok(sel.length === 0, 'budget applies to the substituted (rendered) text');
+  const selRaw = selectLore(pieces, 'apple', 250, null, {});
+  ok(selRaw.length === 1, 'identity sub (default) keeps raw budgeting');
+}
+
+// ---- import normalization ----
+section('import normalization');
+{
+  const ns = normalizeScenario({ name: 'X' });
+  ok(Array.isArray(ns.lorePieces) && ns.lorePieces.length === 0, 'scenario missing lorePieces → []');
+  ok(ns.tags.length === 0 && ns.backstory === '' && ns.greeting === '' && ns.characterIds.length === 0,
+    'scenario string/array fields coerced');
+  const np = normalizeScenario({ name: 'Y', lorePieces: [{ title: 'T' }] });
+  ok(np.lorePieces[0].id && np.lorePieces[0].keys.length === 0 && np.lorePieces[0].content === '',
+    'piece healed: id minted, keys [], content string');
+  ok(normalizeLorePiece(null).title === '', 'non-object piece heals to shape');
+  const nc = normalizeCharacter({ name: 'Z' });
+  ok(nc.keys.length === 0 && nc.greeting === '' && nc.color === '', 'character fields coerced');
+  const chat = normalizeChat({ id: 'C', activeLeafId: 'r', messages: { r: { id: 'r', parentId: null, role: 'assistant' } } });
+  ok(chat.messages.r.swipes.length === 1 && chat.messages.r.activeSwipe === 0,
+    'swipes-less node gets a placeholder swipe, activeSwipe coerced');
+  const c2 = normalizeChat({ id: 'C', messages: { r: { id: 'r', parentId: null, role: 'assistant', swipes: [{ text: 'a' }, { text: 'b' }], activeSwipe: 9 } } });
+  ok(c2.messages.r.activeSwipe === 1, 'activeSwipe clamped into range');
+  ok(normalizeChat(null).messages && Object.keys(normalizeChat(null).messages).length === 0,
+    'non-object chat heals to an empty tree');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

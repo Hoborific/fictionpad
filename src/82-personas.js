@@ -35,7 +35,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
                   title=${defaultPersonaId === p.id ? 'Default for new chats — click to clear' : 'Make default for new chats'}
                   onClick=${() => onSetDefault(defaultPersonaId === p.id ? '' : p.id)}>★</button>
                 <button class="btn small" onClick=${() => startEdit(deepClone(p))}>edit</button>
-                <button class="btn small danger" onClick=${() => onRemove(p.id)}>✕</button>
+                <button class="btn small danger" title="Delete persona" onClick=${() => onRemove(p.id)}>✕</button>
               </span>
             </div>`)}
         </div>`}
