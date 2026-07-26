@@ -1,5 +1,5 @@
 function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
@@ -128,7 +128,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       // in the tree (runGeneration can still bail after the append).
       const appended = p[p.length - 1]?.role === 'assistant'
         && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
-      if (cur.generating || cur.auxBusy || appended) return;
+      if (cur.generating || cur.auxBusy.length || appended) return;
       draftsRef.current.set(chatId, text); // rejected — restore the draft
       if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
     }, 0);
@@ -170,11 +170,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       </div>
       ${showJump && html`
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
-      ${!generating && leaf?.role === 'user' && html`
+      ${!generating && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy}
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;

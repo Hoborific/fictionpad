@@ -61,8 +61,11 @@ const DEFAULT_SETTINGS = {
   recapMaxTokens: 700,
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
-  genTemp: 0.9, // ✦ Generate temperature (aux model)
+  pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
+  genModel: '', // ✦ Generate model; blank = aux model (then chat model)
+  genTemp: 0.9, // ✦ Generate temperature
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
+  toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
@@ -244,6 +247,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${SETTINGS_TABS.map(([id, label]) => html`
           <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
       </div>
+      <!-- model pickers on several tabs share this list; datalists are invisible -->
+      <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
 
       ${tab === 'appearance' && html`
         <label class="field"><span>Theme — applies immediately, saved automatically</span>
@@ -323,18 +328,19 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         </div>`}
 
       ${tab === 'models' && html`
-        <div class="grid2">
+        <div class="grid3">
           <label class="field"><span>Chat model</span>
             <div style=${{ display: 'flex', gap: '6px' }}>
               <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
               <button class="btn" onClick=${fetchModels}>Fetch</button>
             </div>
-            <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
             ${modelsError && html`<span class="warn">${modelsError}</span>`}
             ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
           </label>
           <label class="field"><span>Aux model (memory summaries, suggestions, /improve, /recap; blank = chat model)</span>
             <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
+          <label class="field"><span>Generator model (✦ scenario/character/piece; blank = aux model)</span>
+            <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} /></label>
         </div>
         <div class="grid2">
           <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
@@ -476,6 +482,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
             Tool calling (model may register characters + lore mid-reply, into this chat's lore)
           </label>
+          <label class="check" title="Each newly tool-registered character is fleshed out by the ✦ generator — one aux call per new character, fired concurrently after the generation completes. Failures keep the original description. Requires tool calling.">
+            <input type="checkbox" disabled=${draft.toolsEnabled === false}
+              checked=${!!draft.toolsEnrich} onChange=${(e) => set({ toolsEnrich: e.target.checked })} />
+            Flesh out tool-registered characters with the ✦ generator (experimental)
+          </label>
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
@@ -533,11 +544,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
           </div>
         </div>
-        <div class="field"><span>Scenario/character generator (aux model)</span>
+        <div class="field"><span>Scenario/character generator</span>
           <div class="grid3">
             ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
           </div>
-          <div class="hint">Prompts are editable in the Prompts tab.</div>
+          <div class="hint">Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab.</div>
         </div>
         <div class="field"><span>Tool calling</span>
           ${draft.toolsEnabled === false
@@ -562,6 +573,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
         ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
           'The reply contract is one JSON object with name, content, keys and greeting.')}
+        ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
+          'The reply contract is one JSON object with type, title, content, keys and pinned.')}
         ${draft.toolsEnabled !== false
           ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
           : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}

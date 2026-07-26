@@ -31,6 +31,17 @@ const genStr = (v, max) => {
 const genKeys = (v) => (Array.isArray(v) ? v : [])
   .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
 
+// One model-shaped piece → canonical fields (title/content capped, keys
+// filtered, type whitelisted). Shared by the scenario sanitizer (fresh ids
+// minted on top) and the single-piece sanitizer.
+const sanitizeGenPiece = (p) => ({
+  type: p?.type === 'character' ? 'character' : 'lore',
+  title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+  content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+  keys: genKeys(p?.keys),
+  pinned: p?.pinned === true,
+});
+
 // Only fields present (and non-empty) in the model's reply land in the patch;
 // everything else keeps the draft's current value.
 function sanitizeScenarioGen(obj) {
@@ -44,15 +55,22 @@ function sanitizeScenarioGen(obj) {
     patch.tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
   if (Array.isArray(obj.lorePieces))
     patch.lorePieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
-      .map(p => ({
-        ...newLorePiece(), // fresh id + flag defaults
-        type: p?.type === 'character' ? 'character' : 'lore',
-        title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
-        content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
-        keys: genKeys(p?.keys),
-        pinned: p?.pinned === true,
-      }))
+      .map(p => ({ ...newLorePiece(), ...sanitizeGenPiece(p) })) // fresh id + flag defaults
       .filter(p => p.title && p.content);
+  return patch;
+}
+
+// Single lore piece (✦ on a scenario-editor card or the chat piece editor
+// popout). Same no-wipe rule, and no id — the piece keeps its identity (and,
+// for chat pieces, its createdBy/atLen provenance for rewind rollback).
+function sanitizePieceGen(obj) {
+  const p = sanitizeGenPiece(obj);
+  const patch = {};
+  if (p.title) patch.title = p.title;
+  if (p.content) patch.content = p.content;
+  if (Array.isArray(obj?.keys)) patch.keys = p.keys;
+  if (typeof obj?.pinned === 'boolean') patch.pinned = p.pinned;
+  if (obj?.type === 'character' || obj?.type === 'lore') patch.type = p.type;
   return patch;
 }
 

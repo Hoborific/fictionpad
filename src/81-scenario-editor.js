@@ -46,9 +46,76 @@ function ListInput({ values, onChange, textarea, delim, ...rest }) {
     : html`<input type="text" value=${text} onInput=${handle} ...${rest} />`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
+// The editable fields of a lore piece — shared by the inline card (scenario
+// editor) and the piece editor popout (chat options), so the two stay
+// identical. `set` applies a partial patch to the caller's piece/draft.
+function LorePieceFields({ piece, others, set }) {
+  return html`
+    <div class="grid2">
+      <label class="field"><span>Title</span>
+        <input type="text" value=${piece.title} onInput=${(e) => set({ title: e.target.value })} /></label>
+      <label class="field"><span>Type</span>
+        <select value=${piece.type} onChange=${(e) => set({ type: e.target.value })}>
+          <option value="lore">lore</option>
+          <option value="character">character</option>
+        </select></label>
+    </div>
+    <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
+      <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
+    <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
+      <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
+        onChange=${(keys) => set({ keys })} /></label>
+    <div class="field"><span>Key matching</span>
+      <label class="check" title="Keys only match at word boundaries — 'cat' won't match 'cathedral'">
+        <input type="checkbox" checked=${!!piece.wholeWord} onChange=${(e) => set({ wholeWord: e.target.checked })} /> whole word</label>
+      <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
+        <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
+    </div>
+    <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
+      <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
+      Semantic activation — uses the embedding model (aux); no keyword needed
+    </label>
+    <div class="grid3">
+      <label class="field"><span>Weight</span>
+        <${NumInput} value=${piece.weight ?? 0} step=${1} fallback=${0}
+          onCommit=${(n) => set({ weight: n })} /></label>
+      <label class="field"><span>Search depth (est. tokens; blank = global default)</span>
+        <${NumInput} value=${piece.searchDepth} min=${0} step=${128} fallback=${null} placeholder="2048"
+          onCommit=${(n) => set({ searchDepth: n })} /></label>
+      <div class="field"><span>Flags</span>
+        <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
+        <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
+      </div>
+    </div>
+    ${others.length > 0 && html`
+      <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
+        <${RailScroll} className="links-list">
+          ${others.map(o => html`
+            <label class="check" key=${o.id}>
+              <input type="checkbox" checked=${(piece.links ?? []).includes(o.id)}
+                onChange=${(e) => set({ links: e.target.checked
+                  ? [...(piece.links ?? []), o.id]
+                  : (piece.links ?? []).filter(id => id !== o.id) })} />
+              ${o.title || '(untitled)'}
+            </label>`)}
+        <//></label>`}`;
+}
+
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
   const [open, setOpen] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const set = (patch) => onChange({ ...piece, ...patch });
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      // The patch carries content fields only — id and provenance survive.
+      set(await onGenerate('piece', promptText, piece));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const others = allPieces.filter(p => p.id !== piece.id);
   return html`
     <div class="lore-card">
@@ -58,60 +125,51 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
         ${piece.type === 'character' && html`<span class="pill">character</span>`}
         ${piece.pinned && html`<span class="pill pinned">pinned</span>`}
         ${piece.enabled === false && html`<span class="pill">disabled</span>`}
+        ${onGenerate && html`<button class="btn small" title="Generate / flesh out this piece with the AI"
+          onClick=${(e) => { e.stopPropagation(); setGenError(null); setGenOpen(true); }}>✦</button>`}
         <button class="btn small danger" onClick=${(e) => { e.stopPropagation(); onRemove(); }}>✕</button>
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title=${`Generate — ${piece.title || 'lore piece'}`} busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
       ${open && html`
-        <div class="lc-body">
-          <div class="grid2">
-            <label class="field"><span>Title</span>
-              <input type="text" value=${piece.title} onInput=${(e) => set({ title: e.target.value })} /></label>
-            <label class="field"><span>Type</span>
-              <select value=${piece.type} onChange=${(e) => set({ type: e.target.value })}>
-                <option value="lore">lore</option>
-                <option value="character">character</option>
-              </select></label>
-          </div>
-          <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
-            <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
-          <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
-            <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
-              onChange=${(keys) => set({ keys })} /></label>
-          <div class="field"><span>Key matching</span>
-            <label class="check" title="Keys only match at word boundaries — 'cat' won't match 'cathedral'">
-              <input type="checkbox" checked=${!!piece.wholeWord} onChange=${(e) => set({ wholeWord: e.target.checked })} /> whole word</label>
-            <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
-              <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
-          </div>
-          <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
-            <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
-            Semantic activation — uses the embedding model (aux); no keyword needed
-          </label>
-          <div class="grid3">
-            <label class="field"><span>Weight</span>
-              <${NumInput} value=${piece.weight ?? 0} step=${1} fallback=${0}
-                onCommit=${(n) => set({ weight: n })} /></label>
-            <label class="field"><span>Search depth (est. tokens; blank = global default)</span>
-              <${NumInput} value=${piece.searchDepth} min=${0} step=${128} fallback=${null} placeholder="2048"
-                onCommit=${(n) => set({ searchDepth: n })} /></label>
-            <div class="field"><span>Flags</span>
-              <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
-              <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
-            </div>
-          </div>
-          ${others.length > 0 && html`
-            <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
-              <div class="links-list">
-                ${others.map(o => html`
-                  <label class="check" key=${o.id}>
-                    <input type="checkbox" checked=${(piece.links ?? []).includes(o.id)}
-                      onChange=${(e) => set({ links: e.target.checked
-                        ? [...(piece.links ?? []), o.id]
-                        : (piece.links ?? []).filter(id => id !== o.id) })} />
-                    ${o.title || '(untitled)'}
-                  </label>`)}
-              </div></label>`}
-        </div>`}
+        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} /></div>`}
     </div>`;
+}
+
+// Lore piece editor popout (chat options) — the same pattern as the
+// scenario/character editors: a wide modal with every field visible (links
+// included), ✦ Generate + Save in the footer, local draft, dirty guard. The
+// piece is never a blind ✦ prompt — you see what it is before you edit or
+// generate. The generator's patch fills the local draft only; persistence
+// stays with Save, and id/provenance (createdBy/atLen) survive untouched.
+function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
+  const [draft, setDraft] = useState(() => deepClone(piece));
+  const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
+  const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
+  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      set(await onGenerate('piece', promptText, draft));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
+  const others = allPieces.filter(p => p.id !== draft.id);
+  return html`
+    <${Modal} title=${isNew ? 'New lore piece' : `Lore — ${piece.title || '(untitled)'}`} wide
+      onClose=${genOpen ? () => setGenOpen(false) : guardClose}
+      footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
+        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
+      <${LorePieceFields} piece=${draft} others=${others} set=${set} />
+      ${genOpen && html`
+        <${GeneratorModal} title=${`Generate — ${draft.title || 'lore piece'}`} busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
+    <//>`;
 }
 
 function newScenario() {
@@ -174,14 +232,14 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card content edits apply live to all linked scenarios and chats — but the opening greeting is snapshotted per chat at creation, so greeting edits only affect new chats. For scenario-only characters, use a character-type lore piece below.</div>
         ${charList.length === 0 && html`<div class="hint">No global characters yet — create them from the sidebar's Characters section.</div>`}
         ${charList.length > 0 && html`
-          <div class="links-list">
+          <${RailScroll} className="links-list">
             ${charList.map(c => html`
               <label class="check" key=${c.id}>
                 <input type="checkbox" checked=${linkedIds.includes(c.id)}
                   onChange=${(e) => toggleChar(c.id, e.target.checked)} />
                 ${c.name}
               </label>`)}
-          </div>`}
+          <//>`}
       </div>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
@@ -195,7 +253,8 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         ${draft.lorePieces.map(p => html`
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
-            onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })} />`)}
+            onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
+            onGenerate=${onGenerate} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}

@@ -17,6 +17,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  dedupeSpeakerPrefixes,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
@@ -25,6 +26,7 @@ const {
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  dedupeSpeakerPrefixes,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
 } = core;
 
@@ -439,6 +441,65 @@ section('speaker segments');
     const s = splitSpeakerSegments('**Mira:** *nods*', names);
     ok(s.length === 1 && s[0].speaker === 'Mira' && s[0].text === '*nods*',
       'bold prefix closing stars still stripped');
+  }
+  // Duplicate-prefix tolerance (weak models repeat the current speaker).
+  {
+    const s = splitSpeakerSegments('Vex: first\nVex: second', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === 'first\nsecond',
+      'duplicate prefix for the current speaker merges, stripped');
+  }
+  {
+    const s = splitSpeakerSegments('Vex: hi\nNarrator: falls silent.\nNarrator: crickets.', names);
+    ok(s.length === 2 && s[0].speaker === 'Vex'
+      && s[1].speaker === null && s[1].text === 'falls silent.\ncrickets.',
+      'repeated Narrator: parts merge into one narration segment');
+  }
+  {
+    const s = splitSpeakerSegments('Narrator: opens.\nNarrator: continues.', names);
+    ok(s.length === 1 && s[0].speaker === null && s[0].text === 'opens.\ncontinues.',
+      'leading Narrator: + repeat → single narration segment');
+  }
+  {
+    // The observed failure mode: mid-paragraph repeats inside one part.
+    const s = splitSpeakerSegments('Vex: "hi" *waves* Vex: "again" *beams* Vex: "more"', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === '"hi" *waves* "again" *beams* "more"',
+      'mid-line duplicate prefixes stripped inside the part');
+  }
+  {
+    const s = splitSpeakerSegments('Vex: she said Mira: was late', names);
+    ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === 'she said Mira: was late',
+      'mid-line prefix of another character stays literal');
+  }
+  {
+    // Dedupe must not eat the legitimate kept prefix on the same line.
+    const s = splitSpeakerSegments('Mira: Vex: hi', names);
+    ok(s.length === 1 && s[0].speaker === 'Mira' && s[0].text === 'Vex: hi',
+      'kept prefix survives when another name follows mid-line');
+  }
+  {
+    const s = splitSpeakerSegments('Vex: hi\nplain line with vex: lowercase mid-line dup', names);
+    ok(s.length === 1 && s[0].text === 'hi\nplain line with lowercase mid-line dup',
+      'mid-line dedupe is case-insensitive');
+  }
+  // Fed-back history shows the clean form: the model doesn't learn the repeat
+  // habit from its own raw output. User text stays verbatim.
+  {
+    const scen = { ...baseScenario, lorePieces: [lore({ id: 'LV', type: 'character', title: 'Vex', pinned: true })] };
+    const chat = {
+      ...baseChat,
+      activeLeafId: 'a1',
+      messages: {
+        root: node('root', null, 'assistant', 'Welcome.', 1),
+        u1: node('u1', 'root', 'user', 'Vex: I say Vex: things twice', 2),
+        a1: node('a1', 'u1', 'assistant', 'Vex: "hi" *waves* Vex: "again"\nNarrator: hush.\nNarrator: more hush.', 3),
+      },
+    };
+    const { messages } = assemblePrompt({ scenario: scen, persona, chat, settings, platformPrompt: '' });
+    const fed = messages.find(m => m.role === 'assistant' && m.content.includes('"hi"'));
+    ok(fed && fed.content === 'Vex: "hi" *waves* "again"\nNarrator: hush.\nmore hush.',
+      'assembler strips duplicate speaker prefixes from fed-back history');
+    const user = messages.find(m => m.role === 'user' && m.content.includes('twice'));
+    ok(user && user.content === 'Vex: I say Vex: things twice', 'user messages stay verbatim');
   }
 }
 

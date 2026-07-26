@@ -43,35 +43,15 @@ function ProbsView({ tokens, onPick }) {
 
 // Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
 // Collapsed by default, streaming or not — the header still shows live that
-// thinking is in progress ("Thinking…"). The expanded body shows its extent
-// subtly (the native scrollbar auto-hides): a thin accent rail tracking
-// scroll position, and a bottom fade while more text remains below.
+// thinking is in progress ("Thinking…"). The expanded body scrolls via
+// RailScroll (hidden native scrollbar, accent rail + bottom fade cues).
 function ThinkBox({ text, streaming }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
-  // CSS vars only — no re-render per scroll event.
-  const syncExtent = () => {
-    const wrap = wrapRef.current;
-    const el = wrap?.querySelector('.think-body');
-    if (!el) return;
-    const scrollable = el.scrollHeight > el.clientHeight + 2;
-    wrap.dataset.scrollable = scrollable ? '1' : '';
-    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
-    if (scrollable) {
-      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
-      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
-    }
-  };
-  useEffect(() => { if (open) syncExtent(); }, [open, text, streaming]);
   return html`
     <div class="think">
       <button class="think-head" onClick=${() => setOpen(!open)}>
         <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
-      ${open && html`
-        <div class="think-body-wrap" ref=${wrapRef}>
-          <div class="think-body" onScroll=${syncExtent}>${text}</div>
-          <div class="think-rail"><div class="think-rail-thumb" /></div>
-        </div>`}
+      ${open && html`<${RailScroll} className="think-body">${text}<//>`}
     </div>`;
 }
 

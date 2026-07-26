@@ -37,7 +37,14 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
     // Initial focus: first field in the body, else the dialog container.
     const target = dlg.querySelector('.m-body input, .m-body textarea, .m-body select, .m-body button') ?? dlg;
     target.focus?.();
-    const onKey = (e) => { if (e.key === 'Escape') onCloseRef.current(); };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      // Only the topmost overlay reacts — one Escape must not close a stacked
+      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor).
+      const overlays = document.querySelectorAll('.modal-overlay');
+      if (overlays.length && overlays[overlays.length - 1] !== dlg.closest('.modal-overlay')) return;
+      onCloseRef.current();
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
@@ -53,6 +60,32 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
         ${footer && html`<div class="m-foot">${footer}</div>`}
       </div>
     </div>`;
+}
+
+// Scrollable box with the native scrollbar hidden and extent cues instead: a
+// thin accent rail tracking scroll position plus a bottom fade while more
+// content remains below (see .rail-* in styles.css). Shared by the thinking
+// box and the lore links lists so they all scroll the same way. The scroll
+// handler writes CSS vars only — no re-render per scroll event.
+function RailScroll({ className, children }) {
+  const wrapRef = useRef(null);
+  const sync = () => {
+    const wrap = wrapRef.current;
+    const el = wrap?.firstElementChild;
+    if (!el) return;
+    const scrollable = el.scrollHeight > el.clientHeight + 2;
+    wrap.dataset.scrollable = scrollable ? '1' : '';
+    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
+    if (scrollable) {
+      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
+      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
+    }
+  };
+  useEffect(sync); // every render — cheap DOM reads, covers content/resize changes
+  return html`<div class="rail-wrap" ref=${wrapRef}>
+    <div class=${`rail-body ${className ?? ''}`} onScroll=${sync}>${children}</div>
+    <div class="rail"><div class="rail-thumb" /></div>
+  </div>`;
 }
 
 // Number input that allows free typing and commits a clamped value on

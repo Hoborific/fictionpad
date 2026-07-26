@@ -1,7 +1,8 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate }) {
+  const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
   const allPieces = mergedLorePieces(scenario, chat, characters);
@@ -50,22 +51,36 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       <div class="field">
         <span>Lore — this chat only (${pieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
-            onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
+            onClick=${() => setEditing({ piece: newLorePiece(), isNew: true })}>+ add piece</button>
           ${LORE_TEMPLATES.map(t => html`
             <button key=${t.label} class="btn small" style=${{ marginLeft: '4px' }}
               title=${`New ${t.label} piece, prefilled with a skeleton`}
-              onClick=${() => setPieces([...pieces, newLoreFromTemplate(t)])}>+ ${t.label}</button>`)}
+              onClick=${() => setEditing({ piece: newLoreFromTemplate(t), isNew: true })}>+ ${t.label}</button>`)}
         </span>
-        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only.</div>
+        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only. Click a piece to edit or ✦ generate it.</div>
         ${pieces.map(p => html`
-          <${LorePieceCard} key=${p.id} piece=${p} allPieces=${allPieces}
-            onChange=${(next) => setPieces(pieces.map(q => q.id === p.id ? next : q))}
-            onRemove=${() => setPieces(pieces.filter(q => q.id !== p.id))} />`)}
+          <div class="lore-card" key=${p.id}>
+            <div class="lc-head" title="Edit piece" onClick=${() => setEditing({ piece: p, isNew: false })}>
+              <span class="t">${p.title || '(untitled)'}</span>
+              ${p.type === 'character' && html`<span class="pill">character</span>`}
+              ${p.pinned && html`<span class="pill pinned">pinned</span>`}
+              ${p.enabled === false && html`<span class="pill">disabled</span>`}
+              <button class="btn small danger" title="Remove from this chat"
+                onClick=${(e) => { e.stopPropagation(); setPieces(pieces.filter(q => q.id !== p.id)); }}>✕</button>
+            </div>
+          </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px' }}>
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
+      ${editing && html`
+        <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
+          onSave=${(draft) => {
+            setPieces(editing.isNew ? [...pieces, draft] : pieces.map(q => q.id === draft.id ? draft : q));
+            setEditing(null);
+          }}
+          onClose=${() => setEditing(null)} onGenerate=${onGenerate} />`}
     </div>`;
 }
 

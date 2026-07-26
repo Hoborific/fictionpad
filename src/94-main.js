@@ -101,7 +101,8 @@ function Main({ storage, storageKind, storageFailed }) {
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
-  const [auxBusy, setAuxBusy] = useState(null); // 'improve' | 'recap' | 'memory' | null
+  const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
+  const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
 
@@ -113,13 +114,22 @@ function Main({ storage, storageKind, storageFailed }) {
   const [auxLog, setAuxLog] = useState([]);
   async function auxLogged(kind, args, chatId = null) {
     const entry = { kind, chatId, at: Date.now(), model: args.model ?? '', system: args.system ?? '', user: args.user ?? '' };
+    // Every aux call is tracked: the composer shows ■ Stop (not Send) while
+    // any are in flight, so a background call never overlaps the user's next
+    // generation unnoticed; Stop aborts them all via auxCtls.
+    const ctl = new AbortController();
+    auxCtls.current.add(ctl);
+    setAuxBusy(list => [...list, kind]);
     try {
-      const out = await auxCall(args);
+      const out = await auxCall({ ...args, signal: ctl.signal });
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
       return out;
     } catch (e) {
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: describeApiError(e) }]);
       throw e;
+    } finally {
+      auxCtls.current.delete(ctl);
+      setAuxBusy(list => { const i = list.indexOf(kind); return i < 0 ? list : [...list.slice(0, i), ...list.slice(i + 1)]; });
     }
   }
 
@@ -130,7 +140,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // are thrown back to the generator modal, which shows them inline.
   async function runGen(kind, promptText, draft) {
     const st = ref.current.settings;
-    const model = st.auxModel || st.model;
+    const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
     // The RP length preset otherwise only reaches the chat assembler — aux
@@ -141,12 +151,16 @@ function Main({ storage, storageKind, storageFailed }) {
       ? { name: draft.name, description: draft.description, tags: draft.tags,
           scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
           lorePieces: (draft.lorePieces ?? []).map(({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned })) }
-      : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
+      : kind === 'piece'
+        ? (({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned }))(draft)
+        : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
     const out = await auxLogged('generate', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
-        : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
+        : kind === 'piece'
+          ? st.pieceGenPrompt || DEFAULT_PIECE_GEN_PROMPT
+          : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
       user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
       maxTokens: 3000, temperature: st.genTemp ?? 0.9,
       // The generator rides the user's GLOBAL sampler set — registered
@@ -160,7 +174,7 @@ function Main({ storage, storageKind, storageFailed }) {
     });
     const obj = extractGenJSON(out);
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
-    return isScenario ? sanitizeScenarioGen(obj) : sanitizeCharacterGen(obj);
+    return isScenario ? sanitizeScenarioGen(obj) : kind === 'piece' ? sanitizePieceGen(obj) : sanitizeCharacterGen(obj);
   }
 
   // Always-fresh refs for async generation loops (avoid stale closures).
@@ -552,6 +566,44 @@ function Main({ storage, storageKind, storageFailed }) {
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
     }
+  }
+
+  // ---- character enrichment (experimental, settings.toolsEnrich) ----
+  // Newly tool-registered characters get fleshed out by the ✦ generator
+  // ('piece' kind) — one aux call per new character, all concurrent, after
+  // the generation completes. Only CONTENT is rewritten and keys are merged;
+  // the title is never touched — the registered name is the speaker-matching
+  // key and must not drift. Failures keep the original description.
+  async function maybeEnrichCharacters(chatObj, nodeId, toolResults) {
+    const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
+      && String(r.note ?? '').startsWith('registered character'));
+    await Promise.all(fresh.map(async (r) => {
+      const name = String(r.args?.name ?? '').trim();
+      if (!name) return;
+      const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
+        && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
+      if (!piece) return; // rewound/pruned meanwhile
+      try {
+        const patch = await runGen('piece',
+          'Flesh out this newly introduced character into a full reference card — appearance, personality, motives, voice. Keep the name and their role in the scene recognizable.',
+          { type: 'character', title: piece.title, content: piece.content, keys: piece.keys, pinned: piece.pinned });
+        // Merge-on-write: re-read at save time; drop the write if the chat or
+        // piece vanished (rewind, delete) in between.
+        const cur = ref.current.chats[chatObj.id];
+        if (!cur || !(cur.lorePieces ?? []).some(p => p.id === piece.id)) return;
+        const next = { ...cur, lorePieces: cur.lorePieces.map(p => p.id === piece.id
+          ? { ...p, ...(patch.content ? { content: patch.content } : {}),
+              keys: [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5) }
+          : p) };
+        // touch:false — a background lore write shouldn't re-sort the sidebar.
+        // Sync ref immediately (same reason as commit() in the generation
+        // finally): React flushes the write later, so a sibling enrichment or
+        // the next generation's commit() reading ref.current.chats in between
+        // would rebuild from the pre-enrichment snapshot and drop this write.
+        saveChat(next, { touch: false });
+        ref.current.chats = { ...ref.current.chats, [chatObj.id]: next };
+      } catch (e) { console.warn(`Character enrichment failed for "${name}":`, e); }
+    }));
   }
 
   // ---- generation ----
@@ -952,6 +1004,10 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         maybeSummarize(work);
         maybeExtractLore(work);
+        // Experimental (settings.toolsEnrich): flesh out characters this
+        // generation registered, via the ✦ generator. Fire-and-forget like
+        // the passes above; merge-on-write at save time.
+        if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions) {
@@ -1031,7 +1087,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId];
     if (!c) return 'Select or create a chat first.';
     if (genRef.current) return 'Already generating — press Stop first.';
-    if (auxBusy) return `Working… (${auxBusy})`;
+    if (auxBusy.length) return `Working… (${[...new Set(auxBusy)].join(', ')})`;
     if (raw.startsWith('/')) {
       const sp = raw.indexOf(' ');
       const cmd = (sp === -1 ? raw : raw.slice(0, sp)).toLowerCase();
@@ -1107,7 +1163,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-4)
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
-    setAuxBusy('improve');
     try {
       const out = await auxLogged('improve', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -1119,8 +1174,6 @@ function Main({ storage, storageKind, storageFailed }) {
       setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
     } catch (e) {
       setError(`/improve failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
@@ -1133,7 +1186,6 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(x => `${x.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(x), pName)}`)
       .join('\n\n');
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
-    setAuxBusy('recap');
     try {
       const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -1145,13 +1197,10 @@ function Main({ storage, storageKind, storageFailed }) {
       setModal({ kind: 'recap', text: out });
     } catch (e) {
       setError(`/recap failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
   async function memoryCommand(c, n) {
-    setAuxBusy('memory');
     setComposerInject({ chatId: c.id, hint: 'Generating memory…', nonce: Date.now() });
     try {
       const text = await generateMemory(c, n);
@@ -1166,8 +1215,6 @@ function Main({ storage, storageKind, storageFailed }) {
     } catch (e) {
       setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
       setError(`/memory failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
@@ -1294,7 +1341,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // calls create sibling assistant branches — same semantics as swipes.
   const onGenerateReply = (nodeId = null) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current || !generationReady(c)) return;
+    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
@@ -1555,10 +1602,11 @@ function Main({ storage, storageKind, storageFailed }) {
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}
               onRerollSuggestions=${() => {
                 const c = ref.current.chats[ui.chatId];
-                if (c && !auxBusy) fetchSuggestions(c, c.activeLeafId);
+                if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
               composerInject=${composerInject} auxBusy=${auxBusy}
-              onSubmitInput=${handleInput} onStop=${() => genRef.current?.abort.abort()}
+              onSubmitInput=${handleInput}
+              onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
@@ -1579,6 +1627,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
+        onGenerate=${runGen}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -1643,6 +1692,7 @@ function Main({ storage, storageKind, storageFailed }) {
         settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
+        onGenerate=${runGen}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}

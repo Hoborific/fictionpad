@@ -898,3 +898,27 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Changed**
 
 - The speaker-format prompts (`PROSE_FORMAT_RULES`, multi-speaker instructions) now demand the full registered name and state the one-prefix-per-part rule explicitly - prefixes are never repeated for the same character.
+
+### v4.4.4
+
+**Added**
+
+- Lore piece editor popout for chat lore (Chat options -> click a piece): a wide modal like the scenario/character editors - every field visible (content, keys, key matching, semantic activation, weight/depth, links), with ✦ Generate + Save in the footer, an unsaved-changes guard, and Save disabled while the title is blank. New pieces (+ add piece / templates) open the same popout instead of being added blind, and the generator fills the visible draft - never a blind prompt. The field layout is shared with the scenario editor's inline card (`LorePieceFields`), so the two surfaces can't drift.
+- ✦ generator per lore piece: a 'piece' gen kind (`DEFAULT_PIECE_GEN_PROMPT`, editable via `pieceGenPrompt` on the Prompts tab) fleshes out one piece - from a scenario-editor card or the chat piece popout. The patch never touches the piece's id or tool provenance, so rewind rollback keeps working.
+- Experimental (Features tab, needs tool calling): "Flesh out tool-registered characters with the ✦ generator" - each NEW `register_character` result is enriched by the generator after the generation (concurrent calls; content rewritten, title kept, keys merged; failures keep the original stub).
+- Generator model setting (Models tab): `genModel` -> aux model -> chat model, first set wins.
+- Aux calls are visible and gated: while any background call runs (✦ generator, enrichment, memory pass, lore extraction, suggestions, /improve, /recap) the composer shows ■ Stop instead of Send, Enter falls through, and the ✦-reply pill hides - Stop aborts the generation AND all in-flight aux calls.
+- Weak-model speaker hygiene: prefixes that repeat the CURRENT speaker ("Mia: … Mia: …" mid-paragraph, several `Narrator:` in a row) are stripped (`dedupeSpeakerPrefixes`) in BOTH the display split and fed-back history, so the model doesn't learn the repeat from its own output; stored swipes and logprobs stay raw.
+
+**Changed**
+
+- The thinking box and the lore links lists share one slim scrollbar (`RailScroll`: hidden native bar, thin accent rail + bottom fade).
+- The speaker-format prompts (`PROSE_FORMAT_RULES`, `SPEAKER_PROMPT`) now state explicitly that `Narrator:` is used once per narration stretch - never several in a row.
+
+**Fixed**
+
+- Modals opened from inside the right drawer (piece editor, ✦ generator) rendered squished and under the topbar on phones - the drawer now lifts above the topbar and drops its slide transform while it contains a modal.
+- The chat panel sheet's zero body padding leaked into nested modals (descendant selector) - the piece popout now has the same padding as the other editors.
+- Escape closes only the topmost modal instead of the whole stack.
+- Character-enrichment writes could be silently clobbered - a sibling enrichment or the next generation's commit rebuilt from the pre-write snapshot; the write now syncs immediately and no longer teleports the chat up the sidebar.
+- The piece popout's primary button reads "Save" (was "Save piece").

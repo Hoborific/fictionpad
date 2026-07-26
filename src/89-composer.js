@@ -70,9 +70,10 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
             // of being swallowed with no effect.
             if (e.key === 'Enter' && !e.shiftKey && !coarseEnter && !generating && !busy) { e.preventDefault(); send(); }
           }} />
-        ${generating
-          ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`
-          : html`<button class="btn primary" disabled=${!!busy} onClick=${send}>${busy ? 'Working…' : 'Send'}</button>`}
+        ${generating || busy
+          ? html`<button class="btn danger" title=${generating ? 'Stop generation' : 'Stop background calls (memory, generator, suggestions…)'}
+              onClick=${onStop}>■ Stop</button>`
+          : html`<button class="btn primary" onClick=${send}>Send</button>`}
       </div>
       ${hint && html`<div class="hint warn">${hint}</div>`}
     </div>`;

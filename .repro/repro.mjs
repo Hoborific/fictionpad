@@ -18,7 +18,7 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
-  chatSearchText, matchExcerpt };`);
+  LorePieceEditor, chatSearchText, matchExcerpt };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -238,6 +238,26 @@ trial('lore templates: buttons render + skeletons are well-formed', () => {
     if (!Array.isArray(p.keys) || p.keys.length) throw new Error(`${label} keys should be empty`);
     if (p.title !== '') throw new Error(`${label} title should be empty`);
   }
+});
+
+// Lore piece editor popout (chat options): all fields visible, ✦ Generate +
+// Save in the footer, links in a RailScroll list; a blank title disables Save.
+trial('lore piece editor popout renders fields + footer (SSR smoke)', () => {
+  const noop = () => {};
+  const pieces = [
+    { id: 'L1', type: 'character', title: 'Vex', content: 'A smuggler.', keys: ['vex'], pinned: true, weight: 1, links: ['L2'], enabled: true },
+    { id: 'L2', type: 'lore', title: 'Docks', content: 'Sky docks.', keys: ['dock'], pinned: false, weight: 0, links: [], enabled: true },
+  ];
+  const out = renderToStaticMarkup(html`
+    <${fp.LorePieceEditor} piece=${pieces[0]} isNew=${false} allPieces=${pieces}
+      onSave=${noop} onClose=${noop} onGenerate=${async () => ({})} />`);
+  for (const frag of ['Lore — Vex', '✦ Generate', 'Save', 'Links', 'rail-body links-list', 'Docks'])
+    if (!out.includes(frag)) throw new Error(`missing ${frag}: ` + out);
+  const fresh = renderToStaticMarkup(html`
+    <${fp.LorePieceEditor} piece=${{ id: 'L9', type: 'lore', title: '', content: '', keys: [], links: [] }}
+      isNew=${true} allPieces=${pieces} onSave=${noop} onClose=${noop} onGenerate=${noop} />`);
+  if (!fresh.includes('New lore piece')) throw new Error('new-piece title missing: ' + fresh);
+  if (!fresh.match(/<button[^>]*disabled[^>]*>Save</)) throw new Error('blank title should disable Save: ' + fresh);
 });
 
 // Regression: `Mia:\n*actions here*` — the prefix strip must not cross the

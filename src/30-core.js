@@ -387,6 +387,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const speakerNames = [...new Set(lorePieces
     .filter(p => p?.type === 'character' && p.enabled !== false)
     .map(p => (p.title ?? '').trim()).filter(Boolean))];
+  // Fed-back text of a node, as sent: macro-substituted, and for assistant
+  // messages with repeated same-speaker prefixes stripped (weak models learn
+  // the repeat habit from their own raw output; the display split hides them
+  // too). User text is verbatim. Used for BOTH estimates and message content
+  // so the numbers agree with what's sent.
+  const histText = (n) => {
+    const t = sub(activeText(n));
+    return n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+  };
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
   if (plat) leadParts.push(plat);
@@ -435,7 +444,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     greetingNode = path[0];
     historyNodes = path.slice(1);
   }
-  const greetingTokens = greetingNode ? est(sub(activeText(greetingNode))) : 0;
+  const greetingTokens = greetingNode ? est(histText(greetingNode)) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
@@ -524,7 +533,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const kept = [];
   let histUsed = 0;
   for (let i = historyNodes.length - 1; i >= 0; i--) {
-    const cost = est(sub(activeText(historyNodes[i])));
+    const cost = est(histText(historyNodes[i]));
     if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
     kept.unshift(historyNodes[i]);
     histUsed += cost;
@@ -537,9 +546,9 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const messages = [{ role: 'system', content: staticText }];
   if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
   if (memText) messages.push({ role: 'system', content: memText });
-  if (greetingNode) messages.push({ role: 'assistant', content: sub(activeText(greetingNode)) });
+  if (greetingNode) messages.push({ role: 'assistant', content: histText(greetingNode) });
   for (const n of kept)
-    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: sub(activeText(n)) });
+    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
 
   manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
@@ -807,8 +816,49 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // Leading text before the first prefix is narration (speaker: null).
 // Prefixes are stripped from segment text. Unknown `Name:` lines (not in
 // `names`) never split.
-function splitSpeakerSegments(text, names) {
+
+// Weak models often repeat a speaker prefix INSIDE the same speaker's stretch
+// ("Mia: … Mia: …" mid-paragraph, or several "Narrator:" parts in a row).
+// Strip the redundant prefixes: a prefix is dropped only when it names the
+// CURRENT speaker — a line-start repeat, or a mid-line " Mia: " occurrence in
+// that speaker's stretch. A different character still splits (line start) or
+// stays literal (mid-line). Applied before the display split AND in the
+// prompt assembler, so the stored swipe keeps the raw text (logprobs stay
+// aligned) but fed-back history shows the clean form — the model doesn't
+// learn the repeat habit from its own output.
+function dedupeSpeakerPrefixes(text, names) {
   const s = String(text ?? '');
+  if (!s || !names?.length) return s;
+  const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
+  const lineRe = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const midReFor = (spk) => new RegExp(`(\\s)\\*{0,2}${escRe(spk)}\\*{0,2}:[ \\t]+`, 'giu');
+  let cur = 'Narrator'; // leading text is narration
+  let midRe = midReFor(cur);
+  const out = [];
+  for (const line of s.split('\n')) {
+    let l = line;
+    const m = lineRe.exec(l);
+    const key = m?.[1].trim().toLowerCase();
+    const name = m && key !== 'narrator' ? byLower.get(key) : null;
+    if (name || key === 'narrator') {
+      const spk = name ?? 'Narrator';
+      if (spk === cur) {
+        l = l.slice(m[0].length); // repeat of the current speaker — drop the prefix
+      } else {
+        cur = spk; midRe = midReFor(spk);
+        // New speaker starts here — keep this prefix, dedupe only the rest.
+        out.push(l.slice(0, m[0].length) + l.slice(m[0].length).replace(midRe, '$1'));
+        continue;
+      }
+    }
+    out.push(l.replace(midRe, '$1'));
+  }
+  return out.join('\n');
+}
+
+function splitSpeakerSegments(text, names) {
+  const s = dedupeSpeakerPrefixes(text, names);
   if (!s || !names?.length) return [{ speaker: null, text: s }];
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
@@ -836,12 +886,12 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with a single "Narrator:" on its own line — never several "Narrator:" parts in a row, and only for genuine scene-level narration that belongs to no character (unprefixed lines simply continue the current part). In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
 
 // Prose formatting conventions — single source of truth, woven into the
 // platform prompt (src/83-settings.js) and both generator prompts below, so
 // the RP reply format and generated greetings/lore can't drift apart.
-const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with a single "Narrator:" line — never several "Narrator:" parts in a row. Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
@@ -857,5 +907,6 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 // (first { to last } — see extractGenJSON in src/97-generator.js).
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
+const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
 // === PURE CORE END ===
 

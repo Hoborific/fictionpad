@@ -104,24 +104,24 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   border-left: 2px solid var(--c-border);
   padding: 4px 8px; margin-top: 4px;
   max-height: 220px; overflow-y: auto;
-  scrollbar-width: none; /* extent rail replaces the native scrollbar */
 }
-.think-body::-webkit-scrollbar { display: none; }
-/* Extent cues for the scrollable think body (native scrollbar auto-hides):
-   a bottom fade while more text remains, and a thin accent rail tracking
-   scroll position (thumb size = visible fraction, offset = scroll progress). */
-.think-body-wrap { position: relative; }
-.think-body-wrap .think-body { margin-top: 4px; }
-.think-body-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .think-body {
+/* RailScroll boxes (think body, links lists): the native scrollbar is hidden
+   and extent cues replace it — a bottom fade while more content remains, and
+   a thin accent rail tracking scroll position (thumb size = visible fraction,
+   offset = scroll progress). */
+.rail-wrap { position: relative; }
+.rail-body { scrollbar-width: none; }
+.rail-body::-webkit-scrollbar { display: none; }
+.rail-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .rail-body {
   mask-image: linear-gradient(to bottom, black calc(100% - 16px), transparent);
 }
-.think-rail {
+.rail {
   position: absolute; top: 2px; bottom: 2px; right: 1px; width: 3px;
   border-radius: 2px; background: color-mix(in oklch, var(--c-border) 60%, transparent);
   opacity: 0; transition: opacity 0.15s; pointer-events: none;
 }
-.think-body-wrap[data-scrollable="1"] .think-rail { opacity: 1; }
-.think-rail-thumb {
+.rail-wrap[data-scrollable="1"] .rail { opacity: 1; }
+.rail-thumb {
   position: absolute; left: 0; right: 0;
   top: calc(var(--th-off, 0) * 100%); height: calc(var(--th-frac, 1) * 100%);
   border-radius: 2px; background: color-mix(in oklch, var(--c-accent) 55%, transparent);
@@ -399,7 +399,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 
 /* ---------- chat panel sheet (modal) + context menu + mobile scrim ---------- */
 .modal.sheet { width: min(680px, 94vw); max-height: 88vh; }
-.modal.sheet .m-body { display: flex; flex-direction: column; padding: 0; min-height: 40vh; }
+/* Child combinator: a modal opened from inside the sheet (lore-piece editor,
+   ✦ generator) must keep its own .m-body padding — a descendant selector
+   would leak the sheet's padding:0 into the nested modal. */
+.modal.sheet > .m-body { display: flex; flex-direction: column; padding: 0; min-height: 40vh; }
 .ptabs { display: flex; border-bottom: 1px solid var(--c-border); padding: 0 12px; }
 .ptabs button {
   flex: 1; background: transparent; border: none; padding: 8px 4px;
@@ -648,6 +651,14 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   /* No hover on touch: message actions stay visible (dimmed). */
   .msg .actions { opacity: 0.65; }
 }
+
+/* A modal opened from inside the drawer (the lore-piece editor / ✦ generator
+   from Chat options) must overlay the whole app, not the drawer: lift the
+   drawer above the topbar (45) while it contains one, and drop the mobile
+   slide transform — an ancestor transform would trap the overlay's fixed
+   positioning and render the modal squished inside the drawer. Placed last so
+   it wins the specificity tie with .drawer.collapsed. */
+.drawer:has(.modal-overlay) { z-index: 50; transform: none; }
 </style>
 <body>
 <div id="root"></div>
@@ -703,7 +714,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.4.3';
+const APP_VERSION = '4.4.4';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1310,6 +1321,15 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const speakerNames = [...new Set(lorePieces
     .filter(p => p?.type === 'character' && p.enabled !== false)
     .map(p => (p.title ?? '').trim()).filter(Boolean))];
+  // Fed-back text of a node, as sent: macro-substituted, and for assistant
+  // messages with repeated same-speaker prefixes stripped (weak models learn
+  // the repeat habit from their own raw output; the display split hides them
+  // too). User text is verbatim. Used for BOTH estimates and message content
+  // so the numbers agree with what's sent.
+  const histText = (n) => {
+    const t = sub(activeText(n));
+    return n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+  };
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
   if (plat) leadParts.push(plat);
@@ -1358,7 +1378,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     greetingNode = path[0];
     historyNodes = path.slice(1);
   }
-  const greetingTokens = greetingNode ? est(sub(activeText(greetingNode))) : 0;
+  const greetingTokens = greetingNode ? est(histText(greetingNode)) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
 
@@ -1447,7 +1467,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const kept = [];
   let histUsed = 0;
   for (let i = historyNodes.length - 1; i >= 0; i--) {
-    const cost = est(sub(activeText(historyNodes[i])));
+    const cost = est(histText(historyNodes[i]));
     if (histUsed + cost > historyCap && kept.length > 0) break; // always keep the newest
     kept.unshift(historyNodes[i]);
     histUsed += cost;
@@ -1460,9 +1480,9 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const messages = [{ role: 'system', content: staticText }];
   if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
   if (memText) messages.push({ role: 'system', content: memText });
-  if (greetingNode) messages.push({ role: 'assistant', content: sub(activeText(greetingNode)) });
+  if (greetingNode) messages.push({ role: 'assistant', content: histText(greetingNode) });
   for (const n of kept)
-    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: sub(activeText(n)) });
+    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
 
   manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
@@ -1730,8 +1750,49 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // Leading text before the first prefix is narration (speaker: null).
 // Prefixes are stripped from segment text. Unknown `Name:` lines (not in
 // `names`) never split.
-function splitSpeakerSegments(text, names) {
+
+// Weak models often repeat a speaker prefix INSIDE the same speaker's stretch
+// ("Mia: … Mia: …" mid-paragraph, or several "Narrator:" parts in a row).
+// Strip the redundant prefixes: a prefix is dropped only when it names the
+// CURRENT speaker — a line-start repeat, or a mid-line " Mia: " occurrence in
+// that speaker's stretch. A different character still splits (line start) or
+// stays literal (mid-line). Applied before the display split AND in the
+// prompt assembler, so the stored swipe keeps the raw text (logprobs stay
+// aligned) but fed-back history shows the clean form — the model doesn't
+// learn the repeat habit from its own output.
+function dedupeSpeakerPrefixes(text, names) {
   const s = String(text ?? '');
+  if (!s || !names?.length) return s;
+  const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
+  const lineRe = /^\s*\*{0,2}\s*([\p{L}][\p{L}\p{M}\p{N}'. \-]{0,39}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const midReFor = (spk) => new RegExp(`(\\s)\\*{0,2}${escRe(spk)}\\*{0,2}:[ \\t]+`, 'giu');
+  let cur = 'Narrator'; // leading text is narration
+  let midRe = midReFor(cur);
+  const out = [];
+  for (const line of s.split('\n')) {
+    let l = line;
+    const m = lineRe.exec(l);
+    const key = m?.[1].trim().toLowerCase();
+    const name = m && key !== 'narrator' ? byLower.get(key) : null;
+    if (name || key === 'narrator') {
+      const spk = name ?? 'Narrator';
+      if (spk === cur) {
+        l = l.slice(m[0].length); // repeat of the current speaker — drop the prefix
+      } else {
+        cur = spk; midRe = midReFor(spk);
+        // New speaker starts here — keep this prefix, dedupe only the rest.
+        out.push(l.slice(0, m[0].length) + l.slice(m[0].length).replace(midRe, '$1'));
+        continue;
+      }
+    }
+    out.push(l.replace(midRe, '$1'));
+  }
+  return out.join('\n');
+}
+
+function splitSpeakerSegments(text, names) {
+  const s = dedupeSpeakerPrefixes(text, names);
   if (!s || !names?.length) return [{ speaker: null, text: s }];
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
@@ -1759,12 +1820,12 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with a single "Narrator:" on its own line — never several "Narrator:" parts in a row, and only for genuine scene-level narration that belongs to no character (unprefixed lines simply continue the current part). In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
 
 // Prose formatting conventions — single source of truth, woven into the
 // platform prompt (src/83-settings.js) and both generator prompts below, so
 // the RP reply format and generated greetings/lore can't drift apart.
-const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with a single "Narrator:" line — never several "Narrator:" parts in a row. Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
@@ -1780,6 +1841,7 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 // (first { to last } — see extractGenJSON in src/97-generator.js).
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
+const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
 // === PURE CORE END ===
 
 // ============================================================================
@@ -2414,10 +2476,13 @@ const cosine = (a, b) => {
 // suggestions, /improve, ✦ generator). Returns trimmed text; throws on
 // HTTP/API errors. `samplers` (optional) is merged into the request like the
 // streaming path does — dotted custom-sampler keys nest (expandSamplerParams).
-async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null }) {
+// `signal` (optional) aborts the call — the composer's Stop aborts all
+// in-flight aux calls.
+async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null, signal = null }) {
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
+    ...(signal ? { signal } : {}),
     body: JSON.stringify({
       model,
       messages: [
@@ -2618,7 +2683,14 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
     // Initial focus: first field in the body, else the dialog container.
     const target = dlg.querySelector('.m-body input, .m-body textarea, .m-body select, .m-body button') ?? dlg;
     target.focus?.();
-    const onKey = (e) => { if (e.key === 'Escape') onCloseRef.current(); };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      // Only the topmost overlay reacts — one Escape must not close a stacked
+      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor).
+      const overlays = document.querySelectorAll('.modal-overlay');
+      if (overlays.length && overlays[overlays.length - 1] !== dlg.closest('.modal-overlay')) return;
+      onCloseRef.current();
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
@@ -2634,6 +2706,32 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
         ${footer && html`<div class="m-foot">${footer}</div>`}
       </div>
     </div>`;
+}
+
+// Scrollable box with the native scrollbar hidden and extent cues instead: a
+// thin accent rail tracking scroll position plus a bottom fade while more
+// content remains below (see .rail-* in styles.css). Shared by the thinking
+// box and the lore links lists so they all scroll the same way. The scroll
+// handler writes CSS vars only — no re-render per scroll event.
+function RailScroll({ className, children }) {
+  const wrapRef = useRef(null);
+  const sync = () => {
+    const wrap = wrapRef.current;
+    const el = wrap?.firstElementChild;
+    if (!el) return;
+    const scrollable = el.scrollHeight > el.clientHeight + 2;
+    wrap.dataset.scrollable = scrollable ? '1' : '';
+    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
+    if (scrollable) {
+      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
+      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
+    }
+  };
+  useEffect(sync); // every render — cheap DOM reads, covers content/resize changes
+  return html`<div class="rail-wrap" ref=${wrapRef}>
+    <div class=${`rail-body ${className ?? ''}`} onScroll=${sync}>${children}</div>
+    <div class="rail"><div class="rail-thumb" /></div>
+  </div>`;
 }
 
 // Number input that allows free typing and commits a clamped value on
@@ -2712,9 +2810,76 @@ function ListInput({ values, onChange, textarea, delim, ...rest }) {
     : html`<input type="text" value=${text} onInput=${handle} ...${rest} />`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
+// The editable fields of a lore piece — shared by the inline card (scenario
+// editor) and the piece editor popout (chat options), so the two stay
+// identical. `set` applies a partial patch to the caller's piece/draft.
+function LorePieceFields({ piece, others, set }) {
+  return html`
+    <div class="grid2">
+      <label class="field"><span>Title</span>
+        <input type="text" value=${piece.title} onInput=${(e) => set({ title: e.target.value })} /></label>
+      <label class="field"><span>Type</span>
+        <select value=${piece.type} onChange=${(e) => set({ type: e.target.value })}>
+          <option value="lore">lore</option>
+          <option value="character">character</option>
+        </select></label>
+    </div>
+    <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
+      <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
+    <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
+      <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
+        onChange=${(keys) => set({ keys })} /></label>
+    <div class="field"><span>Key matching</span>
+      <label class="check" title="Keys only match at word boundaries — 'cat' won't match 'cathedral'">
+        <input type="checkbox" checked=${!!piece.wholeWord} onChange=${(e) => set({ wholeWord: e.target.checked })} /> whole word</label>
+      <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
+        <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
+    </div>
+    <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
+      <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
+      Semantic activation — uses the embedding model (aux); no keyword needed
+    </label>
+    <div class="grid3">
+      <label class="field"><span>Weight</span>
+        <${NumInput} value=${piece.weight ?? 0} step=${1} fallback=${0}
+          onCommit=${(n) => set({ weight: n })} /></label>
+      <label class="field"><span>Search depth (est. tokens; blank = global default)</span>
+        <${NumInput} value=${piece.searchDepth} min=${0} step=${128} fallback=${null} placeholder="2048"
+          onCommit=${(n) => set({ searchDepth: n })} /></label>
+      <div class="field"><span>Flags</span>
+        <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
+        <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
+      </div>
+    </div>
+    ${others.length > 0 && html`
+      <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
+        <${RailScroll} className="links-list">
+          ${others.map(o => html`
+            <label class="check" key=${o.id}>
+              <input type="checkbox" checked=${(piece.links ?? []).includes(o.id)}
+                onChange=${(e) => set({ links: e.target.checked
+                  ? [...(piece.links ?? []), o.id]
+                  : (piece.links ?? []).filter(id => id !== o.id) })} />
+              ${o.title || '(untitled)'}
+            </label>`)}
+        <//></label>`}`;
+}
+
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
   const [open, setOpen] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const set = (patch) => onChange({ ...piece, ...patch });
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      // The patch carries content fields only — id and provenance survive.
+      set(await onGenerate('piece', promptText, piece));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const others = allPieces.filter(p => p.id !== piece.id);
   return html`
     <div class="lore-card">
@@ -2724,60 +2889,51 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove }) {
         ${piece.type === 'character' && html`<span class="pill">character</span>`}
         ${piece.pinned && html`<span class="pill pinned">pinned</span>`}
         ${piece.enabled === false && html`<span class="pill">disabled</span>`}
+        ${onGenerate && html`<button class="btn small" title="Generate / flesh out this piece with the AI"
+          onClick=${(e) => { e.stopPropagation(); setGenError(null); setGenOpen(true); }}>✦</button>`}
         <button class="btn small danger" onClick=${(e) => { e.stopPropagation(); onRemove(); }}>✕</button>
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title=${`Generate — ${piece.title || 'lore piece'}`} busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
       ${open && html`
-        <div class="lc-body">
-          <div class="grid2">
-            <label class="field"><span>Title</span>
-              <input type="text" value=${piece.title} onInput=${(e) => set({ title: e.target.value })} /></label>
-            <label class="field"><span>Type</span>
-              <select value=${piece.type} onChange=${(e) => set({ type: e.target.value })}>
-                <option value="lore">lore</option>
-                <option value="character">character</option>
-              </select></label>
-          </div>
-          <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
-            <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
-          <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
-            <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${piece.keys}
-              onChange=${(keys) => set({ keys })} /></label>
-          <div class="field"><span>Key matching</span>
-            <label class="check" title="Keys only match at word boundaries — 'cat' won't match 'cathedral'">
-              <input type="checkbox" checked=${!!piece.wholeWord} onChange=${(e) => set({ wholeWord: e.target.checked })} /> whole word</label>
-            <label class="check" title="Keys match with exact letter case (default is case-insensitive)">
-              <input type="checkbox" checked=${!!piece.caseSensitive} onChange=${(e) => set({ caseSensitive: e.target.checked })} /> case sensitive</label>
-          </div>
-          <label class="check" title="The embedding model (Settings → Models) compares this piece against the recent conversation each generation and injects it on similarity, even without a keyword hit">
-            <input type="checkbox" checked=${!!piece.smart} onChange=${(e) => set({ smart: e.target.checked })} />
-            Semantic activation — uses the embedding model (aux); no keyword needed
-          </label>
-          <div class="grid3">
-            <label class="field"><span>Weight</span>
-              <${NumInput} value=${piece.weight ?? 0} step=${1} fallback=${0}
-                onCommit=${(n) => set({ weight: n })} /></label>
-            <label class="field"><span>Search depth (est. tokens; blank = global default)</span>
-              <${NumInput} value=${piece.searchDepth} min=${0} step=${128} fallback=${null} placeholder="2048"
-                onCommit=${(n) => set({ searchDepth: n })} /></label>
-            <div class="field"><span>Flags</span>
-              <label class="check"><input type="checkbox" checked=${!!piece.pinned} onChange=${(e) => set({ pinned: e.target.checked })} /> pinned</label>
-              <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
-            </div>
-          </div>
-          ${others.length > 0 && html`
-            <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
-              <div class="links-list">
-                ${others.map(o => html`
-                  <label class="check" key=${o.id}>
-                    <input type="checkbox" checked=${(piece.links ?? []).includes(o.id)}
-                      onChange=${(e) => set({ links: e.target.checked
-                        ? [...(piece.links ?? []), o.id]
-                        : (piece.links ?? []).filter(id => id !== o.id) })} />
-                    ${o.title || '(untitled)'}
-                  </label>`)}
-              </div></label>`}
-        </div>`}
+        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} /></div>`}
     </div>`;
+}
+
+// Lore piece editor popout (chat options) — the same pattern as the
+// scenario/character editors: a wide modal with every field visible (links
+// included), ✦ Generate + Save in the footer, local draft, dirty guard. The
+// piece is never a blind ✦ prompt — you see what it is before you edit or
+// generate. The generator's patch fills the local draft only; persistence
+// stays with Save, and id/provenance (createdBy/atLen) survive untouched.
+function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
+  const [draft, setDraft] = useState(() => deepClone(piece));
+  const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
+  const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
+  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      set(await onGenerate('piece', promptText, draft));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
+  const others = allPieces.filter(p => p.id !== draft.id);
+  return html`
+    <${Modal} title=${isNew ? 'New lore piece' : `Lore — ${piece.title || '(untitled)'}`} wide
+      onClose=${genOpen ? () => setGenOpen(false) : guardClose}
+      footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
+        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
+      <${LorePieceFields} piece=${draft} others=${others} set=${set} />
+      ${genOpen && html`
+        <${GeneratorModal} title=${`Generate — ${draft.title || 'lore piece'}`} busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
+    <//>`;
 }
 
 function newScenario() {
@@ -2840,14 +2996,14 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card content edits apply live to all linked scenarios and chats — but the opening greeting is snapshotted per chat at creation, so greeting edits only affect new chats. For scenario-only characters, use a character-type lore piece below.</div>
         ${charList.length === 0 && html`<div class="hint">No global characters yet — create them from the sidebar's Characters section.</div>`}
         ${charList.length > 0 && html`
-          <div class="links-list">
+          <${RailScroll} className="links-list">
             ${charList.map(c => html`
               <label class="check" key=${c.id}>
                 <input type="checkbox" checked=${linkedIds.includes(c.id)}
                   onChange=${(e) => toggleChar(c.id, e.target.checked)} />
                 ${c.name}
               </label>`)}
-          </div>`}
+          <//>`}
       </div>
       <div class="field">
         <span>Lore pieces (${draft.lorePieces.length})
@@ -2861,7 +3017,8 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         ${draft.lorePieces.map(p => html`
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
-            onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })} />`)}
+            onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
+            onGenerate=${onGenerate} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
@@ -2976,8 +3133,11 @@ const DEFAULT_SETTINGS = {
   recapMaxTokens: 700,
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
-  genTemp: 0.9, // ✦ Generate temperature (aux model)
+  pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
+  genModel: '', // ✦ Generate model; blank = aux model (then chat model)
+  genTemp: 0.9, // ✦ Generate temperature
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
+  toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
@@ -3159,6 +3319,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${SETTINGS_TABS.map(([id, label]) => html`
           <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
       </div>
+      <!-- model pickers on several tabs share this list; datalists are invisible -->
+      <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
 
       ${tab === 'appearance' && html`
         <label class="field"><span>Theme — applies immediately, saved automatically</span>
@@ -3238,18 +3400,19 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         </div>`}
 
       ${tab === 'models' && html`
-        <div class="grid2">
+        <div class="grid3">
           <label class="field"><span>Chat model</span>
             <div style=${{ display: 'flex', gap: '6px' }}>
               <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
               <button class="btn" onClick=${fetchModels}>Fetch</button>
             </div>
-            <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
             ${modelsError && html`<span class="warn">${modelsError}</span>`}
             ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
           </label>
           <label class="field"><span>Aux model (memory summaries, suggestions, /improve, /recap; blank = chat model)</span>
             <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} /></label>
+          <label class="field"><span>Generator model (✦ scenario/character/piece; blank = aux model)</span>
+            <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} /></label>
         </div>
         <div class="grid2">
           <label class="field"><span>Embedding model (semantic lore activation; blank = off)</span>
@@ -3391,6 +3554,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
             Tool calling (model may register characters + lore mid-reply, into this chat's lore)
           </label>
+          <label class="check" title="Each newly tool-registered character is fleshed out by the ✦ generator — one aux call per new character, fired concurrently after the generation completes. Failures keep the original description. Requires tool calling.">
+            <input type="checkbox" disabled=${draft.toolsEnabled === false}
+              checked=${!!draft.toolsEnrich} onChange=${(e) => set({ toolsEnrich: e.target.checked })} />
+            Flesh out tool-registered characters with the ✦ generator (experimental)
+          </label>
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
@@ -3448,11 +3616,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
           </div>
         </div>
-        <div class="field"><span>Scenario/character generator (aux model)</span>
+        <div class="field"><span>Scenario/character generator</span>
           <div class="grid3">
             ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
           </div>
-          <div class="hint">Prompts are editable in the Prompts tab.</div>
+          <div class="hint">Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab.</div>
         </div>
         <div class="field"><span>Tool calling</span>
           ${draft.toolsEnabled === false
@@ -3477,6 +3645,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
         ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
           'The reply contract is one JSON object with name, content, keys and greeting.')}
+        ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
+          'The reply contract is one JSON object with type, title, content, keys and pinned.')}
         ${draft.toolsEnabled !== false
           ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
           : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
@@ -3779,7 +3949,8 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate }) {
+  const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
   const allPieces = mergedLorePieces(scenario, chat, characters);
@@ -3828,22 +3999,36 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       <div class="field">
         <span>Lore — this chat only (${pieces.length})
           <button class="btn small" style=${{ marginLeft: '8px' }}
-            onClick=${() => setPieces([...pieces, newLorePiece()])}>+ add piece</button>
+            onClick=${() => setEditing({ piece: newLorePiece(), isNew: true })}>+ add piece</button>
           ${LORE_TEMPLATES.map(t => html`
             <button key=${t.label} class="btn small" style=${{ marginLeft: '4px' }}
               title=${`New ${t.label} piece, prefilled with a skeleton`}
-              onClick=${() => setPieces([...pieces, newLoreFromTemplate(t)])}>+ ${t.label}</button>`)}
+              onClick=${() => setEditing({ piece: newLoreFromTemplate(t), isNew: true })}>+ ${t.label}</button>`)}
         </span>
-        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only.</div>
+        <div class="hint">Merged over the scenario's lore at generation time (chat wins on a shared id). Characters added here join speaker colours, /pov, and semantic activation for this chat only. Click a piece to edit or ✦ generate it.</div>
         ${pieces.map(p => html`
-          <${LorePieceCard} key=${p.id} piece=${p} allPieces=${allPieces}
-            onChange=${(next) => setPieces(pieces.map(q => q.id === p.id ? next : q))}
-            onRemove=${() => setPieces(pieces.filter(q => q.id !== p.id))} />`)}
+          <div class="lore-card" key=${p.id}>
+            <div class="lc-head" title="Edit piece" onClick=${() => setEditing({ piece: p, isNew: false })}>
+              <span class="t">${p.title || '(untitled)'}</span>
+              ${p.type === 'character' && html`<span class="pill">character</span>`}
+              ${p.pinned && html`<span class="pill pinned">pinned</span>`}
+              ${p.enabled === false && html`<span class="pill">disabled</span>`}
+              <button class="btn small danger" title="Remove from this chat"
+                onClick=${(e) => { e.stopPropagation(); setPieces(pieces.filter(q => q.id !== p.id)); }}>✕</button>
+            </div>
+          </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px' }}>
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
+      ${editing && html`
+        <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
+          onSave=${(draft) => {
+            setPieces(editing.isNew ? [...pieces, draft] : pieces.map(q => q.id === draft.id ? draft : q));
+            setEditing(null);
+          }}
+          onClose=${() => setEditing(null)} onGenerate=${onGenerate} />`}
     </div>`;
 }
 
@@ -4008,35 +4193,15 @@ function ProbsView({ tokens, onPick }) {
 
 // Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
 // Collapsed by default, streaming or not — the header still shows live that
-// thinking is in progress ("Thinking…"). The expanded body shows its extent
-// subtly (the native scrollbar auto-hides): a thin accent rail tracking
-// scroll position, and a bottom fade while more text remains below.
+// thinking is in progress ("Thinking…"). The expanded body scrolls via
+// RailScroll (hidden native scrollbar, accent rail + bottom fade cues).
 function ThinkBox({ text, streaming }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
-  // CSS vars only — no re-render per scroll event.
-  const syncExtent = () => {
-    const wrap = wrapRef.current;
-    const el = wrap?.querySelector('.think-body');
-    if (!el) return;
-    const scrollable = el.scrollHeight > el.clientHeight + 2;
-    wrap.dataset.scrollable = scrollable ? '1' : '';
-    wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
-    if (scrollable) {
-      wrap.style.setProperty('--th-frac', el.clientHeight / el.scrollHeight);
-      wrap.style.setProperty('--th-off', el.scrollTop / el.scrollHeight);
-    }
-  };
-  useEffect(() => { if (open) syncExtent(); }, [open, text, streaming]);
   return html`
     <div class="think">
       <button class="think-head" onClick=${() => setOpen(!open)}>
         <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
-      ${open && html`
-        <div class="think-body-wrap" ref=${wrapRef}>
-          <div class="think-body" onScroll=${syncExtent}>${text}</div>
-          <div class="think-rail"><div class="think-rail-thumb" /></div>
-        </div>`}
+      ${open && html`<${RailScroll} className="think-body">${text}<//>`}
     </div>`;
 }
 
@@ -4382,16 +4547,17 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
             // of being swallowed with no effect.
             if (e.key === 'Enter' && !e.shiftKey && !coarseEnter && !generating && !busy) { e.preventDefault(); send(); }
           }} />
-        ${generating
-          ? html`<button class="btn danger" onClick=${onStop}>■ Stop</button>`
-          : html`<button class="btn primary" disabled=${!!busy} onClick=${send}>${busy ? 'Working…' : 'Send'}</button>`}
+        ${generating || busy
+          ? html`<button class="btn danger" title=${generating ? 'Stop generation' : 'Stop background calls (memory, generator, suggestions…)'}
+              onClick=${onStop}>■ Stop</button>`
+          : html`<button class="btn primary" onClick=${send}>Send</button>`}
       </div>
       ${hint && html`<div class="hint warn">${hint}</div>`}
     </div>`;
 }
 
 function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy, dateFormat, showThinking, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
@@ -4520,7 +4686,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       // in the tree (runGeneration can still bail after the append).
       const appended = p[p.length - 1]?.role === 'assistant'
         && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
-      if (cur.generating || cur.auxBusy || appended) return;
+      if (cur.generating || cur.auxBusy.length || appended) return;
       draftsRef.current.set(chatId, text); // rejected — restore the draft
       if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
     }, 0);
@@ -4562,11 +4728,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       </div>
       ${showJump && html`
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
-      ${!generating && leaf?.role === 'user' && html`
+      ${!generating && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy}
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
@@ -4884,7 +5050,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings }) {
+                    settings, onUpdateSettings, onGenerate }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -4896,13 +5062,13 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
         <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />`}
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
-          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} />`}
+          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings }) {
+                         settings, onUpdateSettings, onGenerate }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -4913,7 +5079,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} />
     <//>`;
 }
 
@@ -4927,7 +5093,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -4943,7 +5109,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -5067,6 +5233,17 @@ const genStr = (v, max) => {
 const genKeys = (v) => (Array.isArray(v) ? v : [])
   .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
 
+// One model-shaped piece → canonical fields (title/content capped, keys
+// filtered, type whitelisted). Shared by the scenario sanitizer (fresh ids
+// minted on top) and the single-piece sanitizer.
+const sanitizeGenPiece = (p) => ({
+  type: p?.type === 'character' ? 'character' : 'lore',
+  title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+  content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+  keys: genKeys(p?.keys),
+  pinned: p?.pinned === true,
+});
+
 // Only fields present (and non-empty) in the model's reply land in the patch;
 // everything else keeps the draft's current value.
 function sanitizeScenarioGen(obj) {
@@ -5080,15 +5257,22 @@ function sanitizeScenarioGen(obj) {
     patch.tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
   if (Array.isArray(obj.lorePieces))
     patch.lorePieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
-      .map(p => ({
-        ...newLorePiece(), // fresh id + flag defaults
-        type: p?.type === 'character' ? 'character' : 'lore',
-        title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
-        content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
-        keys: genKeys(p?.keys),
-        pinned: p?.pinned === true,
-      }))
+      .map(p => ({ ...newLorePiece(), ...sanitizeGenPiece(p) })) // fresh id + flag defaults
       .filter(p => p.title && p.content);
+  return patch;
+}
+
+// Single lore piece (✦ on a scenario-editor card or the chat piece editor
+// popout). Same no-wipe rule, and no id — the piece keeps its identity (and,
+// for chat pieces, its createdBy/atLen provenance for rewind rollback).
+function sanitizePieceGen(obj) {
+  const p = sanitizeGenPiece(obj);
+  const patch = {};
+  if (p.title) patch.title = p.title;
+  if (p.content) patch.content = p.content;
+  if (Array.isArray(obj?.keys)) patch.keys = p.keys;
+  if (typeof obj?.pinned === 'boolean') patch.pinned = p.pinned;
+  if (obj?.type === 'character' || obj?.type === 'lore') patch.type = p.type;
   return patch;
 }
 
@@ -5223,7 +5407,8 @@ function Main({ storage, storageKind, storageFailed }) {
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
-  const [auxBusy, setAuxBusy] = useState(null); // 'improve' | 'recap' | 'memory' | null
+  const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
+  const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
 
@@ -5235,13 +5420,22 @@ function Main({ storage, storageKind, storageFailed }) {
   const [auxLog, setAuxLog] = useState([]);
   async function auxLogged(kind, args, chatId = null) {
     const entry = { kind, chatId, at: Date.now(), model: args.model ?? '', system: args.system ?? '', user: args.user ?? '' };
+    // Every aux call is tracked: the composer shows ■ Stop (not Send) while
+    // any are in flight, so a background call never overlaps the user's next
+    // generation unnoticed; Stop aborts them all via auxCtls.
+    const ctl = new AbortController();
+    auxCtls.current.add(ctl);
+    setAuxBusy(list => [...list, kind]);
     try {
-      const out = await auxCall(args);
+      const out = await auxCall({ ...args, signal: ctl.signal });
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: true, out: out ?? '' }]);
       return out;
     } catch (e) {
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: describeApiError(e) }]);
       throw e;
+    } finally {
+      auxCtls.current.delete(ctl);
+      setAuxBusy(list => { const i = list.indexOf(kind); return i < 0 ? list : [...list.slice(0, i), ...list.slice(i + 1)]; });
     }
   }
 
@@ -5252,7 +5446,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // are thrown back to the generator modal, which shows them inline.
   async function runGen(kind, promptText, draft) {
     const st = ref.current.settings;
-    const model = st.auxModel || st.model;
+    const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
     if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
     // The RP length preset otherwise only reaches the chat assembler — aux
@@ -5263,12 +5457,16 @@ function Main({ storage, storageKind, storageFailed }) {
       ? { name: draft.name, description: draft.description, tags: draft.tags,
           scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
           lorePieces: (draft.lorePieces ?? []).map(({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned })) }
-      : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
+      : kind === 'piece'
+        ? (({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned }))(draft)
+        : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
     const out = await auxLogged('generate', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
-        : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
+        : kind === 'piece'
+          ? st.pieceGenPrompt || DEFAULT_PIECE_GEN_PROMPT
+          : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
       user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
       maxTokens: 3000, temperature: st.genTemp ?? 0.9,
       // The generator rides the user's GLOBAL sampler set — registered
@@ -5282,7 +5480,7 @@ function Main({ storage, storageKind, storageFailed }) {
     });
     const obj = extractGenJSON(out);
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
-    return isScenario ? sanitizeScenarioGen(obj) : sanitizeCharacterGen(obj);
+    return isScenario ? sanitizeScenarioGen(obj) : kind === 'piece' ? sanitizePieceGen(obj) : sanitizeCharacterGen(obj);
   }
 
   // Always-fresh refs for async generation loops (avoid stale closures).
@@ -5674,6 +5872,44 @@ function Main({ storage, storageKind, storageFailed }) {
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
     }
+  }
+
+  // ---- character enrichment (experimental, settings.toolsEnrich) ----
+  // Newly tool-registered characters get fleshed out by the ✦ generator
+  // ('piece' kind) — one aux call per new character, all concurrent, after
+  // the generation completes. Only CONTENT is rewritten and keys are merged;
+  // the title is never touched — the registered name is the speaker-matching
+  // key and must not drift. Failures keep the original description.
+  async function maybeEnrichCharacters(chatObj, nodeId, toolResults) {
+    const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
+      && String(r.note ?? '').startsWith('registered character'));
+    await Promise.all(fresh.map(async (r) => {
+      const name = String(r.args?.name ?? '').trim();
+      if (!name) return;
+      const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
+        && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
+      if (!piece) return; // rewound/pruned meanwhile
+      try {
+        const patch = await runGen('piece',
+          'Flesh out this newly introduced character into a full reference card — appearance, personality, motives, voice. Keep the name and their role in the scene recognizable.',
+          { type: 'character', title: piece.title, content: piece.content, keys: piece.keys, pinned: piece.pinned });
+        // Merge-on-write: re-read at save time; drop the write if the chat or
+        // piece vanished (rewind, delete) in between.
+        const cur = ref.current.chats[chatObj.id];
+        if (!cur || !(cur.lorePieces ?? []).some(p => p.id === piece.id)) return;
+        const next = { ...cur, lorePieces: cur.lorePieces.map(p => p.id === piece.id
+          ? { ...p, ...(patch.content ? { content: patch.content } : {}),
+              keys: [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5) }
+          : p) };
+        // touch:false — a background lore write shouldn't re-sort the sidebar.
+        // Sync ref immediately (same reason as commit() in the generation
+        // finally): React flushes the write later, so a sibling enrichment or
+        // the next generation's commit() reading ref.current.chats in between
+        // would rebuild from the pre-enrichment snapshot and drop this write.
+        saveChat(next, { touch: false });
+        ref.current.chats = { ...ref.current.chats, [chatObj.id]: next };
+      } catch (e) { console.warn(`Character enrichment failed for "${name}":`, e); }
+    }));
   }
 
   // ---- generation ----
@@ -6074,6 +6310,10 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         maybeSummarize(work);
         maybeExtractLore(work);
+        // Experimental (settings.toolsEnrich): flesh out characters this
+        // generation registered, via the ✦ generator. Fire-and-forget like
+        // the passes above; merge-on-write at save time.
+        if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions) {
@@ -6153,7 +6393,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId];
     if (!c) return 'Select or create a chat first.';
     if (genRef.current) return 'Already generating — press Stop first.';
-    if (auxBusy) return `Working… (${auxBusy})`;
+    if (auxBusy.length) return `Working… (${[...new Set(auxBusy)].join(', ')})`;
     if (raw.startsWith('/')) {
       const sp = raw.indexOf(' ');
       const cmd = (sp === -1 ? raw : raw.slice(0, sp)).toLowerCase();
@@ -6229,7 +6469,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-4)
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
-    setAuxBusy('improve');
     try {
       const out = await auxLogged('improve', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -6241,8 +6480,6 @@ function Main({ storage, storageKind, storageFailed }) {
       setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
     } catch (e) {
       setError(`/improve failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
@@ -6255,7 +6492,6 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(x => `${x.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(x), pName)}`)
       .join('\n\n');
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
-    setAuxBusy('recap');
     try {
       const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -6267,13 +6503,10 @@ function Main({ storage, storageKind, storageFailed }) {
       setModal({ kind: 'recap', text: out });
     } catch (e) {
       setError(`/recap failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
   async function memoryCommand(c, n) {
-    setAuxBusy('memory');
     setComposerInject({ chatId: c.id, hint: 'Generating memory…', nonce: Date.now() });
     try {
       const text = await generateMemory(c, n);
@@ -6288,8 +6521,6 @@ function Main({ storage, storageKind, storageFailed }) {
     } catch (e) {
       setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
       setError(`/memory failed: ${e.message ?? e}`);
-    } finally {
-      setAuxBusy(null);
     }
   }
 
@@ -6416,7 +6647,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // calls create sibling assistant branches — same semantics as swipes.
   const onGenerateReply = (nodeId = null) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current || !generationReady(c)) return;
+    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
@@ -6677,10 +6908,11 @@ function Main({ storage, storageKind, storageFailed }) {
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}
               onRerollSuggestions=${() => {
                 const c = ref.current.chats[ui.chatId];
-                if (c && !auxBusy) fetchSuggestions(c, c.activeLeafId);
+                if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
               composerInject=${composerInject} auxBusy=${auxBusy}
-              onSubmitInput=${handleInput} onStop=${() => genRef.current?.abort.abort()}
+              onSubmitInput=${handleInput}
+              onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
@@ -6701,6 +6933,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
+        onGenerate=${runGen}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -6765,6 +6998,7 @@ function Main({ storage, storageKind, storageFailed }) {
         settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
+        onGenerate=${runGen}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}

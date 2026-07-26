@@ -85,24 +85,24 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   border-left: 2px solid var(--c-border);
   padding: 4px 8px; margin-top: 4px;
   max-height: 220px; overflow-y: auto;
-  scrollbar-width: none; /* extent rail replaces the native scrollbar */
 }
-.think-body::-webkit-scrollbar { display: none; }
-/* Extent cues for the scrollable think body (native scrollbar auto-hides):
-   a bottom fade while more text remains, and a thin accent rail tracking
-   scroll position (thumb size = visible fraction, offset = scroll progress). */
-.think-body-wrap { position: relative; }
-.think-body-wrap .think-body { margin-top: 4px; }
-.think-body-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .think-body {
+/* RailScroll boxes (think body, links lists): the native scrollbar is hidden
+   and extent cues replace it — a bottom fade while more content remains, and
+   a thin accent rail tracking scroll position (thumb size = visible fraction,
+   offset = scroll progress). */
+.rail-wrap { position: relative; }
+.rail-body { scrollbar-width: none; }
+.rail-body::-webkit-scrollbar { display: none; }
+.rail-wrap[data-scrollable="1"]:not([data-at-bottom="1"]) .rail-body {
   mask-image: linear-gradient(to bottom, black calc(100% - 16px), transparent);
 }
-.think-rail {
+.rail {
   position: absolute; top: 2px; bottom: 2px; right: 1px; width: 3px;
   border-radius: 2px; background: color-mix(in oklch, var(--c-border) 60%, transparent);
   opacity: 0; transition: opacity 0.15s; pointer-events: none;
 }
-.think-body-wrap[data-scrollable="1"] .think-rail { opacity: 1; }
-.think-rail-thumb {
+.rail-wrap[data-scrollable="1"] .rail { opacity: 1; }
+.rail-thumb {
   position: absolute; left: 0; right: 0;
   top: calc(var(--th-off, 0) * 100%); height: calc(var(--th-frac, 1) * 100%);
   border-radius: 2px; background: color-mix(in oklch, var(--c-accent) 55%, transparent);
@@ -380,7 +380,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 
 /* ---------- chat panel sheet (modal) + context menu + mobile scrim ---------- */
 .modal.sheet { width: min(680px, 94vw); max-height: 88vh; }
-.modal.sheet .m-body { display: flex; flex-direction: column; padding: 0; min-height: 40vh; }
+/* Child combinator: a modal opened from inside the sheet (lore-piece editor,
+   ✦ generator) must keep its own .m-body padding — a descendant selector
+   would leak the sheet's padding:0 into the nested modal. */
+.modal.sheet > .m-body { display: flex; flex-direction: column; padding: 0; min-height: 40vh; }
 .ptabs { display: flex; border-bottom: 1px solid var(--c-border); padding: 0 12px; }
 .ptabs button {
   flex: 1; background: transparent; border: none; padding: 8px 4px;
@@ -629,3 +632,11 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   /* No hover on touch: message actions stay visible (dimmed). */
   .msg .actions { opacity: 0.65; }
 }
+
+/* A modal opened from inside the drawer (the lore-piece editor / ✦ generator
+   from Chat options) must overlay the whole app, not the drawer: lift the
+   drawer above the topbar (45) while it contains one, and drop the mobile
+   slide transform — an ancestor transform would trap the overlay's fixed
+   positioning and render the modal squished inside the drawer. Placed last so
+   it wins the specificity tie with .drawer.collapsed. */
+.drawer:has(.modal-overlay) { z-index: 50; transform: none; }

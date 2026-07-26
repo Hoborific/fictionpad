@@ -424,10 +424,13 @@ const cosine = (a, b) => {
 // suggestions, /improve, ✦ generator). Returns trimmed text; throws on
 // HTTP/API errors. `samplers` (optional) is merged into the request like the
 // streaming path does — dotted custom-sampler keys nest (expandSamplerParams).
-async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null }) {
+// `signal` (optional) aborts the call — the composer's Stop aborts all
+// in-flight aux calls.
+async function auxCall({ endpoint, apiKey, serverToken, model, system, user, maxTokens = 300, temperature = 0.7, stop = null, samplers = null, signal = null }) {
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
+    ...(signal ? { signal } : {}),
     body: JSON.stringify({
       model,
       messages: [
