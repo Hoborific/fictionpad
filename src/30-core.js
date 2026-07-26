@@ -8,11 +8,32 @@ const LINK_BOOST = 2; // effective-weight bonus from one active linking piece
 const MEMORY_CAP = 100;
 const MEMORY_EVERY = 30; // messages on active path between auto-summaries
 const LAYER_CAPS = { static: 0.30, lore: 0.20, memory: 0.10 }; // history = rest
+// Length presets are prose guidance ONLY — they never cap tokens. The
+// directive joins the prompt tail; the response reserve is a separate knob.
 const LENGTH_PRESETS = {
-  short:  { maxTokens: 150, directive: 'Keep your response concise: one or two short paragraphs.' },
-  medium: { maxTokens: 400, directive: 'Write a response of moderate length: a few paragraphs.' },
-  long:   { maxTokens: 800, directive: 'Write a long, detailed response with rich description.' },
+  short:  { directive: 'Keep your response concise: one or two short paragraphs.' },
+  medium: { directive: 'Write a response of moderate length: a few paragraphs.' },
+  long:   { directive: 'Write a long, detailed response with rich description.' },
 };
+const DEFAULT_CONTEXT_LENGTH = 8192;
+const DEFAULT_MAX_TOKENS = 1024; // fallback response reserve
+// Auto limits (resolveLimits): the detected model context drives both knobs
+// unless the user pinned them (ctxAuto / reserveAuto false). Detection comes
+// from /v1/models vendor fields (vLLM max_model_len, llama.cpp n_ctx,
+// OpenRouter context_length) stored in settings.modelCtxs on Fetch, and is
+// used VERBATIM — the server operator's context choice is the user's choice.
+// Reserve heuristic: 1/16 of the context, no clamp (256k → 16k).
+const autoReserve = (ctx) => Math.max(1, Math.round((Number(ctx) || 0) / 16));
+function resolveLimits(settings = {}, model = null) {
+  const detected = Number(settings.modelCtxs?.[model ?? settings.model]) || 0;
+  const contextLength = settings.ctxAuto === false
+    ? (Number(settings.contextLength) || DEFAULT_CONTEXT_LENGTH)
+    : (detected > 0 ? detected : DEFAULT_CONTEXT_LENGTH);
+  const maxTokens = settings.reserveAuto === false
+    ? (Number(settings.maxTokens) || DEFAULT_MAX_TOKENS)
+    : autoReserve(contextLength);
+  return { contextLength, maxTokens };
+}
 
 // charsPerToken is user-tunable (Settings → Generation); callers that budget
 // against settings pass it through so estimates and caps stay consistent.
@@ -357,8 +378,8 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 // records exactly what was injected and why (powers the Context Inspector).
 function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null }) {
   const personaName = persona?.name?.trim() || 'User';
-  const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
-  const contextLength = Number(settings.contextLength) || 8192;
+  const reserve = Number(settings.maxTokens) || DEFAULT_MAX_TOKENS;
+  const contextLength = Number(settings.contextLength) || DEFAULT_CONTEXT_LENGTH;
   const budget = Math.max(0, contextLength - reserve);
   const manifest = { contextLength, reserve, budget, layers: {}, warnings: [] };
   // Layer budget fractions: user-overridable in Settings → Generation;
@@ -897,10 +918,10 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // substituted with the persona name at call time; the suggestions prompt also
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
-const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.';
-const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
+const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
-const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.';
+const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
 // Generator prompts (✦ Generate in the scenario/character editors) take no
 // runtime placeholders — {{user}} stays literal so the generated text keeps
 // the macro. The reply contract is one JSON object; parsing is tolerant

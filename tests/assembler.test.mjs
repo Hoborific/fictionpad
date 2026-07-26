@@ -18,6 +18,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes,
+  resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
@@ -27,6 +28,7 @@ const {
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes,
+  resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
 } = core;
 
@@ -1100,6 +1102,31 @@ section('tool fence edge cases');
     'display text after the block survives the trailing-fence scan');
   const q = parseToolCalls('a ```tool\n{"tool":"x"}\n``` b ```tool\n{"partial"');
   ok(q.text === 'a  b', 'real trailing unterminated fence still hidden');
+}
+
+// ---- auto limits (resolveLimits) ----
+section('auto limits');
+{
+  // Undetected model → defaults; reserve = ctx/16.
+  let l = resolveLimits({});
+  ok(l.contextLength === 8192 && l.maxTokens === 512, 'no detection → 8192 ctx, 512 reserve');
+  l = resolveLimits({ modelCtxs: { m: 262144 }, model: 'm' });
+  ok(l.contextLength === 262144, 'detected 256k used verbatim (no cap)');
+  ok(l.maxTokens === 16384, '256k → reserve 16384 (ctx/16, no clamp)');
+  l = resolveLimits({ modelCtxs: { m: 32768 }, model: 'm' });
+  ok(l.contextLength === 32768 && l.maxTokens === 2048, '32k → reserve 2048 (ctx/16)');
+  l = resolveLimits({ modelCtxs: { m: 2048 }, model: 'm' });
+  ok(l.contextLength === 2048 && l.maxTokens === 128, 'small detected ctx used verbatim (no floor)');
+  // User-pinned knobs win over detection.
+  l = resolveLimits({ modelCtxs: { m: 262144 }, model: 'm', ctxAuto: false, contextLength: 16384 });
+  ok(l.contextLength === 16384, 'ctxAuto false → manual context wins');
+  ok(l.maxTokens === 1024, 'manual ctx still gets auto reserve (16384/16 = 1024)');
+  l = resolveLimits({ modelCtxs: { m: 262144 }, model: 'm', reserveAuto: false, maxTokens: 500 });
+  ok(l.maxTokens === 500, 'reserveAuto false → manual reserve wins');
+  // Explicit model argument beats settings.model for the lookup.
+  l = resolveLimits({ modelCtxs: { a: 65536, b: 8192 }, model: 'a' }, 'b');
+  ok(l.contextLength === 8192, 'model argument selects the detected entry');
+  ok(autoReserve(262144) === 16384 && autoReserve(100) === 6 && autoReserve(0) === 1, 'autoReserve = ctx/16, min 1');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

@@ -933,3 +933,18 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - Uneven field heights across the Models tab: labels are now short one-liners with explanations as hints under the inputs, and the embedding threshold hint no longer renders as a phantom third grid cell.
+
+## v4.5 - Auto context limits & settings structure
+
+### v4.5.0
+
+**Added**
+
+- Automatic context limits: Fetch on the Models tab reads per-model context lengths from `/v1/models` vendor fields (vLLM `max_model_len`, llama.cpp `n_ctx`, OpenRouter `context_length`). While the auto knobs are on (default), the context length follows the detected value verbatim and the response reserve is derived as context ÷ 16 - editing either field pins it manually, with a one-click "Back to auto". Per-chat overrides still win; endpoints that expose nothing behave as before (8192 default).
+- New Features-tab settings: `recapWords` (/recap word target) and `genMaxTokens` (✦ generator response cap).
+
+**Changed**
+
+- Response length presets are prose guidance only: Short/Medium/Long no longer set max tokens, and the labels dropped the "(~N tokens)" text. The token reserve is the auto/manual knob above.
+- Settings tabs are all built from one section component (since v4.4.5), and Storage is its own tab.
+- Aux prompts no longer hardcode tunable limits: the memory prompt takes `{{chars}}` (note max characters), the lore-extraction prompt `{{max}}` (pieces per pass), and the recap prompt `{{words}}` (word target) - substituted from the Features-tab values at call time, like the suggestions prompt's `{{count}}`/`{{words}}`. Saved custom prompts keep their static numbers until "Reset to default" on the Prompts tab.

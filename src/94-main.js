@@ -162,7 +162,7 @@ function Main({ storage, storageKind, storageFailed }) {
           ? st.pieceGenPrompt || DEFAULT_PIECE_GEN_PROMPT
           : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
       user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
-      maxTokens: 3000, temperature: st.genTemp ?? 0.9,
+      maxTokens: st.genMaxTokens ?? 3000, temperature: st.genTemp ?? 0.9,
       // The generator rides the user's GLOBAL sampler set — registered
       // built-ins plus custom samplers (e.g. chat_template_kwargs.enable_thinking)
       // — filtered to registered keys like the RP path; the generator's own
@@ -456,7 +456,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const maxChars = st.memoryMaxChars ?? 500;
     const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName),
+      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
       user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
       maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
@@ -531,7 +531,8 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT,
+        system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
+          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 3))),
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
         maxTokens: st.loreExtractMaxTokens ?? 400, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       }, chatObj.id);
@@ -612,10 +613,13 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
     // Per-chat generation overrides (panel's Samplers tab): context length and
-    // max tokens shadow the globals for this chat's generations.
+    // max tokens shadow the globals for this chat's generations. The globals
+    // themselves are auto-resolved from the detected model context unless the
+    // user pinned them (ctxAuto / reserveAuto).
+    const auto = resolveLimits(baseSt, model);
     const st = { ...baseSt,
-      contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
-      maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
+      contextLength: chatObj.settings?.contextLength ?? auto.contextLength,
+      maxTokens: chatObj.settings?.maxTokens ?? auto.maxTokens };
     const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
@@ -1189,7 +1193,7 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: st.recapPrompt || DEFAULT_RECAP_PROMPT,
+        system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 400)),
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       }, c.id);
@@ -1465,14 +1469,16 @@ function Main({ storage, storageKind, storageFailed }) {
     // Same platform-prompt composition as runGeneration so the preview counts
     // the speaker/tools prompts too. Semantic activation is NOT rerun here
     // (async embeddings) — the preview is keyword-trigger lore only.
+    const auto = resolveLimits(st, c.settings?.model || st.model);
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
       chat: c, settings: { ...st,
         // Match runGeneration's merge: both per-chat overrides shadow the
-        // globals, or the preview's budget/reserve disagree with real sends.
-        contextLength: c.settings?.contextLength ?? st.contextLength,
-        maxTokens: c.settings?.maxTokens ?? st.maxTokens },
+        // auto-resolved globals, or the preview's budget/reserve disagree
+        // with real sends.
+        contextLength: c.settings?.contextLength ?? auto.contextLength,
+        maxTokens: c.settings?.maxTokens ?? auto.maxTokens },
       platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });

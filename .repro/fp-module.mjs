@@ -50,7 +50,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.4.5';
+const APP_VERSION = '4.5.0';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -278,11 +278,32 @@ const LINK_BOOST = 2; // effective-weight bonus from one active linking piece
 const MEMORY_CAP = 100;
 const MEMORY_EVERY = 30; // messages on active path between auto-summaries
 const LAYER_CAPS = { static: 0.30, lore: 0.20, memory: 0.10 }; // history = rest
+// Length presets are prose guidance ONLY — they never cap tokens. The
+// directive joins the prompt tail; the response reserve is a separate knob.
 const LENGTH_PRESETS = {
-  short:  { maxTokens: 150, directive: 'Keep your response concise: one or two short paragraphs.' },
-  medium: { maxTokens: 400, directive: 'Write a response of moderate length: a few paragraphs.' },
-  long:   { maxTokens: 800, directive: 'Write a long, detailed response with rich description.' },
+  short:  { directive: 'Keep your response concise: one or two short paragraphs.' },
+  medium: { directive: 'Write a response of moderate length: a few paragraphs.' },
+  long:   { directive: 'Write a long, detailed response with rich description.' },
 };
+const DEFAULT_CONTEXT_LENGTH = 8192;
+const DEFAULT_MAX_TOKENS = 1024; // fallback response reserve
+// Auto limits (resolveLimits): the detected model context drives both knobs
+// unless the user pinned them (ctxAuto / reserveAuto false). Detection comes
+// from /v1/models vendor fields (vLLM max_model_len, llama.cpp n_ctx,
+// OpenRouter context_length) stored in settings.modelCtxs on Fetch, and is
+// used VERBATIM — the server operator's context choice is the user's choice.
+// Reserve heuristic: 1/16 of the context, no clamp (256k → 16k).
+const autoReserve = (ctx) => Math.max(1, Math.round((Number(ctx) || 0) / 16));
+function resolveLimits(settings = {}, model = null) {
+  const detected = Number(settings.modelCtxs?.[model ?? settings.model]) || 0;
+  const contextLength = settings.ctxAuto === false
+    ? (Number(settings.contextLength) || DEFAULT_CONTEXT_LENGTH)
+    : (detected > 0 ? detected : DEFAULT_CONTEXT_LENGTH);
+  const maxTokens = settings.reserveAuto === false
+    ? (Number(settings.maxTokens) || DEFAULT_MAX_TOKENS)
+    : autoReserve(contextLength);
+  return { contextLength, maxTokens };
+}
 
 // charsPerToken is user-tunable (Settings → Generation); callers that budget
 // against settings pass it through so estimates and caps stay consistent.
@@ -627,8 +648,8 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 // records exactly what was injected and why (powers the Context Inspector).
 function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null }) {
   const personaName = persona?.name?.trim() || 'User';
-  const reserve = Number(settings.maxTokens) || LENGTH_PRESETS.medium.maxTokens;
-  const contextLength = Number(settings.contextLength) || 8192;
+  const reserve = Number(settings.maxTokens) || DEFAULT_MAX_TOKENS;
+  const contextLength = Number(settings.contextLength) || DEFAULT_CONTEXT_LENGTH;
   const budget = Math.max(0, contextLength - reserve);
   const manifest = { contextLength, reserve, budget, layers: {}, warnings: [] };
   // Layer budget fractions: user-overridable in Settings → Generation;
@@ -1167,10 +1188,10 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // substituted with the persona name at call time; the suggestions prompt also
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
-const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most 500 characters. Past events only; no speculation; no lists; no formatting.';
-const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
+const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
-const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.';
+const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
 // Generator prompts (✦ Generate in the scenario/character editors) take no
 // runtime placeholders — {{user}} stays literal so the generated text keeps
 // the macro. The reply contract is one JSON object; parsing is tolerant
@@ -1453,6 +1474,9 @@ async function fetchAPI(endpoint, url, opts = {}) {
   return res;
 }
 
+// Returns { ids, ctxs }: sorted model ids, plus per-model context lengths
+// from vendor extensions to the OpenAI model card — vLLM `max_model_len`,
+// llama.cpp `n_ctx`, OpenRouter `context_length` (absent elsewhere → {}).
 async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   const res = await fetchAPI(endpoint, modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint, serverToken) }, signal });
   if (!res.ok) {
@@ -1463,7 +1487,14 @@ async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
     throw err;
   }
   const json = await res.json();
-  return (json.data ?? []).map(m => m.id).filter(Boolean).sort();
+  const ids = [], ctxs = {};
+  for (const m of json.data ?? []) {
+    if (!m?.id) continue;
+    ids.push(m.id);
+    const ctx = Number(m.max_model_len ?? m.n_ctx ?? m.context_length);
+    if (Number.isFinite(ctx) && ctx > 0) ctxs[m.id] = ctx;
+  }
+  return { ids: ids.sort(), ctxs };
 }
 
 // Human-readable API failure for banners and the settings test button — a
@@ -2427,8 +2458,11 @@ const DEFAULT_SETTINGS = {
   defaultPersonaId: '', // persona preselected in New chat ('' = none; starred in the Personas menu)
   sidebarArrows: false, // desktop: «/» edge arrows instead of the brand/Inspector buttons as pane toggles (phones always use arrows)
   edgePeek: true, // desktop: hovering a thin strip at the screen edge pops a collapsed pane out temporarily
-  contextLength: 8192,
-  maxTokens: LENGTH_PRESETS.medium.maxTokens,
+  contextLength: DEFAULT_CONTEXT_LENGTH,
+  ctxAuto: true, // context length follows the detected model context (modelCtxs) until edited
+  maxTokens: DEFAULT_MAX_TOKENS,
+  reserveAuto: true, // response reserve derived from the context length until edited
+  modelCtxs: {}, // { [modelId]: contextLength } detected on Fetch (vLLM/llama.cpp/OpenRouter vendor fields)
   responseLength: 'medium',
   // Editable length instruction appended to the prompt tail; '' = no directive.
   // Follows the preset's default text until the user edits it.
@@ -2467,11 +2501,13 @@ const DEFAULT_SETTINGS = {
   recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
   recapTemp: 0.4,
   recapMaxTokens: 700,
+  recapWords: 400, // word target substituted into the recap prompt's {{words}}
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
   genModel: '', // ✦ Generate model; blank = aux model (then chat model)
   genTemp: 0.9, // ✦ Generate temperature
+  genMaxTokens: 3000, // ✦ Generate response cap (a full scenario JSON must fit)
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
@@ -2615,7 +2651,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   const fetchModels = async () => {
     setModelsError(null);
-    try { setModels(await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken })); }
+    try {
+      const { ids, ctxs } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
+      setModels(ids);
+      // Remember detected context lengths per model — resolveLimits uses them
+      // for the auto context/reserve knobs (Generation tab).
+      if (Object.keys(ctxs).length) set({ modelCtxs: { ...(draft.modelCtxs ?? {}), ...ctxs } });
+    }
     catch (e) { setModels(null); setModelsError(describeApiError(e)); }
   };
 
@@ -2626,11 +2668,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const testConnection = async () => {
     setTestState('busy');
     try {
-      const list = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
+      const { ids } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
       const note = draft.model
-        ? (list.includes(draft.model) ? `"${draft.model}" is available.` : `warning: "${draft.model}" is NOT among them.`)
+        ? (ids.includes(draft.model) ? `"${draft.model}" is available.` : `warning: "${draft.model}" is NOT among them.`)
         : 'no chat model configured yet.';
-      setTestState({ ok: true, msg: `Connected — ${list.length} model(s) exposed; ${note}` });
+      setTestState({ ok: true, msg: `Connected — ${ids.length} model(s) exposed; ${note}` });
     } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
@@ -2792,23 +2834,33 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       ${tab === 'generation' && html`
         ${section('Length', html`
           <div class="grid3">
-            <label class="field"><span>Context length (tokens)</span>
-              <${NumInput} value=${draft.contextLength} min=${256} step=${512} fallback=${8192}
-                onCommit=${(n) => set({ contextLength: n })} /></label>
+            <label class="field"><span>Context length (tokens)${draft.ctxAuto !== false ? ' — auto' : ''}</span>
+              <${NumInput} value=${draft.ctxAuto !== false ? resolveLimits(draft).contextLength : draft.contextLength}
+                min=${256} step=${512} fallback=${resolveLimits(draft).contextLength}
+                onCommit=${(n) => set({ contextLength: n, ctxAuto: false })} />
+              <span class="hint">${draft.ctxAuto !== false
+                ? (draft.modelCtxs?.[draft.model]
+                  ? `Detected ${draft.modelCtxs[draft.model]} from the model on Fetch. Editing pins a manual value.`
+                  : `Default ${DEFAULT_CONTEXT_LENGTH} — Fetch in the Models tab to detect. Editing pins a manual value.`)
+                : html`Manual. <a style=${{ cursor: 'pointer' }} onClick=${() => set({ ctxAuto: true })}>Back to auto</a>`}</span></label>
             <label class="field"><span>Response length preset</span>
               <select value=${draft.responseLength}
                 onChange=${(e) => set({
                   responseLength: e.target.value,
-                  maxTokens: LENGTH_PRESETS[e.target.value]?.maxTokens ?? draft.maxTokens,
                   lengthDirective: LENGTH_PRESETS[e.target.value]?.directive ?? draft.lengthDirective,
                 })}>
-                <option value="short">Short (~150 tokens)</option>
-                <option value="medium">Medium (~400 tokens)</option>
-                <option value="long">Long (~800 tokens)</option>
-              </select></label>
-            <label class="field"><span>Max tokens (response reserve)</span>
-              <${NumInput} value=${draft.maxTokens} min=${1} fallback=${LENGTH_PRESETS.medium.maxTokens}
-                onCommit=${(n) => set({ maxTokens: n })} /></label>
+                <option value="short">Short</option>
+                <option value="medium">Medium</option>
+                <option value="long">Long</option>
+              </select>
+              <span class="hint">Prose guidance only — never caps tokens.</span></label>
+            <label class="field"><span>Max tokens (response reserve)${draft.reserveAuto !== false ? ' — auto' : ''}</span>
+              <${NumInput} value=${draft.reserveAuto !== false ? resolveLimits(draft).maxTokens : draft.maxTokens}
+                min=${1} fallback=${resolveLimits(draft).maxTokens}
+                onCommit=${(n) => set({ maxTokens: n, reserveAuto: false })} />
+              <span class="hint">${draft.reserveAuto !== false
+                ? `Context ÷ 16. Editing pins a manual value.`
+                : html`Manual. <a style=${{ cursor: 'pointer' }} onClick=${() => set({ reserveAuto: true })}>Back to auto</a>`}</span></label>
           </div>
           <label class="field"><span>Length directive — instruction appended to the prompt (blank = none)</span>
             <textarea rows=${2} value=${draft.lengthDirective ?? ''}
@@ -2968,22 +3020,24 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             ${numField('loreExtractMaxTokens', 'Max tokens', 400, { min: 50, max: 2000, step: 10 })}
             ${numField('loreExtractMax', 'Max pieces per pass', 3, { min: 1, max: 10 })}
           </div>`,
-          'Runs on the memory cadence. If you raise max pieces, also raise the "up to 3" in the extraction prompt (Prompts tab).')}
+          'Runs on the memory cadence. {{max}} in the extraction prompt auto-fills from max pieces per pass.')}
         ${section('Slash commands', html`
-          <div class="grid2">
+          <div class="grid3">
             ${numField('improveTemp', '/improve temperature', 0.7, { min: 0, max: 2, step: 0.05 })}
             ${numField('improveMaxTokens', '/improve max tokens', 400, { min: 50, max: 4000, step: 10 })}
           </div>
-          <div class="grid2">
+          <div class="grid3">
             ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
             ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
+            ${numField('recapWords', '/recap word target', 400, { min: 50, max: 3000, step: 50 })}
           </div>`,
-          'Both use the aux model.')}
+          'Both use the aux model. The word target fills {{words}} in the recap prompt; max tokens is the hard cap.')}
         ${section('✦ Generator', html`
           <div class="grid3">
             ${numField('genTemp', '✦ Generate temperature', 0.9, { min: 0, max: 2, step: 0.05 })}
+            ${numField('genMaxTokens', '✦ Generate max tokens', 3000, { min: 200, max: 32000, step: 100 })}
           </div>`,
-          'Scenario/character/piece generator. Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab.')}
+          'Scenario/character/piece generator. Model is picked in the Models tab (blank = aux model); prompts are editable in the Prompts tab. Max tokens must fit a full scenario JSON.')}
         ${section('Tool calling', html`
           ${draft.toolsEnabled === false
             ? html`<div class="hint">Off — enable it above.</div>`
@@ -3005,11 +3059,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${section('Aux calls', html`
           ${promptField('suggestionsPrompt', 'Suggestions prompt — asks the aux model for reply options', DEFAULT_SUGGESTIONS_PROMPT, 3,
             '{{user}} = persona name, {{count}} and {{words}} = the values from the Features tab. Used when suggestions are on.')}
-          ${promptField('memoryPrompt', 'Memory summary prompt — auto-summaries and /memory', DEFAULT_MEMORY_PROMPT, 3)}
-          ${promptField('loreExtractPrompt', 'Lore extraction prompt — proposes new lore pieces on the memory cadence', DEFAULT_LORE_EXTRACT_PROMPT, 4)}
+          ${promptField('memoryPrompt', 'Memory summary prompt — auto-summaries and /memory', DEFAULT_MEMORY_PROMPT, 3,
+            '{{chars}} = note max characters (Features tab).')}
+          ${promptField('loreExtractPrompt', 'Lore extraction prompt — proposes new lore pieces on the memory cadence', DEFAULT_LORE_EXTRACT_PROMPT, 4,
+            '{{max}} = max pieces per pass (Features tab).')}
           ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
             '{{user}} = persona name (+ description, when set).')}
-          ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}`)}
+          ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2,
+            '{{words}} = word target (Features tab).')}`)}
         ${section('✦ Generator', html`
           ${promptField('scenarioGenPrompt', 'Scenario generator prompt — ✦ Generate in the scenario editor', DEFAULT_SCENARIO_GEN_PROMPT, 6,
             'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
@@ -4832,7 +4889,7 @@ function Main({ storage, storageKind, storageFailed }) {
           ? st.pieceGenPrompt || DEFAULT_PIECE_GEN_PROMPT
           : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
       user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}${directive ? `\n\nLength guidance for the prose fields (especially the greeting): ${directive}` : ''}`,
-      maxTokens: 3000, temperature: st.genTemp ?? 0.9,
+      maxTokens: st.genMaxTokens ?? 3000, temperature: st.genTemp ?? 0.9,
       // The generator rides the user's GLOBAL sampler set — registered
       // built-ins plus custom samplers (e.g. chat_template_kwargs.enable_thinking)
       // — filtered to registered keys like the RP path; the generator's own
@@ -5126,7 +5183,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const maxChars = st.memoryMaxChars ?? 500;
     const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName),
+      system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
       user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
       maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
@@ -5201,7 +5258,8 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT,
+        system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
+          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 3))),
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
         maxTokens: st.loreExtractMaxTokens ?? 400, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       }, chatObj.id);
@@ -5282,10 +5340,13 @@ function Main({ storage, storageKind, storageFailed }) {
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
     // Per-chat generation overrides (panel's Samplers tab): context length and
-    // max tokens shadow the globals for this chat's generations.
+    // max tokens shadow the globals for this chat's generations. The globals
+    // themselves are auto-resolved from the detected model context unless the
+    // user pinned them (ctxAuto / reserveAuto).
+    const auto = resolveLimits(baseSt, model);
     const st = { ...baseSt,
-      contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
-      maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
+      contextLength: chatObj.settings?.contextLength ?? auto.contextLength,
+      maxTokens: chatObj.settings?.maxTokens ?? auto.maxTokens };
     const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
@@ -5859,7 +5920,7 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const out = await auxLogged('recap', {
         endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
-        system: st.recapPrompt || DEFAULT_RECAP_PROMPT,
+        system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 400)),
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       }, c.id);
@@ -6135,14 +6196,16 @@ function Main({ storage, storageKind, storageFailed }) {
     // Same platform-prompt composition as runGeneration so the preview counts
     // the speaker/tools prompts too. Semantic activation is NOT rerun here
     // (async embeddings) — the preview is keyword-trigger lore only.
+    const auto = resolveLimits(st, c.settings?.model || st.model);
     const { messages, manifest: man } = assemblePrompt({
       scenario: ref.current.scenarios[c.scenarioId],
       persona: c.personaId ? ref.current.personas[c.personaId] : null,
       chat: c, settings: { ...st,
         // Match runGeneration's merge: both per-chat overrides shadow the
-        // globals, or the preview's budget/reserve disagree with real sends.
-        contextLength: c.settings?.contextLength ?? st.contextLength,
-        maxTokens: c.settings?.maxTokens ?? st.maxTokens },
+        // auto-resolved globals, or the preview's budget/reserve disagree
+        // with real sends.
+        contextLength: c.settings?.contextLength ?? auto.contextLength,
+        maxTokens: c.settings?.maxTokens ?? auto.maxTokens },
       platformPrompt: buildPlatformPrompt(st),
       characters: ref.current.characters,
     });

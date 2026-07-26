@@ -7,10 +7,13 @@ Download `fictionpad.html` from any [release](../../releases) and open it locall
 ## Features
 
 - Scenario-centric roleplay: per-scenario prompts, a lorebook with keyword triggers (whole-word / case-sensitive options) and semantic embedding-based activation, per-chat lore overlays, auto-memory, author's note
-- Multi-character scenes: name-prefixed multi-speaker replies, global character cards, `/pov` command to rewrite a reply from another character's perspective
-- Full conversation control: swipes and branching, message editing, drafts, lore templates, complete export/import
+- Multi-character scenes: name-prefixed multi-speaker replies, global character cards with optional name colours, `/pov` command to rewrite a reply from another character's perspective
+- ✦ AI generator: type a prompt and the model drafts the whole scenario, character card, or a single lore piece — optionally fleshing out characters the model registers mid-chat
+- Full conversation control: swipes and branching, message editing, drafts, lore templates, full-text chat search, complete export/import
 - Generation introspection: token-probability heatmap with resampling, logit bias editor, sampler controls with per-chat overrides and custom user-defined samplers, model reasoning ("thinking") display
-- Tool calling: built-in and custom tools, story variables, emergent lore generation
+- Automatic context limits: detects each model's context length from `/v1/models` (vLLM, llama.cpp, OpenRouter) and sizes the context budget and response reserve to match — manual pinning and per-chat overrides included
+- Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation
+- Personas: reusable user identities with per-chat pick and an optional default
 - Polish: themes (including Catppuccin), a mobile UI with swipe gestures, configurable date formats, chat previews and a context inspector showing exactly what was sent to the model
 - Runs fully client-side with IndexedDB persistence; the optional Node server adds LLM proxying and server-side session storage
 
@@ -48,6 +51,7 @@ All via environment variables:
 | `FICTIONPAD_TOKEN=secret` | Bearer token required on the storage and `/proxy` routes; set the same value as `serverToken` in the app. |
 | `FICTIONPAD_DB=/path/to.db` | SQLite storage path (default: `fictionpad.db` next to `server.mjs`). |
 | `FICTIONPAD_PROXY_ALLOW=host1,host2` | Comma-separated allowlist of `/proxy` target hosts (default: any). |
+| `FICTIONPAD_CHECKPOINT_MS=60000` | WAL checkpoint interval in ms — the on-disk `.db` is always a recent complete snapshot; `GET /backup` (same auth as storage) checkpoints and streams it. |
 
 Example, basic auth on a custom port:
 
@@ -68,7 +72,7 @@ The app ships as one HTML file, but the source is split for maintainability:
 
 ## Version history
 
-This repository's history was reconstructed retroactively from dated snapshots: every commit is one milestone version, tagged `v1.0` through `v4.2`, with rapid patch snapshots folded into their minor line (the per-snapshot detail is preserved in [CHANGELOG.md](CHANGELOG.md), which grows alongside the history commit by commit). The latest tag has a GitHub release with the runnable `fictionpad.html` attached.
+This repository's history through v4.2 was reconstructed retroactively from dated snapshots: every commit is one milestone version, with rapid patch snapshots folded into their minor line. Development since follows the same commit-per-release convention with full semver tags (`vX.Y.Z`); the per-release detail lives in [CHANGELOG.md](CHANGELOG.md). Every tag has a GitHub release with the runnable `fictionpad.html` attached.
 
 ## Credits
 
