@@ -4,6 +4,10 @@
 // scenario, its linked global characters, the chat itself) so the current
 // context never vanishes. Collapse state persists in fictionpad.ui.
 // ============================================================================
+// Below this pane width the pane ribbons (sidebar foot, drawer tabs) no longer
+// fit on one line — components add a `narrow` class and CSS stacks the ribbons
+// instead of squishing/clipping them.
+const PANE_NARROW = 270;
 function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCharacterId, selectedChatId,
                   onSelectScenario, onSelectCharacter, onSelectChat,
                   onNewScenario, onEditScenario, onDeleteScenario, onNewChat,
@@ -70,7 +74,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
       ${onAdd && html`<button class="btn small ghost" title=${addTitle} onClick=${onAdd}>＋</button>`}
     </div>`;
   return html`
-    <div class="sidebar ${collapsed ? 'collapsed' : ''}"
+    <div class="sidebar ${collapsed ? 'collapsed' : ''} ${!collapsed && width < PANE_NARROW ? 'narrow' : ''}"
       style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
       <div class="scroll">
         <div class="side-section">
@@ -150,7 +154,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         <button class="btn small ghost" onClick=${onImport}>Import</button>
         <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
         <button class="btn small ghost" onClick=${onOpenSettings}>Settings</button>
-        <span class="hint ${saveRetrying ? 'warn' : ''}" style=${{ marginLeft: 'auto', alignSelf: 'center' }}
+        <span class="hint storage-hint ${saveRetrying ? 'warn' : ''}"
           title=${saveRetrying
             ? 'Some edits could not be saved (server unreachable) — they are queued and retried automatically.'
             : storageKind === 'server'

@@ -54,12 +54,12 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
                       settings, onUpdateSettings }) {
   return html`
-    <div class="drawer ${tab ? '' : 'collapsed'}"
+    <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
       <div class="head">
         <div class="ptabs">
           ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-            <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}</button>`)}
         </div>
         <button class="btn small ghost" title="Close panel" onClick=${onClose}>✕</button>
       </div>

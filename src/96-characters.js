@@ -14,15 +14,28 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
   const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
   const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const edit = (next) => { setDirty(true); setEditing(next); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      const patch = await onGenerate('character', promptText, editing);
+      edit({ ...editing, ...patch });
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const linkCount = (id) => Object.values(scenarios).filter(s => (s.characterIds ?? []).includes(id)).length;
   const totalLinks = linkCount(editing.id) + chatLinkCount;
   return html`
-    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide onClose=${guardClose}>
+    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide
+      onClose=${genOpen ? () => setGenOpen(false) : guardClose}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
@@ -30,7 +43,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
         <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${editing.keys}
           onChange=${(keys) => edit({ ...editing, keys })} /></label>
-      <label class="field"><span>Greeting — first message of chats started directly with this character</span>
+      <label class="field"><span>Greeting — first message of chats started directly with this character. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${editing.greeting ?? ''}
           onInput=${(e) => edit({ ...editing, greeting: e.target.value })} /></label>
       <div class="grid2">
@@ -52,9 +65,13 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       ${totalLinks > 0 && html`
         <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
       <div style=${{ display: 'flex', gap: '8px' }}>
+        ${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!editing.name.trim()}
           onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save</button>
         <button class="btn" onClick=${guardClose}>Cancel</button>
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title="Generate character" busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
     <//>`;
 }

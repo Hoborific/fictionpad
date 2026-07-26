@@ -56,6 +56,7 @@ const SRC_FILES = [
   '92-modals.js',
   '93-panels.js',
   '96-characters.js',
+  '97-generator.js',
   '94-main.js',
   '95-app.js',
 ];

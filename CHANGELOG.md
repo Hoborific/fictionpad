@@ -820,3 +820,21 @@ Note: this only changes the default prompt text; existing chats with a customize
 - If a regeneration produces nothing (failure or empty output), the rolled-back tool pieces are restored, so a failed retry no longer destroys the effects of the take that survived.
 - Fixed a same-cycle state race where speaker attribution and the tool-only placeholder were rebuilt from a pre-tool snapshot and silently dropped the pieces tool calls had just written.
 
+
+## v4.3 - AI scenario generator & regenerate fixes
+
+**Added**
+
+- AI scenario/character generator: a ✦ Generate button in the scenario editor and the character card editor opens a small prompt modal; one aux call turns a free-text request (sent together with the current draft as context, so "add a rival for Mia" extends rather than replaces) into a full draft - scenario fields plus lore pieces, or character name/card/keys/greeting. The reply contract is a single JSON object (prompts user-editable on the Prompts tab: `scenarioGenPrompt` / `characterGenPrompt`); parsing is tolerant, every field is sanitized (length caps, lore-type whitelist, fresh ids, empty fields never wipe the draft), and the result fills the editor draft for review - nothing persists until Save. Calls appear in the Inspector's Aux calls log.
+- The Greeting fields in both editors now hint at the `Name:` speaker convention (`Mia:` prefixes show as that character's bubble; `Narrator:` resumes narration).
+
+**Changed**
+
+- Prose/speaker formatting rules now live in a single `PROSE_FORMAT_RULES` const shared by the platform prompt and both generator prompts, so RP replies and generated greetings can't drift apart. (Saved prompts are unaffected - Reset to default on the Prompts tab picks up the new text.)
+- Speaker-registration rules: the tool prompt now requires registering a character before their first `Name:`-prefixed line, the multi-speaker prompt warns that prefixes for unknown names render as plain text, and the scenario generator prompt requires a character lore piece for every character who speaks in a greeting - the app only attributes `Name:` speech to known characters.
+- Narrow panes (sidebar/drawer under 270 px) stack their ribbons instead of squishing them: the sidebar foot splits into two tidy rows with the storage hint on row two, and drawer tabs reflow 2×2 with ellipsized labels.
+
+**Fixed**
+
+- Regenerating the greeting (root message) now works: the prompt-leaf selection used `??`, which swallowed the root's `null` parentId, so the model was asked to continue the whole conversation and that continuation was stored as a greeting swipe. A greeting regenerate now generates from the system prompt only.
+- Leaf regenerate no longer crashes with `undefined is not an object (evaluating 'pruned.lorePieces.length')` in chats where tools never wrote lore - and a synchronous throw in that path can no longer wedge the UI in "generating", since the generation slot is claimed only after the synchronous rollback.

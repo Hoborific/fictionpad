@@ -128,6 +128,12 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .app.dragging { user-select: none; }
 .sidebar .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 .sidebar .foot { border-top: 1px solid var(--c-border); padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: flex; flex-wrap: wrap; gap: 4px; }
+.sidebar .foot .storage-hint { margin-left: auto; align-self: center; }
+/* Squished pane (tall-narrow windows): split the foot into two tidy rows —
+   the buttons share row one evenly, the storage hint gets row two — instead
+   of wrapping mid-cluster. */
+.sidebar.narrow .foot .btn { flex: 1; padding-left: 2px; padding-right: 2px; }
+.sidebar.narrow .foot .storage-hint { flex-basis: 100%; margin-left: 0; text-align: center; }
 .side-section { margin-bottom: 10px; }
 .side-section > .title {
   font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
@@ -165,8 +171,14 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   display: flex; align-items: center; gap: 4px; padding: 0 8px;
   border-bottom: 1px solid var(--c-border);
 }
-.drawer .head .ptabs { flex: 1; border-bottom: none; padding: 0; }
-.drawer .head .ptabs button { flex: 1; }
+.drawer .head .ptabs { flex: 1; min-width: 0; border-bottom: none; padding: 0; }
+.drawer .head .ptabs button {
+  flex: 1; min-width: 0; padding: 8px 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* shrink, never clip */
+}
+/* Squished pane: tabs reflow 2×2 so every label stays fully readable. */
+.drawer.narrow .head .ptabs { flex-wrap: wrap; }
+.drawer.narrow .head .ptabs button { flex: 1 1 40%; }
 
 /* ---------- main / chat ---------- */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }

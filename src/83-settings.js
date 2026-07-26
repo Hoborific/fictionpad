@@ -6,12 +6,7 @@ const DEFAULT_PLATFORM_PROMPT =
   'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
-  'Format the reply as prose: wrap spoken dialogue in double quotation marks ' +
-  '("like this") and actions or non-verbal beats in single asterisks (*like ' +
-  'this*). ' +
-  'When a specific character speaks or acts, begin the reply with that character\'s name ' +
-  'followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the ' +
-  'prefix from the reader. Narration without a speaker needs no prefix.';
+  PROSE_FORMAT_RULES;
 
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:8080',
@@ -62,6 +57,8 @@ const DEFAULT_SETTINGS = {
   recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
   recapTemp: 0.4,
   recapMaxTokens: 700,
+  scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
+  characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -548,6 +545,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
           '{{user}} = persona name (+ description, when set).')}
         ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}
+        ${promptField('scenarioGenPrompt', 'Scenario generator prompt — ✦ Generate in the scenario editor', DEFAULT_SCENARIO_GEN_PROMPT, 6,
+          'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
+        ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
+          'The reply contract is one JSON object with name, content, keys and greeting.')}
         ${draft.toolsEnabled !== false
           ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
           : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}

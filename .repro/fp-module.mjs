@@ -1051,7 +1051,7 @@ const TOOLS_PROMPT = `You can grow the story's cast and world by emitting tool b
 Available tools:
 - register_character(name, description) — a NEW named character enters the story who may recur. description: appearance, personality, motives in a few sentences.
 - add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
-Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
+Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; a character you speak for with a Name: prefix must be known to the app — register a newcomer BEFORE their first prefixed line, in the same reply; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
 
 // ---- multi-speaker segments -------------------------------------------------
 // One turn stays ONE swipe in the tree; a reply containing several
@@ -1092,7 +1092,12 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their name and a colon on its own line ("Vex: …"), in the order they speak or act, at most one part per character. Narration needs no prefix at the start of the reply; after a character's part, resume it with "Narrator:" on its own line — but only for genuine scene-level narration that belongs to no character. In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+
+// Prose formatting conventions — single source of truth, woven into the
+// platform prompt (src/83-settings.js) and both generator prompts below, so
+// the RP reply format and generated greetings/lore can't drift apart.
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s name followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the prefix from the reader; resume scene-level narration with "Narrator:". Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
@@ -1102,6 +1107,12 @@ const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Su
 const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to 3 NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most 400 words. Output only the recap.';
+// Generator prompts (✦ Generate in the scenario/character editors) take no
+// runtime placeholders — {{user}} stays literal so the generated text keeps
+// the macro. The reply contract is one JSON object; parsing is tolerant
+// (first { to last } — see extractGenJSON in src/97-generator.js).
+const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
+const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 // === PURE CORE END ===
 
 // ============================================================================
@@ -2108,11 +2119,22 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
+function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
   const [draft, setDraft] = useState(() => deepClone(scenario));
   const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      set(await onGenerate('scenario', promptText, draft));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const setPiece = (id, next) =>
     set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
   const charList = Object.values(characters).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
@@ -2120,8 +2142,9 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const toggleChar = (id, on) =>
     set({ characterIds: on ? [...linkedIds, id] : linkedIds.filter(x => x !== id) });
   return html`
-    <${Modal} title="Scenario editor" wide onClose=${guardClose}
-      footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
+    <${Modal} title="Scenario editor" wide onClose=${genOpen ? () => setGenOpen(false) : guardClose}
+      footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
+        <button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
           <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>
@@ -2134,7 +2157,7 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
         <textarea rows=${3} value=${draft.scenarioInstructions} onInput=${(e) => set({ scenarioInstructions: e.target.value })} /></label>
       <label class="field"><span>Backstory — sent to the AI (static layer, truncated first under budget pressure)</span>
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
-      <label class="field"><span>Greeting — first assistant message of every new chat</span>
+      <label class="field"><span>Greeting — first assistant message of every new chat. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
       <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
         <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
@@ -2170,6 +2193,9 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })} />`)}
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
     <//>`;
 }
 
@@ -2222,12 +2248,7 @@ const DEFAULT_PLATFORM_PROMPT =
   'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
-  'Format the reply as prose: wrap spoken dialogue in double quotation marks ' +
-  '("like this") and actions or non-verbal beats in single asterisks (*like ' +
-  'this*). ' +
-  'When a specific character speaks or acts, begin the reply with that character\'s name ' +
-  'followed by a colon (e.g. "Veyra:") — the app labels the message with it and hides the ' +
-  'prefix from the reader. Narration without a speaker needs no prefix.';
+  PROSE_FORMAT_RULES;
 
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:8080',
@@ -2278,6 +2299,8 @@ const DEFAULT_SETTINGS = {
   recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
   recapTemp: 0.4,
   recapMaxTokens: 700,
+  scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
+  characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -2764,6 +2787,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
           '{{user}} = persona name (+ description, when set).')}
         ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2)}
+        ${promptField('scenarioGenPrompt', 'Scenario generator prompt — ✦ Generate in the scenario editor', DEFAULT_SCENARIO_GEN_PROMPT, 6,
+          'The reply contract is one JSON object with the scenario fields; the request and the current draft are sent as context.')}
+        ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
+          'The reply contract is one JSON object with name, content, keys and greeting.')}
         ${draft.toolsEnabled !== false
           ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
           : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
@@ -3859,6 +3886,10 @@ function ChatPane({ chat, persona, characterNames, generating, suggestions, onPi
 // scenario, its linked global characters, the chat itself) so the current
 // context never vanishes. Collapse state persists in fictionpad.ui.
 // ============================================================================
+// Below this pane width the pane ribbons (sidebar foot, drawer tabs) no longer
+// fit on one line — components add a `narrow` class and CSS stacks the ribbons
+// instead of squishing/clipping them.
+const PANE_NARROW = 270;
 function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCharacterId, selectedChatId,
                   onSelectScenario, onSelectCharacter, onSelectChat,
                   onNewScenario, onEditScenario, onDeleteScenario, onNewChat,
@@ -3925,7 +3956,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
       ${onAdd && html`<button class="btn small ghost" title=${addTitle} onClick=${onAdd}>＋</button>`}
     </div>`;
   return html`
-    <div class="sidebar ${collapsed ? 'collapsed' : ''}"
+    <div class="sidebar ${collapsed ? 'collapsed' : ''} ${!collapsed && width < PANE_NARROW ? 'narrow' : ''}"
       style=${{ width: collapsed ? 0 : width, minWidth: collapsed ? 0 : width }}>
       <div class="scroll">
         <div class="side-section">
@@ -4005,7 +4036,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
         <button class="btn small ghost" onClick=${onImport}>Import</button>
         <button class="btn small ghost" title="Personas" onClick=${onOpenPersonas}>Personas</button>
         <button class="btn small ghost" onClick=${onOpenSettings}>Settings</button>
-        <span class="hint ${saveRetrying ? 'warn' : ''}" style=${{ marginLeft: 'auto', alignSelf: 'center' }}
+        <span class="hint storage-hint ${saveRetrying ? 'warn' : ''}"
           title=${saveRetrying
             ? 'Some edits could not be saved (server unreachable) — they are queued and retried automatically.'
             : storageKind === 'server'
@@ -4147,12 +4178,12 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
                       settings, onUpdateSettings }) {
   return html`
-    <div class="drawer ${tab ? '' : 'collapsed'}"
+    <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}>
       <div class="head">
         <div class="ptabs">
           ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-            <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}</button>`)}
         </div>
         <button class="btn small ghost" title="Close panel" onClick=${onClose}>✕</button>
       </div>
@@ -4182,15 +4213,28 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
   const [editing, setEditing] = useState(() => character ? deepClone(character) : newCharacter());
   const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const edit = (next) => { setDirty(true); setEditing(next); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      const patch = await onGenerate('character', promptText, editing);
+      edit({ ...editing, ...patch });
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const linkCount = (id) => Object.values(scenarios).filter(s => (s.characterIds ?? []).includes(id)).length;
   const totalLinks = linkCount(editing.id) + chatLinkCount;
   return html`
-    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide onClose=${guardClose}>
+    <${Modal} title=${character ? `Character — ${character.name}` : 'New character'} wide
+      onClose=${genOpen ? () => setGenOpen(false) : guardClose}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
@@ -4198,7 +4242,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
         <${ListInput} textarea=${true} delim=${'\n'} rows=${3} values=${editing.keys}
           onChange=${(keys) => edit({ ...editing, keys })} /></label>
-      <label class="field"><span>Greeting — first message of chats started directly with this character</span>
+      <label class="field"><span>Greeting — first message of chats started directly with this character. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${editing.greeting ?? ''}
           onInput=${(e) => edit({ ...editing, greeting: e.target.value })} /></label>
       <div class="grid2">
@@ -4220,10 +4264,97 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       ${totalLinks > 0 && html`
         <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
       <div style=${{ display: 'flex', gap: '8px' }}>
+        ${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!editing.name.trim()}
           onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save</button>
         <button class="btn" onClick=${guardClose}>Cancel</button>
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title="Generate character" busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
+    <//>`;
+}
+// ============================================================================
+// COMPONENTS: GENERATOR — ✦ Generate in the scenario/character editors. One
+// aux call turns a free-text request (+ the current draft as context) into a
+// full JSON draft, sanitized here and applied to the editor's local draft —
+// the user reviews and saves through the editor's normal flow. The prompt
+// text lives in settings (scenarioGenPrompt / characterGenPrompt); the call
+// itself is wired in Main (runGen), which owns settings + the aux log.
+// ============================================================================
+
+// Tolerant reply parsing, same style as the lore-extraction pass: grab the
+// first { to the last } (skips ```json fences / chatter) and require a plain
+// object. Returns null on any mismatch — the caller shows a retry-able error.
+function extractGenJSON(out) {
+  const m = String(out ?? '').match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    const obj = JSON.parse(m[0]);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+  } catch { return null; }
+}
+
+const GEN_NAME_MAX = 100;
+const GEN_META_MAX = 300;   // description
+const GEN_FIELD_MAX = 8000; // scenarioInstructions / backstory / greeting / card content
+const GEN_PIECE_CAP = 20;   // lore pieces per generated scenario
+
+const genStr = (v, max) => {
+  const s = String(v ?? '').trim().slice(0, max);
+  return s || null; // empty fields never enter the patch — they can't wipe the draft
+};
+const genKeys = (v) => (Array.isArray(v) ? v : [])
+  .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+
+// Only fields present (and non-empty) in the model's reply land in the patch;
+// everything else keeps the draft's current value.
+function sanitizeScenarioGen(obj) {
+  const patch = {};
+  for (const [key, max] of [['name', GEN_NAME_MAX], ['description', GEN_META_MAX],
+      ['scenarioInstructions', GEN_FIELD_MAX], ['backstory', GEN_FIELD_MAX], ['greeting', GEN_FIELD_MAX]]) {
+    const s = genStr(obj[key], max);
+    if (s) patch[key] = s;
+  }
+  if (Array.isArray(obj.tags))
+    patch.tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
+  if (Array.isArray(obj.lorePieces))
+    patch.lorePieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
+      .map(p => ({
+        ...newLorePiece(), // fresh id + flag defaults
+        type: p?.type === 'character' ? 'character' : 'lore',
+        title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+        content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+        keys: genKeys(p?.keys),
+        pinned: p?.pinned === true,
+      }))
+      .filter(p => p.title && p.content);
+  return patch;
+}
+
+function sanitizeCharacterGen(obj) {
+  const patch = {};
+  for (const [key, max] of [['name', GEN_NAME_MAX], ['content', GEN_FIELD_MAX], ['greeting', GEN_FIELD_MAX]]) {
+    const s = genStr(obj[key], max);
+    if (s) patch[key] = s;
+  }
+  if (Array.isArray(obj.keys)) patch.keys = genKeys(obj.keys);
+  return patch;
+}
+
+// Small nested modal over the editor. The editor owns busy/error state and
+// the apply step; this is just the request box. While it's open the editor
+// below inert-swallows its own close gestures (see the editors' onClose).
+function GeneratorModal({ title, busy, error, onGenerate, onClose }) {
+  const [promptText, setPromptText] = useState('');
+  return html`
+    <${Modal} title=${title} onClose=${() => { if (!busy) onClose(); }}
+      footer=${html`<button class="btn ghost" disabled=${busy} onClick=${onClose}>Cancel</button>
+        <button class="btn primary" disabled=${busy || !promptText.trim()} onClick=${() => onGenerate(promptText)}>
+          ${busy ? 'Generating…' : '✦ Generate'}</button>`}>
+      <label class="field"><span>Describe what you want — the current draft is sent as context, so you can also ask for changes ("add a rival for Mia", "make it darker")</span>
+        <textarea rows=${4} value=${promptText} onInput=${(e) => setPromptText(e.target.value)} /></label>
+      ${error && html`<div class="warn">${error}</div>`}
     <//>`;
 }
 // ============================================================================
@@ -4349,6 +4480,34 @@ function Main({ storage, storageKind, storageFailed }) {
       setAuxLog(log => [...log.slice(-11), { ...entry, ok: false, out: describeApiError(e) }]);
       throw e;
     }
+  }
+
+  // ✦ Generate (scenario/character editors): one aux call turns a free-text
+  // request + the current draft (context, so "add a rival for Mia" extends
+  // rather than replaces) into a sanitized field patch. The editor applies it
+  // to its local draft — nothing persists until the editor's own Save. Errors
+  // are thrown back to the generator modal, which shows them inline.
+  async function runGen(kind, promptText, draft) {
+    const st = ref.current.settings;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const isScenario = kind === 'scenario';
+    const context = JSON.stringify(isScenario
+      ? { name: draft.name, description: draft.description, tags: draft.tags,
+          scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
+          lorePieces: (draft.lorePieces ?? []).map(({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned })) }
+      : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
+    const out = await auxLogged('generate', {
+      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      system: isScenario
+        ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
+        : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
+      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}`,
+      maxTokens: 3000, temperature: 0.9,
+    });
+    const obj = extractGenJSON(out);
+    if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
+    return isScenario ? sanitizeScenarioGen(obj) : sanitizeCharacterGen(obj);
   }
 
   // Always-fresh refs for async generation loops (avoid stale closures).
@@ -4726,12 +4885,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const st = { ...baseSt,
       contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
       maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
-    // Claim the generation slot immediately — the async prep below (semantic
-    // embeddings, exact token count) can take a long time on a slow backend,
-    // and the UI (waiting dots, Stop button, input guards) keys off this.
-    const abort = new AbortController();
-    genRef.current = { abort };
-    setGenerating({ chatId: chatObj.id, nodeId });
     const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
@@ -4745,15 +4898,29 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!fresh && !continuation && node
         && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
       const pruned = pruneToolPieces(chatObj, nodeId);
-      if (pruned.lorePieces.length !== (chatObj.lorePieces?.length ?? 0)) {
+      // pruneToolPieces no-ops by returning the chat as-is — and a chat whose
+      // tools never wrote lore has no lorePieces array at all, so both sides
+      // of the comparison need the null-safe read.
+      if ((pruned.lorePieces?.length ?? 0) !== (chatObj.lorePieces?.length ?? 0)) {
         prunedTools = (chatObj.lorePieces ?? []).filter(p => p?.createdBy === nodeId);
         chatObj = { ...pruned, updatedAt: Date.now() };
         upsertChat(chatObj.id, chatObj);
         ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
       }
     }
+    // Claim the generation slot before anything async (the prep below —
+    // semantic embeddings, exact token count — can take a long time on a slow
+    // backend, and the UI keys off this). Deliberately AFTER the synchronous
+    // rollback above: a throw there must not leak the claimed slot.
+    const abort = new AbortController();
+    genRef.current = { abort };
+    setGenerating({ chatId: chatObj.id, nodeId });
     // The node being generated is excluded from the prompt unless continuing it.
-    const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
+    // NB: not `??` — the root's parentId is null, and null MUST survive: for a
+    // greeting regenerate the path is empty (system prompt only), so the model
+    // writes a fresh opening instead of continuing the whole conversation and
+    // storing that continuation as a greeting swipe.
+    const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node ? node.parentId : chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
     // recent conversation + smart pieces, threshold → preActivated id set.
     // Scores for every scored piece go on the manifest so the Inspector can
@@ -5714,11 +5881,11 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
-        onUpsert=${upsertCharacter} onClose=${() => setModal(null)} /><//>`}
+        onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona}
         onRemove=${(id) => {

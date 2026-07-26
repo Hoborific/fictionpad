@@ -123,6 +123,34 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
 
+  // ✦ Generate (scenario/character editors): one aux call turns a free-text
+  // request + the current draft (context, so "add a rival for Mia" extends
+  // rather than replaces) into a sanitized field patch. The editor applies it
+  // to its local draft — nothing persists until the editor's own Save. Errors
+  // are thrown back to the generator modal, which shows them inline.
+  async function runGen(kind, promptText, draft) {
+    const st = ref.current.settings;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const isScenario = kind === 'scenario';
+    const context = JSON.stringify(isScenario
+      ? { name: draft.name, description: draft.description, tags: draft.tags,
+          scenarioInstructions: draft.scenarioInstructions, backstory: draft.backstory, greeting: draft.greeting,
+          lorePieces: (draft.lorePieces ?? []).map(({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned })) }
+      : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
+    const out = await auxLogged('generate', {
+      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      system: isScenario
+        ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
+        : st.characterGenPrompt || DEFAULT_CHARACTER_GEN_PROMPT,
+      user: `Current draft (JSON — extend or change it per the request; return the complete updated object):\n${context}\n\nRequest: ${promptText}`,
+      maxTokens: 3000, temperature: 0.9,
+    });
+    const obj = extractGenJSON(out);
+    if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
+    return isScenario ? sanitizeScenarioGen(obj) : sanitizeCharacterGen(obj);
+  }
+
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
   ref.current = { scenarios, personas, chats, characters, settings };
@@ -498,12 +526,6 @@ function Main({ storage, storageKind, storageFailed }) {
     const st = { ...baseSt,
       contextLength: chatObj.settings?.contextLength ?? baseSt.contextLength,
       maxTokens: chatObj.settings?.maxTokens ?? baseSt.maxTokens };
-    // Claim the generation slot immediately — the async prep below (semantic
-    // embeddings, exact token count) can take a long time on a slow backend,
-    // and the UI (waiting dots, Stop button, input guards) keys off this.
-    const abort = new AbortController();
-    genRef.current = { abort };
-    setGenerating({ chatId: chatObj.id, nodeId });
     const genStart = Date.now(); // for swipe.genMs (prompt-to-completion time)
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
@@ -517,15 +539,29 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!fresh && !continuation && node
         && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
       const pruned = pruneToolPieces(chatObj, nodeId);
-      if (pruned.lorePieces.length !== (chatObj.lorePieces?.length ?? 0)) {
+      // pruneToolPieces no-ops by returning the chat as-is — and a chat whose
+      // tools never wrote lore has no lorePieces array at all, so both sides
+      // of the comparison need the null-safe read.
+      if ((pruned.lorePieces?.length ?? 0) !== (chatObj.lorePieces?.length ?? 0)) {
         prunedTools = (chatObj.lorePieces ?? []).filter(p => p?.createdBy === nodeId);
         chatObj = { ...pruned, updatedAt: Date.now() };
         upsertChat(chatObj.id, chatObj);
         ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
       }
     }
+    // Claim the generation slot before anything async (the prep below —
+    // semantic embeddings, exact token count — can take a long time on a slow
+    // backend, and the UI keys off this). Deliberately AFTER the synchronous
+    // rollback above: a throw there must not leak the claimed slot.
+    const abort = new AbortController();
+    genRef.current = { abort };
+    setGenerating({ chatId: chatObj.id, nodeId });
     // The node being generated is excluded from the prompt unless continuing it.
-    const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node?.parentId ?? chatObj.activeLeafId };
+    // NB: not `??` — the root's parentId is null, and null MUST survive: for a
+    // greeting regenerate the path is empty (system prompt only), so the model
+    // writes a fresh opening instead of continuing the whole conversation and
+    // storing that continuation as a greeting swipe.
+    const promptChat = continuation ? chatObj : { ...chatObj, activeLeafId: node ? node.parentId : chatObj.activeLeafId };
     // Semantic lore activation (async, outside the pure assembler): embed the
     // recent conversation + smart pieces, threshold → preActivated id set.
     // Scores for every scored piece go on the manifest so the Inspector can
@@ -1486,11 +1522,11 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
-        onUpsert=${upsertCharacter} onClose=${() => setModal(null)} /><//>`}
+        onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona}
         onRemove=${(id) => {

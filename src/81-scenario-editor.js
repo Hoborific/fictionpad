@@ -123,11 +123,22 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
+function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
   const [draft, setDraft] = useState(() => deepClone(scenario));
   const [dirty, setDirty] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const runGenerate = async (promptText) => {
+    setGenBusy(true); setGenError(null);
+    try {
+      set(await onGenerate('scenario', promptText, draft));
+      setGenOpen(false);
+    } catch (e) { setGenError(e?.message ?? String(e)); }
+    finally { setGenBusy(false); }
+  };
   const setPiece = (id, next) =>
     set({ lorePieces: draft.lorePieces.map(p => p.id === id ? next : p) });
   const charList = Object.values(characters).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
@@ -135,8 +146,9 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
   const toggleChar = (id, on) =>
     set({ characterIds: on ? [...linkedIds, id] : linkedIds.filter(x => x !== id) });
   return html`
-    <${Modal} title="Scenario editor" wide onClose=${guardClose}
-      footer=${html`<button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
+    <${Modal} title="Scenario editor" wide onClose=${genOpen ? () => setGenOpen(false) : guardClose}
+      footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
+        <button class="btn primary" onClick=${() => onSave(draft)}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
           <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>
@@ -149,7 +161,7 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
         <textarea rows=${3} value=${draft.scenarioInstructions} onInput=${(e) => set({ scenarioInstructions: e.target.value })} /></label>
       <label class="field"><span>Backstory — sent to the AI (static layer, truncated first under budget pressure)</span>
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
-      <label class="field"><span>Greeting — first assistant message of every new chat</span>
+      <label class="field"><span>Greeting — first assistant message of every new chat. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
       <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
         <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
@@ -185,6 +197,9 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose }) {
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })} />`)}
       </div>
+      ${genOpen && html`
+        <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
+          onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
     <//>`;
 }
 
