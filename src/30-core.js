@@ -981,13 +981,28 @@ function normalizeScenario(s) {
     tags: asArr(o.tags).map(String),
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
     scenarioInstructions: asStr(o.scenarioInstructions),
+    // Alternate first messages (card imports): new chats offer them as extra
+    // greeting swipes on the root node. Shape-only coercion.
+    alternateGreetings: asArr(o.alternateGreetings).map(String),
+    // Generation defaults for NEW chats (snapshotted into chat.settings at
+    // creation): a model override and a sparse sampler set. Coerced to
+    // shape-only; undefined keys serialize away.
+    model: asStr(o.model).trim() || undefined,
+    samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined,
     lorePieces: asArr(o.lorePieces).map(normalizeLorePiece),
     characterIds: asArr(o.characterIds).map(String) };
 }
 function normalizeCharacter(c) {
   const o = (c && typeof c === 'object') ? c : {};
   return { ...o, name: asStr(o.name), content: asStr(o.content),
-    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color) };
+    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
+    // Alternate first messages (card imports) — greeting swipes in new direct chats.
+    alternateGreetings: asArr(o.alternateGreetings).map(String),
+    // Generation defaults for NEW direct chats — same shape as the scenario's
+    // (snapshotted into chat.settings at creation; applied only when the chat
+    // is rooted in this character, never when it's merely linked into one).
+    model: asStr(o.model).trim() || undefined,
+    samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined };
 }
 // Node shape: every node needs a swipes array (≥1 swipe) and an in-range
 // activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
@@ -1003,5 +1018,107 @@ function normalizeChat(c) {
     messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
   }
   return { ...o, messages };
+}
+// ---- character card import (chara_card v1/v2/v3, JSON or PNG-embedded) ----
+// Card trigger keys are plain text; FictionPad keys are regex — escape to
+// literal so "Dr. Strange" can't mean "DrX Strange".
+const escapeRxKey = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Cards use {{char}}; FictionPad has {{user}} only (multi-character scenarios
+// make {{char}} ambiguous) — bind it to the card's own name at import time.
+const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, name);
+// Bytes → ASCII without spreading (a large tEXt chunk would overflow the
+// argument limit of a single String.fromCharCode(...bytes) call).
+const u8ToAscii = (bytes) => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 32768)
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+  return s;
+};
+// Extract the embedded card JSON text from PNG bytes (tEXt chunk keyword
+// "chara" = v1/v2, "ccv3" = v3; base64 payload). Returns null when the file
+// carries no card. CRCs are not verified (display data, not a trust boundary);
+// zTXt/iTXt compression is unsupported — SillyTavern writes plain tEXt.
+function extractPngCardJson(u8) {
+  const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (!u8 || u8.length < 8 || sig.some((b, i) => u8[i] !== b)) return null;
+  let off = 8;
+  while (off + 8 <= u8.length) {
+    const len = (((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0);
+    const type = u8ToAscii(u8.subarray(off + 4, off + 8));
+    const end = off + 8 + len; // + 4 CRC bytes after the data
+    if (end + 4 > u8.length) return null; // truncated
+    if (type === 'tEXt') {
+      let nul = off + 8;
+      while (nul < end && u8[nul] !== 0) nul++;
+      const keyword = u8ToAscii(u8.subarray(off + 8, nul));
+      if (keyword === 'chara' || keyword === 'ccv3') {
+        const bin = atob(u8ToAscii(u8.subarray(nul + 1, end)).trim());
+        return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+      }
+    }
+    if (type === 'IEND') return null;
+    off = end + 4;
+  }
+  return null;
+}
+// Map a character card onto a linked scenario + global character pair, or
+// return null when the object isn't a card. v2/v3 are detected by spec/data,
+// v1 by its flat shape (never an object with a `type` — FictionPad exports
+// are checked by the caller first anyway). Field mapping: description +
+// personality + mes_example → character content; scenario → backstory;
+// system_prompt + post_history_instructions → scenario instructions;
+// first_mes → BOTH greetings (direct chats read the character's, scenario
+// chats the scenario's); creator_notes/tags → scenario metadata;
+// character_book entries → lore pieces (constant → pinned; keys escaped;
+// secondary keys/positions/recursion dropped — see the deferred list).
+// alternate_greetings → `alternateGreetings` on BOTH entities (new chats offer
+// them as greeting swipes on the root node; the scenario's win in scenario
+// chats, so a linked character's never leak in).
+function parseCharacterCard(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  if (typeof obj.type === 'string' && obj.type.startsWith('fictionpad-')) return null; // own exports, never cards
+  const d = (obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) ? obj.data : null;
+  let raw;
+  if ((typeof obj.spec === 'string' && obj.spec.startsWith('chara_card')) || (d && asStr(d.name).trim()))
+    raw = d ?? {};
+  else if (!obj.type && asStr(obj.name).trim() &&
+    [obj.description, obj.personality, obj.scenario, obj.first_mes, obj.mes_example].some(v => asStr(v).trim()))
+    raw = obj; // v1 flat
+  else return null;
+  const name = asStr(raw.name).trim();
+  if (!name) return null;
+  const card = (v) => subCardMacros(v, name).trim();
+  const content = [
+    card(raw.description),
+    card(raw.personality) && `Personality: ${card(raw.personality)}`,
+    card(raw.mes_example) && `Example dialogue:\n${card(raw.mes_example)}`,
+  ].filter(Boolean).join('\n\n');
+  const now = Date.now();
+  const alternateGreetings = asArr(raw.alternate_greetings)
+    .filter(g => typeof g === 'string').map(g => card(g)).filter(Boolean);
+  const character = {
+    id: uid(), name, content, keys: [], // blank → the card name itself triggers
+    pinned: false, weight: 0, smart: false, enabled: true, color: '',
+    greeting: card(raw.first_mes), alternateGreetings, createdAt: now, updatedAt: now,
+  };
+  const lorePieces = asArr(raw.character_book?.entries).map(e => normalizeLorePiece({
+    id: uid(), type: 'lore',
+    title: asStr(e?.comment).trim() || asStr(e?.name).trim() || asStr(asArr(e?.keys)[0]).trim() || '(imported)',
+    content: card(e?.content),
+    keys: asArr(e?.keys).map(k => escapeRxKey(asStr(k).trim())).filter(k => k.length >= 2),
+    pinned: !!e?.constant, caseSensitive: !!e?.case_sensitive,
+    enabled: e?.enabled !== false,
+  }));
+  const scenario = normalizeScenario({
+    id: uid(), name,
+    description: card(raw.creator_notes) || 'Imported from a character card.',
+    tags: asArr(raw.tags).map(String),
+    backstory: card(raw.scenario),
+    greeting: card(raw.first_mes), alternateGreetings,
+    scenarioInstructions: [card(raw.system_prompt), card(raw.post_history_instructions)].filter(Boolean).join('\n\n'),
+    lorePieces, characterIds: [character.id],
+    emergentLore: 'queue', createdAt: now,
+  });
+  return { scenario, character };
 }
 // === PURE CORE END ===

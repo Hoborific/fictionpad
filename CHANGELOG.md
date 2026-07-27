@@ -985,3 +985,22 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Message right-click menu separators render as a visible full-bleed hairline - the old inset 13%-contrast line read as an unexplained gap between items (e.g. "Branch from here" / "Rewind to here").
 - Sidebar rows (chats, scenarios, characters) no longer paint a text-selection highlight when a right-click drags across them on desktop - `user-select: none` moved out of the mobile-only media block (long-press already needed it there).
+
+## v4.6 - Character card import & generation defaults
+
+### v4.6.0
+
+**Added**
+
+- Character card import (sidebar ↑): SillyTavern-style `chara_card` v1/v2/v3 - a JSON file, or a PNG with the base64 card in a `chara`/`ccv3` tEXt chunk - becomes a linked scenario + global character pair (`parseCharacterCard`, pure core). Mapping: description + personality + mes_example -> character content, scenario -> backstory, system_prompt + post_history_instructions -> scenario instructions, first_mes -> both greetings, alternate_greetings -> `alternateGreetings` on BOTH entities, creator_notes/tags -> metadata, and character_book entries -> lore pieces (keys escaped to literal regex, constant -> pinned, enabled/case_sensitive carried over). `{{char}}` binds to the card name at import; unsupported card bits (secondary keys, positions, zTXt/iTXt chunks) are dropped by design.
+- Alternate greetings on scenarios and characters: an "Alternate greetings" list under the greeting field in both editors (shared `AlternateGreetingsFields`; blanks dropped at save) - extra first messages, offered as greeting swipes on the first message of new chats (`usedSwipe` records the take the conversation continued from). Character alternates apply to direct chats only - a linked scenario's own greetings take precedence. Imported cards populate the lists automatically.
+- "Defaults for new chats" on scenarios AND global characters (shared `GenerationDefaultsFields`): an optional model override and a sparse sampler set, snapshotted into each new chat's own per-chat overrides at creation (like the greeting) - a scenario or character can now pin "chats here use model X at temperature Y", and later edits don't touch existing chats. Character defaults apply to DIRECT character chats only: a character merely linked into a scenario chat never contributes defaults (multi-character scenes would make that ambiguous).
+
+**Changed**
+
+- On narrower desktop windows the side panels stop sharing space and pop out over the chat like on phones: below the contention breakpoint (`chatW + 2 × (PANE_MIN + PANE_GAP)` ≈ 1212 px at defaults — the slack margin can't hold a minimum-width pane per side) the sidebar and drawer become overlays with a scrim (tap to close) at a fixed comfortable width (340 px, mirroring the phone overlay cap; manual drags still win), the chat column keeps its full width instead of squishing, selecting/creating a chat auto-collapses the sidebar, and touch edge swipes work. Above the breakpoint everything docks in the slack margin as before.
+- The sampler value editor (number input / boolean select) is one shared control (`samplerValueCtl`) used by every sampler surface (per-chat Samplers tab, scenario/character defaults), so they can't drift.
+
+**Docs**
+
+- DESIGN.md parks three feature candidates from a competitor/community survey (readable Markdown chat export, in-chat search & jump, quick-reply buttons) and records display-only regex output rewriting as deliberately deferred (logprob-tape alignment contract).

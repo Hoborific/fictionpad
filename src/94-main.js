@@ -4,10 +4,26 @@
 // Chat factory. Scenario chats snapshot the scenario greeting; direct
 // character chats (scenarioId null, chat.characterIds set) snapshot the
 // character's greeting — possibly empty: the root node is parentless, so
-// pruneInterrupted never drops it.
+// pruneInterrupted never drops it. Generation defaults (model/samplers) are
+// likewise SNAPSHOT into the new chat's per-chat overrides from the entity
+// the chat is rooted in — the scenario, or the character for direct chats
+// (a character merely LINKED into a scenario chat never contributes defaults:
+// multi-character scenes would make that ambiguous).
 function newChat({ scenario = null, character = null, personaId = null, dateFormat } = {}) {
   const rootId = uid();
   const baseName = scenario?.name ?? (character ? `Chat with ${character.name}` : 'Chat');
+  const defaultsFrom = scenario ?? character; // exactly one is set (createChat)
+  const seedSettings = {};
+  if (typeof defaultsFrom?.model === 'string' && defaultsFrom.model.trim())
+    seedSettings.model = defaultsFrom.model.trim();
+  if (defaultsFrom?.samplers && typeof defaultsFrom.samplers === 'object' && !Array.isArray(defaultsFrom.samplers) && Object.keys(defaultsFrom.samplers).length)
+    seedSettings.samplers = { ...defaultsFrom.samplers };
+  // Alternate greetings ride the root node's swipes: a fresh chat can swipe
+  // through them like any other swipe. The rooted entity's alternates only —
+  // in a scenario chat a linked character's greetings never leak in (the
+  // scenario takes precedence). The primary greeting stays even when empty.
+  const greetingTexts = [scenario?.greeting ?? character?.greeting ?? '',
+    ...asArr(defaultsFrom?.alternateGreetings).filter(g => typeof g === 'string' && g.trim())];
   return {
     id: uid(), scenarioId: scenario?.id ?? null, personaId,
     ...(character ? { characterIds: [character.id] } : {}),
@@ -16,10 +32,10 @@ function newChat({ scenario = null, character = null, personaId = null, dateForm
     rootMessageId: rootId, activeLeafId: rootId,
     messages: {
       [rootId]: { id: rootId, parentId: null, role: 'assistant', edited: false, activeSwipe: 0,
-        swipes: [{ text: scenario?.greeting ?? character?.greeting ?? '', createdAt: Date.now(), modelId: null }] },
+        swipes: greetingTexts.map(text => ({ text, createdAt: Date.now(), modelId: null })) },
     },
     memoryStore: { memories: [], cursor: 0 },
-    settings: {},
+    settings: seedSettings,
     createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
@@ -38,7 +54,7 @@ function buildPlatformPrompt(st) {
 // Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
 // when unset, a pane auto-sizes to consume the slack margin around the chat
 // column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
-const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16;
+const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16, PANE_OVERLAY_W = 340;
 
 function Main({ storage, storageKind, storageFailed }) {
   // Request-time endpoint rewrite ("route via server") — never persisted.
@@ -305,22 +321,33 @@ function Main({ storage, storageKind, storageFailed }) {
     return Number.isFinite(v) ? v : 780;
   }, []);
   const clampPane = (w) => Math.round(Math.max(PANE_MIN, Math.min(w, viewportW * PANE_MAX_VW)));
-  const autoPaneW = clampPane(Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
-  const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
-  const dwW = ui.drawer ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
   // Narrow-viewport fallback: pad the center column with a pane's actual
   // width only when the slack margin can't contain it — chat never hides.
-  // At the phone breakpoint both panes are full overlays (scrim), no sharing.
   const MOBILE_BP = 700;
   const isMobile = viewportW <= MOBILE_BP;
-  // Edge-hover peek is desktop-only; a peek never changes the persisted pane
+  // Pane contention breakpoint: when the slack margin can't hold even a
+  // minimum-width pane on BOTH sides of the chat column, the panes stop
+  // sharing space and become true overlays over the chat (scrim + tap-to-
+  // close, auto-collapse on chat select, touch edge swipes) — the phone
+  // behavior — instead of squishing the chat column. Includes phones.
+  const PANE_OVERLAY_BP = chatW + 2 * (PANE_MIN + PANE_GAP);
+  const overlayPanes = viewportW <= PANE_OVERLAY_BP;
+  // Auto width: docked panes fill the slack margin around the chat column;
+  // overlay panes take a fixed comfortable width (PANE_OVERLAY_W, mirroring
+  // the phone overlay's 340 px cap) — enough for the content, no point
+  // covering more chat than needed. (Phones override all of this with the
+  // 85vw CSS rule; manual drags always win.)
+  const autoPaneW = clampPane(overlayPanes ? PANE_OVERLAY_W : Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
+  const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
+  const dwW = ui.drawer ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
+  // Edge-hover peek is mouse territory; a peek never changes the persisted pane
   // state and must not shift the center column (sbW/dwW stay at their real
   // values — the peeked pane is a pure overlay).
   const peekLeft = peek === 'left' && sidebarCollapsed && !isMobile && settings.edgePeek !== false;
   const peekRight = peek === 'right' && !ui.drawer && !isMobile && settings.edgePeek !== false;
   useEffect(() => { if (isMobile || settings.edgePeek === false) setPeek(null); }, [isMobile, settings.edgePeek]);
-  const padL = !isMobile && viewportW < chatW + 2 * sbW ? sbW : 0;
-  const padR = !isMobile && viewportW < chatW + 2 * dwW ? dwW : 0;
+  const padL = !overlayPanes && viewportW < chatW + 2 * sbW ? sbW : 0;
+  const padR = !overlayPanes && viewportW < chatW + 2 * dwW ? dwW : 0;
   const [dragging, setDragging] = useState(false);
   const paneDragStart = (side) => (startX) => {
     const key = side === 'left' ? 'sbWidth' : 'dwWidth';
@@ -341,21 +368,21 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
 
-  // ---- mobile edge swipes: open/close the two overlay panes ----
+  // ---- edge swipes (overlay-pane mode): open/close the two overlay panes ----
   // Left edge → swipe right opens the sidebar; right edge → swipe left opens
   // the Inspector/Memory drawer. Message rows (.msg) are ALWAYS bubble swipe
   // territory — pane gestures never start there, and with a pane open only
   // touches on the pane/scrim itself swipe it shut (scrim tap also closes).
   // Otherwise pane gestures steal bubble swipes near the edges, which reads
   // as "the swipe directions are backwards".
-  const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer });
-  navStateRef.current = { isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
+  const navStateRef = useRef({ overlay: overlayPanes, collapsed: sidebarCollapsed, drawer: ui.drawer });
+  navStateRef.current = { overlay: overlayPanes, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
   useEffect(() => {
     let g = null;
     const down = (e) => {
       if (e.pointerType === 'mouse') return;
       const st = navStateRef.current;
-      if (!st.isMobile) return;
+      if (!st.overlay) return; // pane gestures exist in overlay mode only (phones / contended widths)
       if (e.target.closest?.('.msg')) return; // message rows: bubble navigation only
       if (st.collapsed && !st.drawer) {
         // Both panes closed: an open gesture must start on a screen edge.
@@ -1335,7 +1362,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // explicit default persona, when set, takes precedence — see NewChatModal).
     setUi(u => ({ ...u, lastPersonaId: pid ?? null, ...(scen
       ? { chatId: c.id, scenarioId: scen.id, characterId: null }
-      : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(isMobile ? { sidebarCollapsed: true } : {}) }));
+      : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(overlayPanes ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
   const onDeleteCharacter = (id) => {
@@ -1389,9 +1416,20 @@ function Main({ storage, storageKind, storageFailed }) {
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
-    const obj = await pickJSONFile();
-    if (!obj) return;
-    if (obj.__error) return setError(`Import failed: ${obj.__error}`);
+    const file = await pickFile('.json,application/json,.png,image/png');
+    if (!file) return;
+    let obj;
+    try {
+      if (file.type === 'image/png' || /\.png$/i.test(file.name ?? '')) {
+        // Character-card PNG: the card JSON rides in a tEXt chunk (pure core).
+        const json = extractPngCardJson(new Uint8Array(await file.arrayBuffer()));
+        if (json == null)
+          return setError('Import failed: that PNG embeds no character card (no "chara"/"ccv3" text chunk).');
+        obj = JSON.parse(json);
+      } else {
+        obj = JSON.parse(await file.text());
+      }
+    } catch (e) { return setError(`Import failed: ${e?.message ?? e}`); }
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
       // Legacy single-scenario export: fresh id, never clobbers an existing one.
       const s = normalizeScenario({ ...obj.data, id: uid() });
@@ -1417,7 +1455,15 @@ function Main({ storage, storageKind, storageFailed }) {
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export. Full backups import via Settings → Connection.');
+      // Not a FictionPad export — try a character card (chara_card v1/v2/v3
+      // JSON, or the payload of a card PNG): becomes a linked scenario +
+      // global character pair (field mapping in parseCharacterCard).
+      const card = parseCharacterCard(obj);
+      if (!card)
+        return setError('Unrecognized JSON: expected a FictionPad scenario, character, chat or character card export. Full backups import via Settings → Storage.');
+      upsertCharacter(card.character.id, normalizeCharacter(card.character));
+      upsertScenario(card.scenario.id, card.scenario);
+      setUi(u => ({ ...u, scenarioId: card.scenario.id, characterId: null }));
     }
   };
 
@@ -1530,7 +1576,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   return html`
     <div class="app ${dragging ? 'dragging' : ''}">
-      ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
+      ${overlayPanes && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
         <div class="topbar-inner">
@@ -1572,8 +1618,9 @@ function Main({ storage, storageKind, storageFailed }) {
         onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
         onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
         onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id,
-          // On phones the sidebar is an overlay — close it so the chat shows.
-          ...(isMobile ? { sidebarCollapsed: true } : {}) }))}
+          // In overlay-pane mode (phones, contended widths) the sidebar
+          // covers the chat — close it so the chat shows.
+          ...(overlayPanes ? { sidebarCollapsed: true } : {}) }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
@@ -1657,9 +1704,9 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
-      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
+      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
         onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`

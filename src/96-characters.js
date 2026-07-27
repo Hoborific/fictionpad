@@ -15,7 +15,7 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate }) {
   const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -39,7 +39,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!editing.name.trim()}
-          onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
+          onClick=${() => { onUpsert(editing.id, { ...editing, alternateGreetings: (editing.alternateGreetings ?? []).filter(g => g.trim()), updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <div class="field"><span>Name colour — for the speaker name in chats; empty = auto (hashed from the name)</span>
@@ -60,6 +60,8 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       <label class="field"><span>Greeting — first message of chats started directly with this character. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${editing.greeting ?? ''}
           onInput=${(e) => edit({ ...editing, greeting: e.target.value })} /></label>
+      <${AlternateGreetingsFields} draft=${editing} forCharacter=${true}
+        set=${(patch) => edit({ ...editing, ...patch })} />
       <div class="grid2">
         <label class="field"><span>Weight — higher wins when the lore budget is tight</span>
           <${NumInput} value=${editing.weight ?? 0} step=${1} fallback=${0}
@@ -76,6 +78,8 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
               onChange=${(e) => edit({ ...editing, enabled: e.target.checked })} /> enabled</label>
         </div>
       </div>
+      <${GenerationDefaultsFields} draft=${editing} settings=${settings}
+        set=${(patch) => edit({ ...editing, ...patch })} />
       ${totalLinks > 0 && html`
         <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
       ${genOpen && html`

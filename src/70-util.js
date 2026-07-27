@@ -10,22 +10,24 @@ function downloadJSON(filename, obj) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-function pickJSONFile() {
+function pickFile(accept) {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json,application/json';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return resolve(null);
-      try { resolve(JSON.parse(await file.text())); }
-      catch (e) { resolve({ __error: String(e) }); }
-    };
+    input.accept = accept;
+    input.onchange = () => resolve(input.files?.[0] ?? null);
     // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+);
     // without this the promise never settles and imports silently hang.
     input.oncancel = () => resolve(null);
     input.click();
   });
+}
+
+async function pickJSONFile() {
+  const file = await pickFile('.json,application/json');
+  if (!file) return null;
+  try { return JSON.parse(await file.text()); }
+  catch (e) { return { __error: String(e) }; }
 }
 
 // Sampler knob registry — the sampling params the app can send on chat
@@ -73,6 +75,15 @@ const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)]
 // number instead of resetting it.
 const enabledSamplers = (st) => Object.fromEntries(
   Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
+
+// Value editor for a sampler field — true/false select for booleans, NumInput
+// otherwise. Shared by every surface that edits a sampler set (per-chat
+// overrides, scenario defaults), so the rows can't drift.
+const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
+  ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
+      <option value="true">true</option><option value="false">false</option></select>`
+  : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+      onCommit=${onChange} />`;
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {

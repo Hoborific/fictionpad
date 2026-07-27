@@ -20,7 +20,8 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   dedupeSpeakerPrefixes,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
-  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece };`;
+  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
+  parseCharacterCard, extractPngCardJson };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -32,6 +33,7 @@ const {
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
+  parseCharacterCard, extractPngCardJson,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -1227,6 +1229,10 @@ section('import normalization');
   ok(normalizeLorePiece(null).title === '', 'non-object piece heals to shape');
   const nc = normalizeCharacter({ name: 'Z' });
   ok(nc.keys.length === 0 && nc.greeting === '' && nc.color === '', 'character fields coerced');
+  const ncDef = normalizeCharacter({ name: 'Z', model: ' qwen ', samplers: { top_k: 20 } });
+  ok(ncDef.model === 'qwen' && ncDef.samplers.top_k === 20, 'character model/samplers pass through (model trimmed)');
+  const ncBad = normalizeCharacter({ name: 'Z', model: ' ', samplers: [1] });
+  ok(ncBad.model === undefined && ncBad.samplers === undefined, 'character blank model / malformed samplers coerced away');
   const chat = normalizeChat({ id: 'C', activeLeafId: 'r', messages: { r: { id: 'r', parentId: null, role: 'assistant' } } });
   ok(chat.messages.r.swipes.length === 1 && chat.messages.r.activeSwipe === 0,
     'swipes-less node gets a placeholder swipe, activeSwipe coerced');
@@ -1234,6 +1240,84 @@ section('import normalization');
   ok(c2.messages.r.activeSwipe === 1, 'activeSwipe clamped into range');
   ok(normalizeChat(null).messages && Object.keys(normalizeChat(null).messages).length === 0,
     'non-object chat heals to an empty tree');
+  const nm = normalizeScenario({ name: 'M', model: '  qwen3  ', samplers: { temperature: 0.7 } });
+  ok(nm.model === 'qwen3' && nm.samplers.temperature === 0.7, 'scenario model/samplers pass through (model trimmed)');
+  const nmBad = normalizeScenario({ name: 'M', model: '   ', samplers: 'nope' });
+  ok(nmBad.model === undefined && nmBad.samplers === undefined, 'blank model / malformed samplers coerced away');
+  ok(Array.isArray(normalizeScenario({ name: 'M', alternateGreetings: 'x' }).alternateGreetings)
+    && normalizeScenario({ name: 'M', alternateGreetings: 'x' }).alternateGreetings.length === 0,
+    'malformed alternateGreetings heals to []');
+}
+
+// ---- character card import (chara_card v1/v2/v3 + PNG) ----
+section('character card import');
+{
+  const cardJson = {
+    spec: 'chara_card_v2', spec_version: '2.0',
+    data: {
+      name: 'Mia Voss',
+      description: 'A smuggler. {{char}} is quick-witted.',
+      personality: 'bold, sardonic',
+      scenario: 'The docks of Veyra.',
+      first_mes: 'Mia Voss: "Well, look who it is."',
+      mes_example: 'Mia Voss: "Example line."',
+      system_prompt: 'Stay in character.',
+      post_history_instructions: 'End with a hook.',
+      creator_notes: 'by someone',
+      tags: ['scifi'],
+      alternate_greetings: ['Alt one for {{char}}.', '', 42],
+      character_book: { entries: [
+        { keys: ['Veyra'], content: 'Floating city.', constant: true, enabled: true, comment: 'Veyra' },
+        { keys: ['Dr. Vex', 'x'], content: 'A medic.', enabled: false, case_sensitive: true },
+      ] },
+    },
+  };
+  const parsed = parseCharacterCard(cardJson);
+  ok(parsed && parsed.scenario && parsed.character, 'v2 card parses');
+  const { scenario: cs, character: cc } = parsed;
+  ok(cc.name === 'Mia Voss' && cc.greeting === cardJson.data.first_mes && cc.keys.length === 0,
+    'character: name/greeting set, keys blank (name is the default key)');
+  ok(cc.content.includes('A smuggler. Mia Voss is quick-witted.'), '{{char}} binds to the card name');
+  ok(cc.content.includes('Personality: bold, sardonic') && cc.content.includes('Example dialogue:\nMia Voss: "Example line."'),
+    'personality + mes_example folded into character content');
+  ok(cs.backstory === 'The docks of Veyra.' && cs.greeting === cardJson.data.first_mes,
+    'scenario field → backstory; first_mes → both greetings');
+  ok(cs.scenarioInstructions === 'Stay in character.\n\nEnd with a hook.',
+    'system_prompt + post_history_instructions → scenario instructions');
+  ok(cs.description === 'by someone' && cs.tags.length === 1 && cs.tags[0] === 'scifi',
+    'creator_notes/tags → scenario metadata');
+  ok(cs.characterIds.length === 1 && cs.characterIds[0] === cc.id, 'scenario links the new character');
+  ok(cc.alternateGreetings.length === 1 && cc.alternateGreetings[0] === 'Alt one for Mia Voss.'
+    && cs.alternateGreetings.length === 1 && cs.alternateGreetings[0] === 'Alt one for Mia Voss.',
+    'alternate_greetings land on both entities ({{char}} bound, blanks/non-strings dropped)');
+  ok(cs.lorePieces.length === 2, 'character_book entries → lore pieces');
+  ok(cs.lorePieces[0].title === 'Veyra' && cs.lorePieces[0].pinned === true && cs.lorePieces[0].keys[0] === 'Veyra',
+    'constant entry → pinned, comment → title');
+  ok(cs.lorePieces[1].keys.length === 1 && cs.lorePieces[1].keys[0] === 'Dr\\. Vex',
+    'card keys escaped to literal regex; sub-2-char key dropped');
+  ok(cs.lorePieces[1].enabled === false && cs.lorePieces[1].caseSensitive === true,
+    'enabled/case_sensitive carried over');
+  ok(parseCharacterCard({ name: 'V1', description: 'flat card' }) !== null, 'v1 flat shape detected');
+  ok(parseCharacterCard({ name: 'Only a name' }) === null, 'bare name is not a card');
+  ok(parseCharacterCard({ type: 'fictionpad-scenario', data: { name: 'X' } }) === null,
+    'FictionPad exports never misdetect as cards');
+  ok(parseCharacterCard(null) === null && parseCharacterCard({ foo: 1 }) === null, 'non-cards → null');
+
+  const pngWithCard = (jsonStr) => {
+    const b64 = Buffer.from(jsonStr, 'utf8').toString('base64');
+    const payload = Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(b64, 'latin1')]);
+    const chunk = Buffer.alloc(8 + payload.length + 4); // len + type + data + CRC (unverified)
+    chunk.writeUInt32BE(payload.length, 0);
+    chunk.write('tEXt', 4, 'latin1');
+    payload.copy(chunk, 8);
+    return new Uint8Array(Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), chunk]));
+  };
+  const extracted = extractPngCardJson(pngWithCard(JSON.stringify(cardJson)));
+  ok(extracted && JSON.parse(extracted).data.name === 'Mia Voss', 'PNG tEXt card payload extracted');
+  ok(extractPngCardJson(new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) === null,
+    'PNG without chunks → null');
+  ok(extractPngCardJson(new Uint8Array([1, 2, 3, 4])) === null, 'non-PNG bytes → null');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

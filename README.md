@@ -9,8 +9,8 @@ Download `fictionpad.html` from any [release](../../releases) and open it locall
 - Scenario-centric roleplay: per-scenario prompts, a lorebook with keyword triggers (whole-word / case-sensitive options) and semantic embedding-based activation, per-chat lore overlays, auto-memory, author's note
 - Multi-character scenes: name-prefixed multi-speaker replies, global character cards with optional name colours, `/pov` command to rewrite a reply from another character's perspective
 - ✦ AI generator: type a prompt and the model drafts the whole scenario, character card, or a single lore piece — optionally fleshing out characters the model registers mid-chat
-- Full conversation control: swipes and branching, message editing, drafts, lore templates, full-text chat search, complete export/import
-- Generation introspection: token-probability heatmap with resampling, logit bias editor, sampler controls with per-chat overrides and custom user-defined samplers, model reasoning ("thinking") display
+- Full conversation control: swipes and branching, message editing, drafts, lore templates, full-text chat search, complete export/import, and SillyTavern-style character card import (PNG or JSON)
+- Generation introspection: token-probability heatmap with resampling, logit bias editor, sampler controls with per-chat overrides and per-scenario/character defaults, custom user-defined samplers, model reasoning ("thinking") display
 - Automatic context limits: detects each model's context length from `/v1/models` (vLLM, llama.cpp, OpenRouter) and sizes the context budget and response reserve to match — manual pinning and per-chat overrides included
 - Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation
 - Personas: reusable user identities with per-chat pick and an optional default

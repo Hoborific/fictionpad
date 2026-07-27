@@ -172,6 +172,72 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate 
     <//>`;
 }
 
+// Alternate greetings — extra first messages offered as greeting swipes on
+// the root node of new chats (the greeting field above is always swipe 1).
+// Shared by the scenario and character editors (the LorePieceFields pattern).
+// Entries are multi-line prose, so the editor is a stack of textareas, not a
+// one-per-line ListInput; blank entries are filtered out by the caller's Save.
+function AlternateGreetingsFields({ draft, set, forCharacter = false }) {
+  const alts = draft.alternateGreetings ?? [];
+  return html`
+    <div class="field">
+      <span>Alternate greetings (${alts.length})
+        <button class="btn small" style=${{ marginLeft: '8px' }}
+          onClick=${() => set({ alternateGreetings: [...alts, ''] })}>+ add alternate</button></span>
+      <div class="hint">${forCharacter
+        ? 'Extra first messages for new direct chats — swipe through them on the greeting. A scenario this character is linked into uses the scenario’s own greetings (the scenario takes precedence). Blank alternates are dropped at save.'
+        : 'Extra first messages — new chats swipe through them on the greeting. Blank alternates are dropped at save.'}</div>
+      ${alts.map((g, i) => html`
+        <div key=${i} style=${{ display: 'flex', gap: '6px', alignItems: 'flex-start', marginTop: '4px' }}>
+          <textarea rows=${3} style=${{ flex: 1 }} value=${g}
+            placeholder=${`Alternate greeting #${i + 1}`}
+            onInput=${(e) => set({ alternateGreetings: alts.map((x, j) => j === i ? e.target.value : x) })} />
+          <button class="btn small danger" title="Remove this alternate greeting"
+            onClick=${() => set({ alternateGreetings: alts.filter((_, j) => j !== i) })}>✕</button>
+        </div>`)}
+    </div>`;
+}
+
+// Generation defaults for new chats — shared by the scenario editor and the
+// character editor (direct character chats), so the two surfaces can't drift
+// (the LorePieceFields pattern). The values are snapshotted into each new
+// chat's own overrides at creation (newChat); `set` applies a partial patch
+// to the caller's draft.
+function GenerationDefaultsFields({ draft, settings, set }) {
+  return html`
+    <div class="field">
+      <span>Defaults for new chats</span>
+      <div class="hint">Snapshotted into each new chat's own overrides at creation (like the greeting) — editing these later doesn't change existing chats.</div>
+      <label class="field"><span>Model — new chats start with this model override; blank = the global chat model</span>
+        <input type="text" value=${draft.model ?? ''} placeholder="(global)"
+          onInput=${(e) => set({ model: e.target.value.trim() || undefined })} /></label>
+      ${settings && html`
+        <div class="hint">Samplers — checked knobs seed the new chat's per-chat overrides (drawer/panel → Samplers).</div>
+        ${allSamplerFields(settings).map(f => {
+          const sv = draft.samplers ?? {};
+          const on = sv[f.key] != null;
+          const globalSent = enabledSamplers(settings)[f.key];
+          return html`
+            <div class="sampler-row" key=${f.key}>
+              <label class="check">
+                <input type="checkbox" checked=${on}
+                  onChange=${(e) => {
+                    const samplers = { ...sv };
+                    if (e.target.checked) samplers[f.key] = settings.samplers?.[f.key] ?? f.def;
+                    else delete samplers[f.key];
+                    set({ samplers });
+                  }} />
+                ${f.label}${f.custom ? ' ✦' : ''}</label>
+              <span class="sval">
+                ${on
+                  ? samplerValueCtl(f, sv[f.key], (v) => set({ samplers: { ...sv, [f.key]: v } }))
+                  : html`<span class="hint">${globalSent != null ? `global: ${globalSent}` : 'backend default'}</span>`}
+              </span>
+            </div>`;
+        })}`}
+    </div>`;
+}
+
 function newScenario() {
   return {
     id: uid(), name: '', description: '', tags: [],
@@ -181,7 +247,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -208,7 +274,8 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
   return html`
     <${Modal} title="Scenario editor" wide onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" disabled=${!draft.name.trim()} onClick=${() => onSave(draft)}>Save scenario</button>`}>
+        <button class="btn primary" disabled=${!draft.name.trim()}
+          onClick=${() => onSave({ ...draft, alternateGreetings: (draft.alternateGreetings ?? []).filter(g => g.trim()) })}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
           <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>
@@ -223,12 +290,14 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
       <label class="field"><span>Greeting — first assistant message of every new chat. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
+      <${AlternateGreetingsFields} draft=${draft} set=${set} />
       <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
         <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
           <option value="off">off — no proposals, no extraction</option>
           <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
           <option value="auto">auto-add — proposals go straight into chat lore</option>
         </select></label>
+      <${GenerationDefaultsFields} draft=${draft} settings=${settings} set=${set} />
       <div class="field">
         <span>Linked characters (${linkedIds.length})</span>
         <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card content edits apply live to all linked scenarios and chats — but the opening greeting is snapshotted per chat at creation, so greeting edits only affect new chats. For scenario-only characters, use a character-type lore piece below.</div>

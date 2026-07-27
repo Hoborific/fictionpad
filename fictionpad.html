@@ -725,7 +725,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.5.2';
+const APP_VERSION = '4.6.0';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1929,13 +1929,28 @@ function normalizeScenario(s) {
     tags: asArr(o.tags).map(String),
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
     scenarioInstructions: asStr(o.scenarioInstructions),
+    // Alternate first messages (card imports): new chats offer them as extra
+    // greeting swipes on the root node. Shape-only coercion.
+    alternateGreetings: asArr(o.alternateGreetings).map(String),
+    // Generation defaults for NEW chats (snapshotted into chat.settings at
+    // creation): a model override and a sparse sampler set. Coerced to
+    // shape-only; undefined keys serialize away.
+    model: asStr(o.model).trim() || undefined,
+    samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined,
     lorePieces: asArr(o.lorePieces).map(normalizeLorePiece),
     characterIds: asArr(o.characterIds).map(String) };
 }
 function normalizeCharacter(c) {
   const o = (c && typeof c === 'object') ? c : {};
   return { ...o, name: asStr(o.name), content: asStr(o.content),
-    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color) };
+    keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
+    // Alternate first messages (card imports) — greeting swipes in new direct chats.
+    alternateGreetings: asArr(o.alternateGreetings).map(String),
+    // Generation defaults for NEW direct chats — same shape as the scenario's
+    // (snapshotted into chat.settings at creation; applied only when the chat
+    // is rooted in this character, never when it's merely linked into one).
+    model: asStr(o.model).trim() || undefined,
+    samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined };
 }
 // Node shape: every node needs a swipes array (≥1 swipe) and an in-range
 // activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
@@ -1951,6 +1966,108 @@ function normalizeChat(c) {
     messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
   }
   return { ...o, messages };
+}
+// ---- character card import (chara_card v1/v2/v3, JSON or PNG-embedded) ----
+// Card trigger keys are plain text; FictionPad keys are regex — escape to
+// literal so "Dr. Strange" can't mean "DrX Strange".
+const escapeRxKey = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Cards use {{char}}; FictionPad has {{user}} only (multi-character scenarios
+// make {{char}} ambiguous) — bind it to the card's own name at import time.
+const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, name);
+// Bytes → ASCII without spreading (a large tEXt chunk would overflow the
+// argument limit of a single String.fromCharCode(...bytes) call).
+const u8ToAscii = (bytes) => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 32768)
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+  return s;
+};
+// Extract the embedded card JSON text from PNG bytes (tEXt chunk keyword
+// "chara" = v1/v2, "ccv3" = v3; base64 payload). Returns null when the file
+// carries no card. CRCs are not verified (display data, not a trust boundary);
+// zTXt/iTXt compression is unsupported — SillyTavern writes plain tEXt.
+function extractPngCardJson(u8) {
+  const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (!u8 || u8.length < 8 || sig.some((b, i) => u8[i] !== b)) return null;
+  let off = 8;
+  while (off + 8 <= u8.length) {
+    const len = (((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0);
+    const type = u8ToAscii(u8.subarray(off + 4, off + 8));
+    const end = off + 8 + len; // + 4 CRC bytes after the data
+    if (end + 4 > u8.length) return null; // truncated
+    if (type === 'tEXt') {
+      let nul = off + 8;
+      while (nul < end && u8[nul] !== 0) nul++;
+      const keyword = u8ToAscii(u8.subarray(off + 8, nul));
+      if (keyword === 'chara' || keyword === 'ccv3') {
+        const bin = atob(u8ToAscii(u8.subarray(nul + 1, end)).trim());
+        return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+      }
+    }
+    if (type === 'IEND') return null;
+    off = end + 4;
+  }
+  return null;
+}
+// Map a character card onto a linked scenario + global character pair, or
+// return null when the object isn't a card. v2/v3 are detected by spec/data,
+// v1 by its flat shape (never an object with a `type` — FictionPad exports
+// are checked by the caller first anyway). Field mapping: description +
+// personality + mes_example → character content; scenario → backstory;
+// system_prompt + post_history_instructions → scenario instructions;
+// first_mes → BOTH greetings (direct chats read the character's, scenario
+// chats the scenario's); creator_notes/tags → scenario metadata;
+// character_book entries → lore pieces (constant → pinned; keys escaped;
+// secondary keys/positions/recursion dropped — see the deferred list).
+// alternate_greetings → `alternateGreetings` on BOTH entities (new chats offer
+// them as greeting swipes on the root node; the scenario's win in scenario
+// chats, so a linked character's never leak in).
+function parseCharacterCard(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  if (typeof obj.type === 'string' && obj.type.startsWith('fictionpad-')) return null; // own exports, never cards
+  const d = (obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) ? obj.data : null;
+  let raw;
+  if ((typeof obj.spec === 'string' && obj.spec.startsWith('chara_card')) || (d && asStr(d.name).trim()))
+    raw = d ?? {};
+  else if (!obj.type && asStr(obj.name).trim() &&
+    [obj.description, obj.personality, obj.scenario, obj.first_mes, obj.mes_example].some(v => asStr(v).trim()))
+    raw = obj; // v1 flat
+  else return null;
+  const name = asStr(raw.name).trim();
+  if (!name) return null;
+  const card = (v) => subCardMacros(v, name).trim();
+  const content = [
+    card(raw.description),
+    card(raw.personality) && `Personality: ${card(raw.personality)}`,
+    card(raw.mes_example) && `Example dialogue:\n${card(raw.mes_example)}`,
+  ].filter(Boolean).join('\n\n');
+  const now = Date.now();
+  const alternateGreetings = asArr(raw.alternate_greetings)
+    .filter(g => typeof g === 'string').map(g => card(g)).filter(Boolean);
+  const character = {
+    id: uid(), name, content, keys: [], // blank → the card name itself triggers
+    pinned: false, weight: 0, smart: false, enabled: true, color: '',
+    greeting: card(raw.first_mes), alternateGreetings, createdAt: now, updatedAt: now,
+  };
+  const lorePieces = asArr(raw.character_book?.entries).map(e => normalizeLorePiece({
+    id: uid(), type: 'lore',
+    title: asStr(e?.comment).trim() || asStr(e?.name).trim() || asStr(asArr(e?.keys)[0]).trim() || '(imported)',
+    content: card(e?.content),
+    keys: asArr(e?.keys).map(k => escapeRxKey(asStr(k).trim())).filter(k => k.length >= 2),
+    pinned: !!e?.constant, caseSensitive: !!e?.case_sensitive,
+    enabled: e?.enabled !== false,
+  }));
+  const scenario = normalizeScenario({
+    id: uid(), name,
+    description: card(raw.creator_notes) || 'Imported from a character card.',
+    tags: asArr(raw.tags).map(String),
+    backstory: card(raw.scenario),
+    greeting: card(raw.first_mes), alternateGreetings,
+    scenarioInstructions: [card(raw.system_prompt), card(raw.post_history_instructions)].filter(Boolean).join('\n\n'),
+    lorePieces, characterIds: [character.id],
+    emergentLore: 'queue', createdAt: now,
+  });
+  return { scenario, character };
 }
 // === PURE CORE END ===
 // ============================================================================
@@ -2700,22 +2817,24 @@ function downloadJSON(filename, obj) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-function pickJSONFile() {
+function pickFile(accept) {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json,application/json';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return resolve(null);
-      try { resolve(JSON.parse(await file.text())); }
-      catch (e) { resolve({ __error: String(e) }); }
-    };
+    input.accept = accept;
+    input.onchange = () => resolve(input.files?.[0] ?? null);
     // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+);
     // without this the promise never settles and imports silently hang.
     input.oncancel = () => resolve(null);
     input.click();
   });
+}
+
+async function pickJSONFile() {
+  const file = await pickFile('.json,application/json');
+  if (!file) return null;
+  try { return JSON.parse(await file.text()); }
+  catch (e) { return { __error: String(e) }; }
 }
 
 // Sampler knob registry — the sampling params the app can send on chat
@@ -2763,6 +2882,15 @@ const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)]
 // number instead of resetting it.
 const enabledSamplers = (st) => Object.fromEntries(
   Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
+
+// Value editor for a sampler field — true/false select for booleans, NumInput
+// otherwise. Shared by every surface that edits a sampler set (per-chat
+// overrides, scenario defaults), so the rows can't drift.
+const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
+  ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
+      <option value="true">true</option><option value="false">false</option></select>`
+  : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+      onCommit=${onChange} />`;
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {
@@ -3069,6 +3197,72 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate 
     <//>`;
 }
 
+// Alternate greetings — extra first messages offered as greeting swipes on
+// the root node of new chats (the greeting field above is always swipe 1).
+// Shared by the scenario and character editors (the LorePieceFields pattern).
+// Entries are multi-line prose, so the editor is a stack of textareas, not a
+// one-per-line ListInput; blank entries are filtered out by the caller's Save.
+function AlternateGreetingsFields({ draft, set, forCharacter = false }) {
+  const alts = draft.alternateGreetings ?? [];
+  return html`
+    <div class="field">
+      <span>Alternate greetings (${alts.length})
+        <button class="btn small" style=${{ marginLeft: '8px' }}
+          onClick=${() => set({ alternateGreetings: [...alts, ''] })}>+ add alternate</button></span>
+      <div class="hint">${forCharacter
+        ? 'Extra first messages for new direct chats — swipe through them on the greeting. A scenario this character is linked into uses the scenario’s own greetings (the scenario takes precedence). Blank alternates are dropped at save.'
+        : 'Extra first messages — new chats swipe through them on the greeting. Blank alternates are dropped at save.'}</div>
+      ${alts.map((g, i) => html`
+        <div key=${i} style=${{ display: 'flex', gap: '6px', alignItems: 'flex-start', marginTop: '4px' }}>
+          <textarea rows=${3} style=${{ flex: 1 }} value=${g}
+            placeholder=${`Alternate greeting #${i + 1}`}
+            onInput=${(e) => set({ alternateGreetings: alts.map((x, j) => j === i ? e.target.value : x) })} />
+          <button class="btn small danger" title="Remove this alternate greeting"
+            onClick=${() => set({ alternateGreetings: alts.filter((_, j) => j !== i) })}>✕</button>
+        </div>`)}
+    </div>`;
+}
+
+// Generation defaults for new chats — shared by the scenario editor and the
+// character editor (direct character chats), so the two surfaces can't drift
+// (the LorePieceFields pattern). The values are snapshotted into each new
+// chat's own overrides at creation (newChat); `set` applies a partial patch
+// to the caller's draft.
+function GenerationDefaultsFields({ draft, settings, set }) {
+  return html`
+    <div class="field">
+      <span>Defaults for new chats</span>
+      <div class="hint">Snapshotted into each new chat's own overrides at creation (like the greeting) — editing these later doesn't change existing chats.</div>
+      <label class="field"><span>Model — new chats start with this model override; blank = the global chat model</span>
+        <input type="text" value=${draft.model ?? ''} placeholder="(global)"
+          onInput=${(e) => set({ model: e.target.value.trim() || undefined })} /></label>
+      ${settings && html`
+        <div class="hint">Samplers — checked knobs seed the new chat's per-chat overrides (drawer/panel → Samplers).</div>
+        ${allSamplerFields(settings).map(f => {
+          const sv = draft.samplers ?? {};
+          const on = sv[f.key] != null;
+          const globalSent = enabledSamplers(settings)[f.key];
+          return html`
+            <div class="sampler-row" key=${f.key}>
+              <label class="check">
+                <input type="checkbox" checked=${on}
+                  onChange=${(e) => {
+                    const samplers = { ...sv };
+                    if (e.target.checked) samplers[f.key] = settings.samplers?.[f.key] ?? f.def;
+                    else delete samplers[f.key];
+                    set({ samplers });
+                  }} />
+                ${f.label}${f.custom ? ' ✦' : ''}</label>
+              <span class="sval">
+                ${on
+                  ? samplerValueCtl(f, sv[f.key], (v) => set({ samplers: { ...sv, [f.key]: v } }))
+                  : html`<span class="hint">${globalSent != null ? `global: ${globalSent}` : 'backend default'}</span>`}
+              </span>
+            </div>`;
+        })}`}
+    </div>`;
+}
+
 function newScenario() {
   return {
     id: uid(), name: '', description: '', tags: [],
@@ -3078,7 +3272,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -3105,7 +3299,8 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
   return html`
     <${Modal} title="Scenario editor" wide onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" disabled=${!draft.name.trim()} onClick=${() => onSave(draft)}>Save scenario</button>`}>
+        <button class="btn primary" disabled=${!draft.name.trim()}
+          onClick=${() => onSave({ ...draft, alternateGreetings: (draft.alternateGreetings ?? []).filter(g => g.trim()) })}>Save scenario</button>`}>
       <div class="grid2">
         <label class="field"><span>Name</span>
           <input type="text" value=${draft.name} onInput=${(e) => set({ name: e.target.value })} /></label>
@@ -3120,12 +3315,14 @@ function ScenarioEditor({ scenario, characters = {}, onSave, onClose, onGenerate
         <textarea rows=${6} value=${draft.backstory} onInput=${(e) => set({ backstory: e.target.value })} /></label>
       <label class="field"><span>Greeting — first assistant message of every new chat. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${draft.greeting} onInput=${(e) => set({ greeting: e.target.value })} /></label>
+      <${AlternateGreetingsFields} draft=${draft} set=${set} />
       <label class="field"><span>Emergent lore — where model-proposed lore (add_lore calls + periodic extraction) goes</span>
         <select value=${draft.emergentLore ?? 'queue'} onChange=${(e) => set({ emergentLore: e.target.value })}>
           <option value="off">off — no proposals, no extraction</option>
           <option value="queue">suggest for review (default) — proposals wait in chat settings</option>
           <option value="auto">auto-add — proposals go straight into chat lore</option>
         </select></label>
+      <${GenerationDefaultsFields} draft=${draft} settings=${settings} set=${set} />
       <div class="field">
         <span>Linked characters (${linkedIds.length})</span>
         <div class="hint">Global character cards join this scenario's lore pipeline (activation, budgets, /pov, speaker colours). Card content edits apply live to all linked scenarios and chats — but the opening greeting is snapshotted per chat at creation, so greeting edits only affect new chats. For scenario-only characters, use a character-type lore piece below.</div>
@@ -4257,12 +4454,6 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
   // What the global side would actually send (disabled keys excluded) — the
   // per-chat rows display these as the inherited values.
   const globalSent = enabledSamplers(settings);
-  // Value editor for a field: true/false select for booleans, NumInput else.
-  const valueCtl = (f, value, onChange) => f.type === 'boolean'
-    ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
-        <option value="true">true</option><option value="false">false</option></select>`
-    : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
-        onCommit=${onChange} />`;
   return html`
     <div>
       <div class="ptabs" style=${{ margin: '-4px 0 8px', padding: 0 }}>
@@ -4274,7 +4465,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
           <div class="sampler-row" key=${f.key}>
             <label class="check">${f.label}</label>
             <span class="sval">
-              ${valueCtl(f, settings?.[f.key] ?? f.def, (v) => onUpdateSettings({ [f.key]: v }))}
+              ${samplerValueCtl(f, settings?.[f.key] ?? f.def, (v) => onUpdateSettings({ [f.key]: v }))}
             </span>
           </div>`)}
         ${fields.map(f => {
@@ -4286,7 +4477,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                 ${f.label}${f.custom ? ' ✦' : ''}</label>
               <span class="sval">
                 ${active
-                  ? valueCtl(f, global[f.key], (v) => setGlobal(f.key, v))
+                  ? samplerValueCtl(f, global[f.key], (v) => setGlobal(f.key, v))
                   : html`<span class="hint">${global[f.key] != null ? String(global[f.key]) : '—'}</span>`}
               </span>
             </div>`;
@@ -4303,7 +4494,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                 ${f.label}</label>
               <span class="sval">
                 ${on
-                  ? valueCtl(f, chat.settings[f.key], (v) => putChatSettings({ [f.key]: v }))
+                  ? samplerValueCtl(f, chat.settings[f.key], (v) => putChatSettings({ [f.key]: v }))
                   : html`<span class="hint">global: ${eff ?? f.def}</span>`}
               </span>
             </div>`;
@@ -4327,7 +4518,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                   ${f.label}${f.custom ? ' ✦' : ''}</label>
                 <span class="sval">
                   ${on
-                    ? valueCtl(f, overrides[f.key], (v) => putChatSettings({ samplers: { ...overrides, [f.key]: v } }))
+                    ? samplerValueCtl(f, overrides[f.key], (v) => putChatSettings({ samplers: { ...overrides, [f.key]: v } }))
                     : html`<span class="hint">${eff != null ? `global: ${eff}` : 'backend default'}</span>`}
                 </span>
               </div>`;
@@ -5322,7 +5513,7 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, onClose, onGenerate }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate }) {
   const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -5346,7 +5537,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!editing.name.trim()}
-          onClick=${() => { onUpsert(editing.id, { ...editing, updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
+          onClick=${() => { onUpsert(editing.id, { ...editing, alternateGreetings: (editing.alternateGreetings ?? []).filter(g => g.trim()), updatedAt: Date.now() }); onClose(); }}>Save character</button>`}>
       <label class="field"><span>Name — speaker name; also the default trigger key</span>
         <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
       <div class="field"><span>Name colour — for the speaker name in chats; empty = auto (hashed from the name)</span>
@@ -5367,6 +5558,8 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
       <label class="field"><span>Greeting — first message of chats started directly with this character. Prefix lines with a character's name (Mia:) to show them as that character's bubble; Narrator: resumes narration.</span>
         <textarea rows=${4} value=${editing.greeting ?? ''}
           onInput=${(e) => edit({ ...editing, greeting: e.target.value })} /></label>
+      <${AlternateGreetingsFields} draft=${editing} forCharacter=${true}
+        set=${(patch) => edit({ ...editing, ...patch })} />
       <div class="grid2">
         <label class="field"><span>Weight — higher wins when the lore budget is tight</span>
           <${NumInput} value=${editing.weight ?? 0} step=${1} fallback=${0}
@@ -5383,6 +5576,8 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, onUpsert, on
               onChange=${(e) => edit({ ...editing, enabled: e.target.checked })} /> enabled</label>
         </div>
       </div>
+      <${GenerationDefaultsFields} draft=${editing} settings=${settings}
+        set=${(patch) => edit({ ...editing, ...patch })} />
       ${totalLinks > 0 && html`
         <div class="hint">Linked into ${linkCount(editing.id)} scenario(s) and ${chatLinkCount} chat(s) — card edits apply live. The greeting is snapshotted per chat at creation, so greeting edits only affect new chats.</div>`}
       ${genOpen && html`
@@ -5500,10 +5695,26 @@ function GeneratorModal({ title, busy, error, onGenerate, onClose }) {
 // Chat factory. Scenario chats snapshot the scenario greeting; direct
 // character chats (scenarioId null, chat.characterIds set) snapshot the
 // character's greeting — possibly empty: the root node is parentless, so
-// pruneInterrupted never drops it.
+// pruneInterrupted never drops it. Generation defaults (model/samplers) are
+// likewise SNAPSHOT into the new chat's per-chat overrides from the entity
+// the chat is rooted in — the scenario, or the character for direct chats
+// (a character merely LINKED into a scenario chat never contributes defaults:
+// multi-character scenes would make that ambiguous).
 function newChat({ scenario = null, character = null, personaId = null, dateFormat } = {}) {
   const rootId = uid();
   const baseName = scenario?.name ?? (character ? `Chat with ${character.name}` : 'Chat');
+  const defaultsFrom = scenario ?? character; // exactly one is set (createChat)
+  const seedSettings = {};
+  if (typeof defaultsFrom?.model === 'string' && defaultsFrom.model.trim())
+    seedSettings.model = defaultsFrom.model.trim();
+  if (defaultsFrom?.samplers && typeof defaultsFrom.samplers === 'object' && !Array.isArray(defaultsFrom.samplers) && Object.keys(defaultsFrom.samplers).length)
+    seedSettings.samplers = { ...defaultsFrom.samplers };
+  // Alternate greetings ride the root node's swipes: a fresh chat can swipe
+  // through them like any other swipe. The rooted entity's alternates only —
+  // in a scenario chat a linked character's greetings never leak in (the
+  // scenario takes precedence). The primary greeting stays even when empty.
+  const greetingTexts = [scenario?.greeting ?? character?.greeting ?? '',
+    ...asArr(defaultsFrom?.alternateGreetings).filter(g => typeof g === 'string' && g.trim())];
   return {
     id: uid(), scenarioId: scenario?.id ?? null, personaId,
     ...(character ? { characterIds: [character.id] } : {}),
@@ -5512,10 +5723,10 @@ function newChat({ scenario = null, character = null, personaId = null, dateForm
     rootMessageId: rootId, activeLeafId: rootId,
     messages: {
       [rootId]: { id: rootId, parentId: null, role: 'assistant', edited: false, activeSwipe: 0,
-        swipes: [{ text: scenario?.greeting ?? character?.greeting ?? '', createdAt: Date.now(), modelId: null }] },
+        swipes: greetingTexts.map(text => ({ text, createdAt: Date.now(), modelId: null })) },
     },
     memoryStore: { memories: [], cursor: 0 },
-    settings: {},
+    settings: seedSettings,
     createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
@@ -5534,7 +5745,7 @@ function buildPlatformPrompt(st) {
 // Side-pane sizing: manual widths persist in fictionpad.ui (sbWidth/dwWidth);
 // when unset, a pane auto-sizes to consume the slack margin around the chat
 // column: clamp(MIN, (viewport − chatW)/2 − gap, AUTO_MAX).
-const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16;
+const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16, PANE_OVERLAY_W = 340;
 
 function Main({ storage, storageKind, storageFailed }) {
   // Request-time endpoint rewrite ("route via server") — never persisted.
@@ -5801,22 +6012,33 @@ function Main({ storage, storageKind, storageFailed }) {
     return Number.isFinite(v) ? v : 780;
   }, []);
   const clampPane = (w) => Math.round(Math.max(PANE_MIN, Math.min(w, viewportW * PANE_MAX_VW)));
-  const autoPaneW = clampPane(Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
-  const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
-  const dwW = ui.drawer ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
   // Narrow-viewport fallback: pad the center column with a pane's actual
   // width only when the slack margin can't contain it — chat never hides.
-  // At the phone breakpoint both panes are full overlays (scrim), no sharing.
   const MOBILE_BP = 700;
   const isMobile = viewportW <= MOBILE_BP;
-  // Edge-hover peek is desktop-only; a peek never changes the persisted pane
+  // Pane contention breakpoint: when the slack margin can't hold even a
+  // minimum-width pane on BOTH sides of the chat column, the panes stop
+  // sharing space and become true overlays over the chat (scrim + tap-to-
+  // close, auto-collapse on chat select, touch edge swipes) — the phone
+  // behavior — instead of squishing the chat column. Includes phones.
+  const PANE_OVERLAY_BP = chatW + 2 * (PANE_MIN + PANE_GAP);
+  const overlayPanes = viewportW <= PANE_OVERLAY_BP;
+  // Auto width: docked panes fill the slack margin around the chat column;
+  // overlay panes take a fixed comfortable width (PANE_OVERLAY_W, mirroring
+  // the phone overlay's 340 px cap) — enough for the content, no point
+  // covering more chat than needed. (Phones override all of this with the
+  // 85vw CSS rule; manual drags always win.)
+  const autoPaneW = clampPane(overlayPanes ? PANE_OVERLAY_W : Math.min((viewportW - chatW) / 2 - PANE_GAP, PANE_AUTO_MAX));
+  const sbW = sidebarCollapsed ? 0 : clampPane(ui.sbWidth ?? autoPaneW);
+  const dwW = ui.drawer ? clampPane(ui.dwWidth ?? autoPaneW) : 0;
+  // Edge-hover peek is mouse territory; a peek never changes the persisted pane
   // state and must not shift the center column (sbW/dwW stay at their real
   // values — the peeked pane is a pure overlay).
   const peekLeft = peek === 'left' && sidebarCollapsed && !isMobile && settings.edgePeek !== false;
   const peekRight = peek === 'right' && !ui.drawer && !isMobile && settings.edgePeek !== false;
   useEffect(() => { if (isMobile || settings.edgePeek === false) setPeek(null); }, [isMobile, settings.edgePeek]);
-  const padL = !isMobile && viewportW < chatW + 2 * sbW ? sbW : 0;
-  const padR = !isMobile && viewportW < chatW + 2 * dwW ? dwW : 0;
+  const padL = !overlayPanes && viewportW < chatW + 2 * sbW ? sbW : 0;
+  const padR = !overlayPanes && viewportW < chatW + 2 * dwW ? dwW : 0;
   const [dragging, setDragging] = useState(false);
   const paneDragStart = (side) => (startX) => {
     const key = side === 'left' ? 'sbWidth' : 'dwWidth';
@@ -5837,21 +6059,21 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const resetPaneWidth = (side) => setUi(u => ({ ...u, [side === 'left' ? 'sbWidth' : 'dwWidth']: null }));
 
-  // ---- mobile edge swipes: open/close the two overlay panes ----
+  // ---- edge swipes (overlay-pane mode): open/close the two overlay panes ----
   // Left edge → swipe right opens the sidebar; right edge → swipe left opens
   // the Inspector/Memory drawer. Message rows (.msg) are ALWAYS bubble swipe
   // territory — pane gestures never start there, and with a pane open only
   // touches on the pane/scrim itself swipe it shut (scrim tap also closes).
   // Otherwise pane gestures steal bubble swipes near the edges, which reads
   // as "the swipe directions are backwards".
-  const navStateRef = useRef({ isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer });
-  navStateRef.current = { isMobile, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
+  const navStateRef = useRef({ overlay: overlayPanes, collapsed: sidebarCollapsed, drawer: ui.drawer });
+  navStateRef.current = { overlay: overlayPanes, collapsed: sidebarCollapsed, drawer: ui.drawer, lastDrawerTab: lastDrawerTabRef.current };
   useEffect(() => {
     let g = null;
     const down = (e) => {
       if (e.pointerType === 'mouse') return;
       const st = navStateRef.current;
-      if (!st.isMobile) return;
+      if (!st.overlay) return; // pane gestures exist in overlay mode only (phones / contended widths)
       if (e.target.closest?.('.msg')) return; // message rows: bubble navigation only
       if (st.collapsed && !st.drawer) {
         // Both panes closed: an open gesture must start on a screen edge.
@@ -6831,7 +7053,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // explicit default persona, when set, takes precedence — see NewChatModal).
     setUi(u => ({ ...u, lastPersonaId: pid ?? null, ...(scen
       ? { chatId: c.id, scenarioId: scen.id, characterId: null }
-      : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(isMobile ? { sidebarCollapsed: true } : {}) }));
+      : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(overlayPanes ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
   const onDeleteCharacter = (id) => {
@@ -6885,9 +7107,20 @@ function Main({ storage, storageKind, storageFailed }) {
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
   const onImport = async () => {
-    const obj = await pickJSONFile();
-    if (!obj) return;
-    if (obj.__error) return setError(`Import failed: ${obj.__error}`);
+    const file = await pickFile('.json,application/json,.png,image/png');
+    if (!file) return;
+    let obj;
+    try {
+      if (file.type === 'image/png' || /\.png$/i.test(file.name ?? '')) {
+        // Character-card PNG: the card JSON rides in a tEXt chunk (pure core).
+        const json = extractPngCardJson(new Uint8Array(await file.arrayBuffer()));
+        if (json == null)
+          return setError('Import failed: that PNG embeds no character card (no "chara"/"ccv3" text chunk).');
+        obj = JSON.parse(json);
+      } else {
+        obj = JSON.parse(await file.text());
+      }
+    } catch (e) { return setError(`Import failed: ${e?.message ?? e}`); }
     if (obj.type === 'fictionpad-scenario' && obj.data?.name != null) {
       // Legacy single-scenario export: fresh id, never clobbers an existing one.
       const s = normalizeScenario({ ...obj.data, id: uid() });
@@ -6913,7 +7146,15 @@ function Main({ storage, storageKind, storageFailed }) {
       if (c.scenarioId && !ref.current.scenarios[c.scenarioId])
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
-      setError('Unrecognized JSON: expected a FictionPad scenario, character or chat export. Full backups import via Settings → Connection.');
+      // Not a FictionPad export — try a character card (chara_card v1/v2/v3
+      // JSON, or the payload of a card PNG): becomes a linked scenario +
+      // global character pair (field mapping in parseCharacterCard).
+      const card = parseCharacterCard(obj);
+      if (!card)
+        return setError('Unrecognized JSON: expected a FictionPad scenario, character, chat or character card export. Full backups import via Settings → Storage.');
+      upsertCharacter(card.character.id, normalizeCharacter(card.character));
+      upsertScenario(card.scenario.id, card.scenario);
+      setUi(u => ({ ...u, scenarioId: card.scenario.id, characterId: null }));
     }
   };
 
@@ -7026,7 +7267,7 @@ function Main({ storage, storageKind, storageFailed }) {
 
   return html`
     <div class="app ${dragging ? 'dragging' : ''}">
-      ${isMobile && (!sidebarCollapsed || ui.drawer) && html`
+      ${overlayPanes && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       <div class="topbar">
         <div class="topbar-inner">
@@ -7068,8 +7309,9 @@ function Main({ storage, storageKind, storageFailed }) {
         onSelectScenario=${(id) => setUi(u => ({ ...u, scenarioId: id, ...(id ? { characterId: null } : {}) }))}
         onSelectCharacter=${(id) => setUi(u => ({ ...u, characterId: id, ...(id ? { scenarioId: null } : {}) }))}
         onSelectChat=${(id) => setUi(u => ({ ...u, chatId: id,
-          // On phones the sidebar is an overlay — close it so the chat shows.
-          ...(isMobile ? { sidebarCollapsed: true } : {}) }))}
+          // In overlay-pane mode (phones, contended widths) the sidebar
+          // covers the chat — close it so the chat shows.
+          ...(overlayPanes ? { sidebarCollapsed: true } : {}) }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
         onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
         onDeleteScenario=${onDeleteScenario}
@@ -7153,9 +7395,9 @@ function Main({ storage, storageKind, storageFailed }) {
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
-      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios}
+      <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
         onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`

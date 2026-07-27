@@ -120,12 +120,6 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
   // What the global side would actually send (disabled keys excluded) — the
   // per-chat rows display these as the inherited values.
   const globalSent = enabledSamplers(settings);
-  // Value editor for a field: true/false select for booleans, NumInput else.
-  const valueCtl = (f, value, onChange) => f.type === 'boolean'
-    ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
-        <option value="true">true</option><option value="false">false</option></select>`
-    : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
-        onCommit=${onChange} />`;
   return html`
     <div>
       <div class="ptabs" style=${{ margin: '-4px 0 8px', padding: 0 }}>
@@ -137,7 +131,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
           <div class="sampler-row" key=${f.key}>
             <label class="check">${f.label}</label>
             <span class="sval">
-              ${valueCtl(f, settings?.[f.key] ?? f.def, (v) => onUpdateSettings({ [f.key]: v }))}
+              ${samplerValueCtl(f, settings?.[f.key] ?? f.def, (v) => onUpdateSettings({ [f.key]: v }))}
             </span>
           </div>`)}
         ${fields.map(f => {
@@ -149,7 +143,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                 ${f.label}${f.custom ? ' ✦' : ''}</label>
               <span class="sval">
                 ${active
-                  ? valueCtl(f, global[f.key], (v) => setGlobal(f.key, v))
+                  ? samplerValueCtl(f, global[f.key], (v) => setGlobal(f.key, v))
                   : html`<span class="hint">${global[f.key] != null ? String(global[f.key]) : '—'}</span>`}
               </span>
             </div>`;
@@ -166,7 +160,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                 ${f.label}</label>
               <span class="sval">
                 ${on
-                  ? valueCtl(f, chat.settings[f.key], (v) => putChatSettings({ [f.key]: v }))
+                  ? samplerValueCtl(f, chat.settings[f.key], (v) => putChatSettings({ [f.key]: v }))
                   : html`<span class="hint">global: ${eff ?? f.def}</span>`}
               </span>
             </div>`;
@@ -190,7 +184,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                   ${f.label}${f.custom ? ' ✦' : ''}</label>
                 <span class="sval">
                   ${on
-                    ? valueCtl(f, overrides[f.key], (v) => putChatSettings({ samplers: { ...overrides, [f.key]: v } }))
+                    ? samplerValueCtl(f, overrides[f.key], (v) => putChatSettings({ samplers: { ...overrides, [f.key]: v } }))
                     : html`<span class="hint">${eff != null ? `global: ${eff}` : 'backend default'}</span>`}
                 </span>
               </div>`;
