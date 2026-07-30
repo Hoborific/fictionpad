@@ -137,6 +137,23 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
     </div>`;
 }
 
+// One past version of a tool-updated piece (update_character): collapsed to a
+// stamped one-liner, expands to that version's full card text + keys.
+function RevisionRow({ rev, n }) {
+  const [open, setOpen] = useState(false);
+  const stamp = rev.createdAt ? new Date(rev.createdAt).toLocaleString() : 'original';
+  return html`
+    <div class="lore-item-row">
+      <div class="row" style=${{ cursor: 'pointer' }} onClick=${() => setOpen(!open)}>
+        <span class="hint">${open ? '▾' : '▸'}</span>
+        <span style=${{ flex: 1 }}>rev ${n}</span>
+        <span class="hint">${rev.atLen != null ? `msg ${rev.atLen} · ` : ''}${stamp}</span>
+      </div>
+      ${!open && html`<div class="ir-preview">${toPreview(rev.content, 140)}</div>`}
+      ${open && html`<div class="ir-content">${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
+    </div>`;
+}
+
 // Lore piece editor popout (chat options) — the same pattern as the
 // scenario/character editors: a wide modal with every field visible (links
 // included), ✦ Generate + Save in the footer, local draft, dirty guard. The
@@ -166,6 +183,13 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate 
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
       <${LorePieceFields} piece=${draft} others=${others} set=${set} />
+      ${(piece.revisions ?? []).length > 0 && html`
+        <div class="field">
+          <span>Change history (${piece.revisions.length})</span>
+          <div class="hint">Versions written by tool calls or enrichment, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
+          ${[...piece.revisions].reverse().map((r, i) => html`
+            <${RevisionRow} key=${i} rev=${r} n=${piece.revisions.length - i} />`)}
+        </div>`}
       ${genOpen && html`
         <${GeneratorModal} title=${`Generate — ${draft.title || 'lore piece'}`} busy=${genBusy} error=${genError}
           onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}

@@ -53,7 +53,7 @@ function LayerCard({ name, tokens, cap, note, about }) {
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [] }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [] }) {
   const [showInactive, setShowInactive] = useState(false);
   // Aux calls (memory summaries, lore extraction, suggestions, /improve,
   // /recap) are separate requests that never enter the main context, so the
@@ -67,10 +67,24 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
           preview=${toPreview(a.out, 140)}
           content=${`[system]\n${a.system}\n\n[user]\n${a.user}\n\n[${a.ok ? 'response' : 'error'}]\n${a.out}`} />`)}
     <//>`;
+  // Pending emergent-lore proposals (chat.loreQueue) — chat state, not
+  // manifest data, so they never appear in "Lore injected". Shown in both
+  // branches: a queue can be waiting before any generation has run.
+  const queueSection = (loreQueue ?? []).length > 0 && html`
+    <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
+      ${loreQueue.map(q => html`
+        <${InspectorRow} key=${q.id}
+          pills=${[{ text: q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
+          title=${q.title || '(untitled)'}
+          preview=${toPreview(q.content, 140)}
+          content=${`${q.content ?? ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
+      <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accept or dismiss in the Chat tab.</div>
+    <//>`;
   if (!manifest?.layers) return html`
     <div>
       <div class="hint">No generation recorded yet. Send a message, or preview the context that would be sent right now.</div>
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${() => onPreview()}>Preview current context</button>`}
+      ${queueSection}
       ${auxSection}
     </div>`;
   const L = manifest.layers;
@@ -157,6 +171,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
               title=${p.title} meta=${`${p.tokens}t`}
               preview=${p.preview} content=${p.content} />`)}`}
       <//>
+      ${queueSection}
       <${InspectorSection} title="Memories injected" count=${L.memory.memories.length}>
         ${L.memory.memories.length === 0 && html`<div class="hint">No memories injected.</div>`}
         ${L.memory.memories.map((m, i) => html`

@@ -609,7 +609,9 @@ function Main({ storage, storageKind, storageFailed }) {
   // ('piece' kind) — one aux call per new character, all concurrent, after
   // the generation completes. Only CONTENT is rewritten and keys are merged;
   // the title is never touched — the registered name is the speaker-matching
-  // key and must not drift. Failures keep the original description.
+  // key and must not drift. Failures keep the original description. The
+  // rewrite appends a stamped revision (universal rollback rule), so rewind
+  // past the enrichment restores the short registered description.
   async function maybeEnrichCharacters(chatObj, nodeId, toolResults) {
     const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
       && String(r.note ?? '').startsWith('registered character'));
@@ -627,10 +629,22 @@ function Main({ storage, storageKind, storageFailed }) {
         // piece vanished (rewind, delete) in between.
         const cur = ref.current.chats[chatObj.id];
         if (!cur || !(cur.lorePieces ?? []).some(p => p.id === piece.id)) return;
-        const next = { ...cur, lorePieces: cur.lorePieces.map(p => p.id === piece.id
-          ? { ...p, ...(patch.content ? { content: patch.content } : {}),
-              keys: [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5) }
-          : p) };
+        const atLen = getActivePath(cur.messages, cur.activeLeafId).length;
+        const next = { ...cur, lorePieces: cur.lorePieces.map(p => {
+          if (p.id !== piece.id) return p;
+          const keys = [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5);
+          if (!patch.content || patch.content === p.content) return { ...p, keys };
+          // Universal rollback rule: enrichment is an app-initiated content
+          // mutation like any tool write, so it appends a stamped revision —
+          // rewind past it restores the pre-enrichment description.
+          const revisions = [...(Array.isArray(p.revisions) ? p.revisions : [{
+            content: p.content ?? '', keys: Array.isArray(p.keys) ? p.keys : [],
+            atLen: Number.isFinite(p.atLen) ? p.atLen : null,
+            createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
+            createdBy: p.createdBy ?? null }]),
+            { content: patch.content, keys, atLen, createdAt: Date.now(), createdBy: p.createdBy ?? null }];
+          return { ...p, content: patch.content, keys, revisions };
+        }) };
         // touch:false — a background lore write shouldn't re-sort the sidebar.
         // saveChat syncs ref.current.chats itself, so a sibling enrichment or
         // the next generation's commit() can't rebuild from the pre-write
@@ -666,11 +680,11 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!fresh && !continuation && node
         && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
       const pruned = pruneToolPieces(chatObj, nodeId);
-      // pruneToolPieces no-ops by returning the chat as-is — and a chat whose
-      // tools never wrote lore has no lorePieces array at all, so both sides
-      // of the comparison need the null-safe read.
-      if ((pruned.lorePieces?.length ?? 0) !== (chatObj.lorePieces?.length ?? 0)) {
-        prunedTools = (chatObj.lorePieces ?? []).filter(p => p?.createdBy === nodeId);
+      // pruneToolPieces no-ops by returning the same object — reference
+      // comparison catches revision-only changes too (an update_character
+      // revision stripped from a piece keeps the piece count unchanged).
+      if (pruned !== chatObj) {
+        prunedTools = chatObj.lorePieces ?? []; // full pre-prune snapshot for restore
         chatObj = { ...pruned, updatedAt: Date.now() };
         upsertChat(chatObj.id, chatObj);
         ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
@@ -852,13 +866,19 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
-      // The generation produced nothing — restore any tool pieces rolled back
-      // before it started, or a failed/empty retry would destroy the replaced
-      // take's effects while the take itself survives.
+      // The generation produced nothing — restore the pre-prune lore state, or
+      // a failed/empty retry would destroy the replaced take's effects while
+      // the take itself survives. The stash is the FULL pre-prune lorePieces
+      // array: prune may have stripped revisions (piece modified in place) as
+      // well as removed pieces. Safe to blanket-restore by id: discard runs
+      // only when the new take applied no tool calls of its own.
       let base = cur;
       if (prunedTools?.length) {
-        const missing = prunedTools.filter(p => !(cur.lorePieces ?? []).some(q => q.id === p.id));
-        if (missing.length) base = { ...cur, lorePieces: [...(cur.lorePieces ?? []), ...missing] };
+        const stashById = new Map(prunedTools.map(p => [p.id, p]));
+        const curIds = new Set((cur.lorePieces ?? []).map(q => q.id));
+        base = { ...cur, lorePieces: [
+          ...(cur.lorePieces ?? []).map(q => stashById.get(q.id) ?? q),
+          ...prunedTools.filter(p => !curIds.has(p.id))] };
       }
       if (n.swipes.length > 1) {
         const swipes = n.swipes.slice(0, -1);

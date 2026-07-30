@@ -1050,6 +1050,146 @@ section('add_lore cross-origin dedupe');
     'lore shadow copy carries fresh provenance');
 }
 
+// ---- update_character + revision history ----
+section('update_character revisions');
+{
+  const chat = { ...baseChat, lorePieces: [lore({ id: 'C1', title: 'Vex', type: 'character', content: 'old card', keys: ['vex'] })] };
+  const r = applyToolCalls(chat, [{ name: 'update_character', args: { name: 'vex', content: 'new card' } }],
+    { nodeId: 'N1', now: 1000, atLen: 5 });
+  const p = r.chat.lorePieces[0];
+  ok(r.results[0].ok && r.results[0].note === 'updated character "vex"',
+    'update_character updates a chat-owned character (case-insensitive name)');
+  ok(p.content === 'new card' && p.revisions.length === 2, 'content replaced, revision appended');
+  ok(p.revisions[0].content === 'old card' && p.revisions[0].atLen === null && p.revisions[0].createdBy === null,
+    'rev 0 is the null-stamped pre-tool original');
+  ok(p.revisions[1].content === 'new card' && p.revisions[1].atLen === 5 && p.revisions[1].createdBy === 'N1',
+    'new revision stamped with position + node');
+  ok(p.keys.join() === 'vex' && p.revisions[1].keys.join() === 'vex', 'keys kept when omitted');
+  const r2 = applyToolCalls(r.chat, [{ name: 'update_character', args: { name: 'Vex', content: 'card v3', keys: ['x', 'copper-eye'] } }],
+    { nodeId: 'N2', now: 2000, atLen: 7 });
+  const p2 = r2.chat.lorePieces[0];
+  ok(p2.revisions.length === 3 && p2.content === 'card v3'
+    && p2.keys.join() === 'copper-eye' && p2.revisions[2].keys.join() === 'copper-eye',
+    'keys replaced (sanitized) only when provided; no re-seed on second update');
+  ok(!applyToolCalls(chat, [{ name: 'update_character', args: { name: 'Ghost', content: 'x' } }]).results[0].ok,
+    'unknown character rejected (register first)');
+  const loreTitled = { ...baseChat, lorePieces: [lore({ id: 'L1', title: 'Vex', content: 'a place' })] };
+  ok(!applyToolCalls(loreTitled, [{ name: 'update_character', args: { name: 'Vex', content: 'x' } }]).results[0].ok,
+    'lore-typed title match rejected');
+  ok(!applyToolCalls(chat, [{ name: 'update_character', args: { name: 'Vex', content: '' } }]).results[0].ok,
+    'missing content rejected');
+  const rq = applyToolCalls(chat, [{ name: 'update_character', args: { name: 'Vex', content: 'q card' } }],
+    { nodeId: 'N3', now: 3000, atLen: 9, queueLore: true });
+  ok(rq.results[0].ok && !(rq.chat.loreQueue ?? []).length && rq.chat.lorePieces[0].content === 'q card',
+    'queue mode applies updates directly (not queued)');
+}
+
+// ---- update_character cross-origin shadow ----
+section('update_character cross-origin shadow');
+{
+  const scenPiece = lore({ id: 'SC1', title: 'Vex', type: 'character', content: 'scenario card', keys: ['vex'] });
+  const chat = { ...baseChat, lorePieces: [] };
+  const r = applyToolCalls(chat, [{ name: 'update_character', args: { name: 'Vex', content: 'evolved card' } }],
+    { nodeId: 'N1', now: 1000, atLen: 5 }, [scenPiece]);
+  const shadow = r.chat.lorePieces[0];
+  ok(r.results[0].ok && shadow.id === 'SC1' && shadow.content === 'evolved card',
+    'scenario character shadowed into the overlay with new content');
+  ok(scenPiece.content === 'scenario card' && scenPiece.revisions === undefined,
+    'scenario original untouched');
+  ok(shadow.revisions.length === 2 && shadow.revisions[0].content === 'scenario card'
+    && shadow.revisions[0].atLen === null && shadow.revisions[0].createdAt === null,
+    'shadow rev 0 = unprovenanced original');
+  ok(Number.isFinite(shadow.createdAt) && shadow.createdBy === 'N1',
+    'shadow carries fresh provenance so rewind drops it');
+  const merged = mergedLorePieces({ ...baseScenario, lorePieces: [scenPiece] }, r.chat);
+  ok(merged.filter(p => p.type === 'character' && p.title.trim().toLowerCase() === 'vex').length === 1,
+    'merged view keeps a single piece for the name');
+}
+
+// ---- universal rollback: EVERY tool update path is revisioned ----
+section('universal rollback of tool updates');
+{
+  // register_character re-registration (dedupe update) is revisioned
+  const chat = { ...baseChat, lorePieces: [lore({ id: 'C1', title: 'Vex', type: 'character', content: 'v1', keys: ['vex'] })] };
+  const reg = applyToolCalls(chat, [{ name: 'register_character', args: { name: 'Vex', description: 'v2' } }],
+    { nodeId: 'N1', now: 100, atLen: 2 });
+  ok(reg.chat.lorePieces[0].revisions?.length === 2 && reg.chat.lorePieces[0].revisions[0].content === 'v1',
+    'register_character re-registration appends a revision');
+  // scenario shadow via register seeds rev 0 from the unprovenanced original
+  const scenPiece = lore({ id: 'S1', title: 'Vex', type: 'character', content: 'scen v1' });
+  const sh = applyToolCalls({ ...baseChat, lorePieces: [] },
+    [{ name: 'register_character', args: { name: 'Vex', description: 'v2' } }],
+    { nodeId: 'N1', now: 100, atLen: 2 }, [scenPiece]);
+  ok(sh.chat.lorePieces[0].revisions?.[0]?.content === 'scen v1'
+    && sh.chat.lorePieces[0].revisions[0].atLen === null,
+    'register shadow seeds rev 0 from the unprovenanced original');
+  // add_lore title update (also the extraction-pass auto-mode path) is revisioned
+  const loreChat = { ...baseChat, lorePieces: [lore({ id: 'L1', title: 'Gate', content: 'old text', keys: ['gate'] })] };
+  const upd = applyToolCalls(loreChat, [{ name: 'add_lore', args: { title: 'gate', content: 'new text' } }],
+    { nodeId: 'N1', now: 100, atLen: 2 });
+  const lp = upd.chat.lorePieces[0];
+  ok(lp.revisions?.length === 2 && lp.content === 'new text' && lp.revisions[0].content === 'old text',
+    'add_lore title-update appends a revision (covers extraction auto mode)');
+  ok(lp.keys.join() === 'gate' && lp.revisions[1].keys.join() === 'gate',
+    'add_lore update without keys keeps current keys');
+  // end-to-end: an applied update rolls back on rewind
+  let c2 = baseChat;
+  const a1 = appendMessage(c2, 'root', 'user', 'one', null); c2 = a1.chat;      // pathLen 2
+  const a2 = appendMessage(c2, a1.id, 'user', 'two', null); c2 = a2.chat;        // pathLen 3
+  c2 = { ...c2, lorePieces: [lore({ id: 'C1', title: 'Vex', type: 'character', content: 'v1' })] };
+  c2 = applyToolCalls(c2, [{ name: 'update_character', args: { name: 'Vex', content: 'v2' } }],
+    { nodeId: 'x', now: Date.now(), atLen: 3 }).chat;
+  ok(c2.lorePieces[0].content === 'v2' && rewindChat(c2, a1.id).lorePieces[0].content === 'v1',
+    'applied update rolls back to the pre-update card on rewind');
+}
+
+// ---- revision rewind + prune ----
+section('revision rewind + prune');
+{
+  let chat = baseChat;
+  const m1 = appendMessage(chat, 'root', 'user', 'one', null); chat = m1.chat;   // pathLen 2
+  const m2 = appendMessage(chat, m1.id, 'user', 'two', null); chat = m2.chat;    // pathLen 3
+  const piece = { ...lore({ id: 'C1', title: 'Vex', type: 'character', content: 'v3', keys: ['k3'] }),
+    revisions: [
+      { content: 'v1', keys: ['k1'], atLen: null, createdAt: null, createdBy: null },
+      { content: 'v2', keys: ['k2'], atLen: 2, createdAt: 100, createdBy: 'N1' },
+      { content: 'v3', keys: ['k3'], atLen: 3, createdAt: 200, createdBy: 'N2' },
+    ] };
+  const withPiece = { ...chat, lorePieces: [piece] };
+  ok(rewindChat(withPiece, m2.id).lorePieces[0].revisions.length === 3,
+    'rewind to the tip keeps all revisions');
+  const rwMid = rewindChat(withPiece, m1.id);
+  ok(rwMid.lorePieces[0].content === 'v2' && rwMid.lorePieces[0].keys.join() === 'k2'
+    && rwMid.lorePieces[0].revisions.length === 2,
+    'rewind trims revisions past the target and restores content+keys');
+  const rwRoot = rewindChat(withPiece, 'root');
+  ok(rwRoot.lorePieces[0].content === 'v1' && rwRoot.lorePieces[0].keys.join() === 'k1'
+    && rwRoot.lorePieces[0].revisions.length === 1,
+    'rewind to root restores the null-stamped original');
+  const pruned = pruneToolPieces(withPiece, 'N2');
+  ok(pruned !== withPiece && pruned.lorePieces[0].content === 'v2'
+    && pruned.lorePieces[0].keys.join() === 'k2' && pruned.lorePieces[0].revisions.length === 2,
+    'prune strips revisions createdBy the node and restores content');
+  ok(pruneToolPieces(withPiece, 'NOPE') === withPiece,
+    'prune no-op (identity) when no piece or revision matches');
+  const dropped = pruneToolPieces({ ...baseChat, lorePieces: [{ ...piece, createdBy: 'N2' }] }, 'N2');
+  ok(dropped.lorePieces.length === 0, 'piece created by the node still dropped whole');
+}
+
+// ---- revisions import healing ----
+section('revisions import healing');
+{
+  const healed = normalizeLorePiece({ title: 'T',
+    revisions: [{ content: 42, keys: 'x', atLen: '2', createdAt: 5, createdBy: 7 }, 'junk'] });
+  ok(healed.revisions.length === 2 && healed.revisions[0].content === '42'
+    && healed.revisions[0].atLen === null && healed.revisions[0].createdAt === 5
+    && healed.revisions[0].createdBy === '7' && healed.revisions[0].keys.join() === ''
+    && healed.revisions[1].content === '' && healed.revisions[1].createdBy === null,
+    'malformed revisions healed to shape');
+  ok(normalizeLorePiece({ title: 'T' }).revisions === undefined,
+    'absent revisions stay absent');
+}
+
 // ---- memory render order ----
 section('memory render order');
 {

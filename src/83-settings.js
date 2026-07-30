@@ -6,6 +6,9 @@ const DEFAULT_PLATFORM_PROMPT =
   'engaging prose, and respect the scenario, world info, and memories provided. Never break ' +
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
+  'Characters know only what they have witnessed or learned within the story: a ' +
+  'character absent from a scene does not know what happened there — never let one ' +
+  'act on, reference, or reveal knowledge they could not plausibly have. ' +
   PROSE_FORMAT_RULES;
 
 const DEFAULT_SETTINGS = {

@@ -14,7 +14,7 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
       ${chat && tab === 'inspector' && html`
-        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} />`}
+        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} loreQueue=${chat.loreQueue} />`}
       ${chat && tab === 'samplers' && html`
         <${ChatSamplers} chat=${chat} settings=${settings} onUpdateChat=${onUpdateChat} onUpdateSettings=${onUpdateSettings} />`}
       ${chat && tab === 'memory' && html`

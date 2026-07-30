@@ -194,6 +194,21 @@ function deleteSubtree(messages, nodeId) {
   return copy;
 }
 
+// Trim a piece's update_character revision log with the same cutoff rule as
+// rewind (`keep`) and restore content/keys to the last surviving revision.
+// Identity return when the piece has no revisions or none are trimmed.
+function rollbackRevisions(piece, keep) {
+  const revs = piece?.revisions;
+  if (!Array.isArray(revs) || !revs.length) return piece;
+  const kept = revs.filter(keep);
+  if (kept.length === revs.length) return piece;
+  // All revisions rolled back — only possible with hostile/imported data
+  // (rev 0 of a tool-updated piece is null-stamped and always survives);
+  // fall back to the earliest known version rather than leaving stale content.
+  const restore = kept[kept.length - 1] ?? revs[0];
+  return { ...piece, revisions: kept, content: restore.content, keys: restore.keys ?? [] };
+}
+
 // Re-point the active leaf at nodeId (nothing is truncated — sibling branches
 // are untouched) and roll the memory store back to it. The cutoff is
 // position-based: entries stamped with `atLen` (active-path message count at
@@ -213,7 +228,7 @@ function rewindChat(chat, nodeId) {
   const keep = (e) => Number.isFinite(e?.atLen) ? e.atLen <= pathLen : (e?.createdAt ?? 0) <= cutoff;
   const memories = (chat.memoryStore?.memories ?? []).filter(keep);
   const lorePieces = Array.isArray(chat.lorePieces)
-    ? chat.lorePieces.filter(keep) : chat.lorePieces;
+    ? chat.lorePieces.filter(keep).map(p => rollbackRevisions(p, keep)) : chat.lorePieces;
   const loreQueue = Array.isArray(chat.loreQueue)
     ? chat.loreQueue.filter(keep) : chat.loreQueue;
   const next = {
@@ -734,13 +749,22 @@ function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}, allP
   return { chat: work, results };
 }
 
-// Remove tool-written pieces created by a given node (its earlier swipes).
-// SAFE only when that node has no children — the caller checks. No-op (same
-// object) when nothing matches.
+// Remove tool-written pieces created by a given node (its earlier swipes) and
+// strip update_character REVISIONS written by it (restoring content/keys to
+// the last remaining revision). SAFE only when that node has no children — the
+// caller checks. No-op (same object) when nothing matches.
 function pruneToolPieces(chat, nodeId) {
   const pieces = chat?.lorePieces;
-  if (!Array.isArray(pieces) || !pieces.some(p => p?.createdBy === nodeId)) return chat;
-  return { ...chat, lorePieces: pieces.filter(p => p?.createdBy !== nodeId) };
+  if (!Array.isArray(pieces)) return chat;
+  const mine = (e) => e?.createdBy === nodeId;
+  if (!pieces.some(p => mine(p) || (Array.isArray(p?.revisions) && p.revisions.some(mine))))
+    return chat;
+  return { ...chat, lorePieces: pieces.filter(p => !mine(p)).map(p => {
+    if (!Array.isArray(p.revisions) || !p.revisions.some(mine)) return p;
+    const revs = p.revisions.filter(r => !mine(r));
+    const restore = revs[revs.length - 1] ?? p.revisions[0];
+    return { ...p, revisions: revs, content: restore.content, keys: restore.keys ?? [] };
+  }) };
 }
 
 // ---- emergent lore review queue ---------------------------------------------
@@ -782,6 +806,23 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   };
   const save = (lorePieces, note) => ({ ok: true, note, chat: { ...chat, lorePieces } });
   const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId };
+  // Revision log for EVERY tool-driven content mutation (universal rollback
+  // rule): entry i became active at position atLen; piece.content/keys always
+  // mirror the LAST revision. The first revision is the pre-update original —
+  // null-stamped for scenario/global/hand-authored pieces, so the rewind
+  // cutoff keeps it forever and the original is never lost. rewindChat and
+  // pruneToolPieces trim the log and restore the last surviving revision.
+  const revOf = (p) => ({ content: p.content ?? '', keys: Array.isArray(p.keys) ? p.keys : [],
+    atLen: Number.isFinite(p.atLen) ? p.atLen : null,
+    createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
+    createdBy: p.createdBy ?? null });
+  // p = piece to write (already provenance-stamped for shadows); seed = the
+  // piece rev 0 is taken from when no log exists yet; keys null = keep current.
+  const withRevision = (p, seed, content, keys) => ({
+    ...p, content, ...(keys ? { keys } : {}),
+    revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
+      { content, keys: keys ?? p.keys ?? [], ...provenance }],
+  });
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
     const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
@@ -794,16 +835,41 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = haystack.find(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? { ...p, content: desc } : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, desc, null) : p),
         `updated character "${cname}"`);
     if (existing)
       // Match lives outside the chat overlay (scenario/global): shadow it via
       // the overlay instead of duplicating the name (characterNamesOf would
-      // report it twice). Fresh provenance → rewind drops the shadow again.
-      return save([...pieces, { ...existing, ...provenance, content: desc }],
+      // report it twice). Fresh provenance → rewind drops the shadow again;
+      // rev 0 is seeded from the UNPROVENANCED original.
+      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, desc, null)],
         `updated character "${cname}"`);
     return save([...pieces, { ...base, ...provenance, id: uid(), type: 'character', title: cname, content: desc, keys: [cname] }],
       `registered character "${cname}"`);
+  }
+  if (call.name === 'update_character') {
+    const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
+    const content = String(args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
+    if (!cname) return fail('update_character: name required');
+    if (!content) return fail('update_character: content required (the full updated card)');
+    const keys = Array.isArray(args.keys)
+      ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
+      : null; // omitted → keep the current keys
+    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
+    const existing = haystack.find(p => p.type === 'character'
+      && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
+    // Strict: updates never invent characters — the model must register first.
+    if (!existing)
+      return fail(`update_character: no character named "${cname}" — register it first`);
+    if (pieces.some(p => p.id === existing.id))
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
+        `updated character "${cname}"`);
+    // Match lives outside the chat overlay (scenario/global): shadow it — the
+    // original entity never mutates. rev 0 is seeded from the UNPROVENANCED
+    // original; the shadow itself carries fresh provenance, so rewind drops
+    // the whole shadow and the original resurfaces.
+    return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys)],
+      `updated character "${cname}"`);
   }
   if (call.name === 'add_lore') {
     const title = String(args.title ?? '').trim().slice(0, TOOL_NAME_MAX);
@@ -819,12 +885,12 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? { ...p, content, ...(keys.length ? { keys } : {}) } : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys.length ? keys : null) : p),
         `updated lore "${title}"`);
     if (existing)
       // Match lives outside the chat overlay: shadow it via an overlay copy
-      // (fresh provenance → rewind drops the shadow again).
-      return save([...pieces, { ...existing, ...provenance, content, ...(keys.length ? { keys } : {}) }],
+      // (fresh provenance → rewind drops the shadow again; rev 0 = original).
+      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys.length ? keys : null)],
         `updated lore "${title}"`);
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
@@ -849,6 +915,7 @@ const TOOLS_PROMPT = `You can grow the story's cast and world by emitting tool b
 \`\`\`
 Available tools:
 - register_character(name, description) — a NEW named character enters the story who may recur. description: appearance, personality, motives in a few sentences.
+- update_character(name, content, keys?) — rewrite an EXISTING character's reference card when their lasting traits, appearance, relationships, or knowledge change. content is the character's FULL updated card with the change folded in — never a fragment or a diff. Only for characters the app already knows; a newcomer is registered first. Past versions are kept and can be rolled back, so update freely when the story genuinely changes someone.
 - add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
 Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; a character you speak for with a Name: prefix must be known to the app — register a newcomer BEFORE their first prefixed line, in the same reply; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
 
@@ -972,7 +1039,14 @@ const asArr = (v) => (Array.isArray(v) ? v : []);
 function normalizeLorePiece(p) {
   const o = (p && typeof p === 'object') ? p : {};
   return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
-    keys: asArr(o.keys).map(String) };
+    keys: asArr(o.keys).map(String),
+    // update_character version log — shape-only heal; absent stays absent
+    // (undefined keys serialize away).
+    revisions: o.revisions === undefined ? undefined : asArr(o.revisions).map(r => ({
+      content: asStr(r?.content), keys: asArr(r?.keys).map(String),
+      atLen: Number.isFinite(r?.atLen) ? r.atLen : null,
+      createdAt: Number.isFinite(r?.createdAt) ? r.createdAt : null,
+      createdBy: r?.createdBy != null ? String(r.createdBy) : null })) };
 }
 function normalizeScenario(s) {
   const o = (s && typeof s === 'object') ? s : {};

@@ -1004,3 +1004,20 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Docs**
 
 - DESIGN.md parks three feature candidates from a competitor/community survey (readable Markdown chat export, in-chat search & jump, quick-reply buttons) and records display-only regex output rewriting as deliberately deferred (logprob-tape alignment contract).
+
+## v4.7 - Character evolution & revision history
+
+### v4.7.0
+
+**Added**
+
+- New `update_character(name, content, keys?)` tool: the model can rewrite a KNOWN character's card in full as the story changes them (lasting traits, appearance, relationships, knowledge). Unknown names are rejected with a note telling the model to register first; keys replace only when provided. Every update appends to the piece's new `revisions` log (position- and node-stamped; rev 0 is the pre-tool original) - scenario/global characters are shadowed into the chat overlay, so the original entity never mutates.
+- The lore piece editor popout (Chat tab) shows a "Change history" section for tool-updated pieces: every past version with its message position and timestamp, expandable to the full card text + keys of that version.
+- Pending emergent-lore proposals (the review queue) now surface in the Context Inspector as a "Suggested lore - awaiting review" section, with full content and trigger keys on expand - they were previously only findable in the Chat tab, easy to miss after an extraction pass ran.
+
+**Changed**
+
+- Universal rollback rule: EVERY model- or app-initiated content mutation of chat lore is now position-stamped and rolls back on rewind/regenerate - not just `update_character`, but also `register_character` re-registrations, `add_lore` title updates (which covers the extraction pass in auto mode), and character-enrichment rewrites, all of which previously replaced content untracked and leaked "future" text into rewound scenes. All go through the shared `revisions` log; rewind/prune trim the log and restore the last surviving version (rev 0 is null-stamped, so the pre-tool original always survives). The regenerate stash/restore detects revision-only changes (reference compare, full pre-prune snapshot) instead of only piece removals. Direct user edits via the editors stay rewind-exempt by design, like `chat.vars` and the author's note.
+- The default platform prompt now bounds character knowledge: characters know only what they have witnessed or learned within the story - a character absent from a scene does not know what happened there and must not act on, reference, or reveal knowledge they could not plausibly have (multi-character scenes made "omniscient cast" drift common). Existing installs keep their saved `platformPrompt` - the new wording can be copied in via Settings > Prompts.
+- Queued lore proposals in the Chat tab show their full content (plus trigger keys) instead of a truncated 160-char preview - approval decisions no longer require guessing at hidden text.
+- The default tool prompt (`TOOLS_PROMPT`) documents `update_character`. Existing installs keep their saved `toolsPrompt` - the new tool line can be copied in via Settings > Prompts.

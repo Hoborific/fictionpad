@@ -45,7 +45,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
                 <button class="btn small" onClick=${() => update(acceptQueuedLore(chat, q.id))}>accept</button>
                 <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
-              <div class="hint" style=${{ padding: '2px 8px 6px' }}>${toPreview(q.content, 160)}</div>
+              <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>
+              ${(q.keys ?? []).length > 0 && html`
+                <div class="hint" style=${{ padding: '0 8px 6px' }}>keys: ${q.keys.join(', ')}</div>`}
             </div>`)}
         </div>`}
       <div class="field">
