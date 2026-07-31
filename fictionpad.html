@@ -445,7 +445,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pill.semantic { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.triggered { border-color: var(--c-accent); color: var(--c-accent); }
 .pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
-.pill.chat { border-color: var(--c-good); color: var(--c-good); }
+.pill.ok { border-color: var(--c-good); color: var(--c-good); }
+/* Origin pill: neutral but VISIBLE — --c-border (13% hairline) reads as no
+   outline at all; --c-dim tracks every theme (derived from --c-text/--c-bg-0). */
+.pill.chat { border-color: var(--c-dim); color: var(--c-dim); }
 .pill.character { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.pov { border-color: var(--c-warning); color: var(--c-warning); }
 /* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative).
@@ -725,7 +728,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.7.0';
+const APP_VERSION = '4.7.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -4286,7 +4289,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
     <${InspectorSection} title="Aux calls" count=${auxLog.length}>
       ${[...auxLog].reverse().map((a, i) => html`
         <${InspectorRow} key=${`${a.at}-${i}`} dimmed=${!a.ok}
-          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'chat' : 'pinned' }]}
+          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'ok' : 'pinned' }]}
           title=${a.kind} meta=${`${new Date(a.at).toLocaleTimeString()} · ~${estimateTokens(`${a.system}\n${a.user}`)}t in`}
           preview=${toPreview(a.out, 140)}
           content=${`[system]\n${a.system}\n\n[user]\n${a.user}\n\n[${a.ok ? 'response' : 'error'}]\n${a.out}`} />`)}
@@ -4409,7 +4412,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
           ${manifest.toolCalls.map((t, i) => html`
             <${InspectorRow} key=${i} dimmed=${!t.ok}
-              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'chat' : 'pinned' }]}
+              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'ok' : 'pinned' }]}
               title=${t.name || '(unparsed)'} meta=${t.note}
               preview=${t.args} content=${t.args} />`)}
         <//>`}

@@ -426,7 +426,10 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pill.semantic { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.triggered { border-color: var(--c-accent); color: var(--c-accent); }
 .pill.link-boosted { border-color: var(--c-user); color: var(--c-user); }
-.pill.chat { border-color: var(--c-good); color: var(--c-good); }
+.pill.ok { border-color: var(--c-good); color: var(--c-good); }
+/* Origin pill: neutral but VISIBLE — --c-border (13% hairline) reads as no
+   outline at all; --c-dim tracks every theme (derived from --c-text/--c-bg-0). */
+.pill.chat { border-color: var(--c-dim); color: var(--c-dim); }
 .pill.character { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.pov { border-color: var(--c-warning); color: var(--c-warning); }
 /* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative).

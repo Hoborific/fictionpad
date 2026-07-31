@@ -1021,3 +1021,9 @@ Note: this only changes the default prompt text; existing chats with a customize
 - The default platform prompt now bounds character knowledge: characters know only what they have witnessed or learned within the story - a character absent from a scene does not know what happened there and must not act on, reference, or reveal knowledge they could not plausibly have (multi-character scenes made "omniscient cast" drift common). Existing installs keep their saved `platformPrompt` - the new wording can be copied in via Settings > Prompts.
 - Queued lore proposals in the Chat tab show their full content (plus trigger keys) instead of a truncated 160-char preview - approval decisions no longer require guessing at hidden text.
 - The default tool prompt (`TOOLS_PROMPT`) documents `update_character`. Existing installs keep their saved `toolsPrompt` - the new tool line can be copied in via Settings > Prompts.
+
+### v4.7.1
+
+**Fixed**
+
+- The "chat" origin pill on lore pieces no longer renders green across themes - `--c-good` is a success semantic, borrowed for two different meanings. The green lives on a dedicated `.pill.ok` class used only by the aux-log/tool-call success status, and the origin pill gets a visible neutral outline (`--c-dim` - the base pill's `--c-border` hairline is 13% contrast and read as no outline at all).

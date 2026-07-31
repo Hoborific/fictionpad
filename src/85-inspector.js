@@ -62,7 +62,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
     <${InspectorSection} title="Aux calls" count=${auxLog.length}>
       ${[...auxLog].reverse().map((a, i) => html`
         <${InspectorRow} key=${`${a.at}-${i}`} dimmed=${!a.ok}
-          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'chat' : 'pinned' }]}
+          pills=${[{ text: a.ok ? 'ok' : 'failed', cls: a.ok ? 'ok' : 'pinned' }]}
           title=${a.kind} meta=${`${new Date(a.at).toLocaleTimeString()} · ~${estimateTokens(`${a.system}\n${a.user}`)}t in`}
           preview=${toPreview(a.out, 140)}
           content=${`[system]\n${a.system}\n\n[user]\n${a.user}\n\n[${a.ok ? 'response' : 'error'}]\n${a.out}`} />`)}
@@ -185,7 +185,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         <${InspectorSection} title="Tool calls" count=${manifest.toolCalls.length}>
           ${manifest.toolCalls.map((t, i) => html`
             <${InspectorRow} key=${i} dimmed=${!t.ok}
-              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'chat' : 'pinned' }]}
+              pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'ok' : 'pinned' }]}
               title=${t.name || '(unparsed)'} meta=${t.note}
               preview=${t.args} content=${t.args} />`)}
         <//>`}
