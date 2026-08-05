@@ -7,6 +7,7 @@ const DEFAULT_SEARCH_DEPTH = 2048; // estimated tokens scanned for lore keys
 const LINK_BOOST = 2; // effective-weight bonus from one active linking piece
 const MEMORY_CAP = 100;
 const MEMORY_EVERY = 30; // messages on active path between auto-summaries
+const MEM_RECENT_KEEP = 3; // newest unpinned memories always injected in smart-recall mode
 const LAYER_CAPS = { static: 0.30, lore: 0.20, memory: 0.10 }; // history = rest
 // Length presets are prose guidance ONLY — they never cap tokens. The
 // directive joins the prompt tail; the response reserve is a separate knob.
@@ -272,14 +273,87 @@ function keyMatches(key, text, { wholeWord = false, caseSensitive = false } = {}
   try { return new RegExp(pattern, (caseSensitive ? '' : 'i') + (wholeWord ? 'u' : '')).test(text); } catch { return false; }
 }
 
+// ---- timed activation (sticky / cooldown / delay / probability) ----------
+// Optional per-piece fields, measured in ACTIVE-PATH MESSAGES:
+//   sticky:   stay active this many messages after the key last matched
+//   cooldown: after going inactive (post-sticky), can't re-activate for this
+//             many messages
+//   delay:    can't activate before this path position (1-based)
+//   prob:     percent chance a keyword activation fires (default 100)
+// Activation state is recomputed from the message path on every scan —
+// derived, never stored — so rewind/regenerate/branch can't leave stale
+// activation behind (universal rollback rule). A key "matches at position p"
+// when it matches any single message inside the piece's scan window ending at
+// p: per-message matching (a key spanning a message boundary isn't seen — the
+// untimed path scans the joined window text). Pieces with no timed fields
+// scan exactly as before, as do text-only scans (no `messages` given).
+const timedFieldsOf = (p) => {
+  const n = (v) => Math.max(0, Math.round(Number(v) || 0));
+  return { sticky: n(p?.sticky), cooldown: n(p?.cooldown), delay: n(p?.delay) };
+};
+const hasTimedFields = (p) => {
+  const t = timedFieldsOf(p);
+  return t.sticky > 0 || t.cooldown > 0 || t.delay > 0;
+};
+// Probability trigger: `prob` is a percent chance (default 100 = always).
+// Applies to keyword-path activations only — pinned, semantic, /pov and
+// link-boosted activations always fire. One roll per scan; rng injectable.
+const probabilityRoll = (piece, rand) => {
+  const prob = Number(piece?.prob);
+  if (!Number.isFinite(prob) || prob >= 100) return true;
+  if (prob <= 0) return false;
+  return rand() * 100 < prob;
+};
+// Simulate a timed piece over the message path. Returns
+// { active, matchNow, blocked: 'cooldown'|'delayed'|null } for the final
+// position (blocked is set only when the CURRENT position matches but is held
+// back — the "why didn't this trigger?" answer).
+function timedActivation(piece, messages, depthChars) {
+  const { sticky, cooldown, delay } = timedFieldsOf(piece);
+  const msgs = (Array.isArray(messages) ? messages : []).map(m => String(m ?? ''));
+  const L = msgs.length;
+  const ends = new Array(L); // joined-text offset at the end of message i
+  let accLen = 0;
+  for (let i = 0; i < L; i++) { accLen += msgs[i].length + (i ? 1 : 0); ends[i] = accLen; }
+  const opts = { wholeWord: !!piece.wholeWord, caseSensitive: !!piece.caseSensitive };
+  const keys = Array.isArray(piece.keys) ? piece.keys : [];
+  const hit = msgs.map(t => keys.some(k => keyMatches(k, t, opts)));
+  let active = false, lastMatch = 0, lastActive = 0, blocked = null;
+  let wStart = 0, inWin = 0; // sliding key-hit count over the char window
+  let matchNow = false;
+  for (let p = 1; p <= L; p++) {
+    if (hit[p - 1]) inWin++;
+    const limit = ends[p - 1] - depthChars;
+    while (wStart < p - 1 && ends[wStart] <= limit) { if (hit[wStart]) inWin--; wStart++; }
+    const match = inWin > 0;
+    matchNow = match;
+    if (active) {
+      if (match) lastMatch = p;
+      else if (p - lastMatch > sticky) { active = false; lastActive = p - 1; }
+    } else if (match) {
+      if (p < delay) blocked = 'delayed';
+      else if (lastActive && p - lastActive <= cooldown) blocked = 'cooldown';
+      else { active = true; lastMatch = p; blocked = null; }
+    }
+  }
+  return { active, matchNow, blocked: (active || !matchNow) ? null : blocked };
+}
+
 // Determine which pieces are active this turn.
-// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'semantic'|'pov'|'link-boosted', boost }).
+// Returns Map(id → { piece, reason: 'pinned'|'triggered'|'sticky'|'semantic'|'pov'|'link-boosted', boost })
+// with a `.detail` property attached: Map(id → 'cooldown'|'delayed'|'probability'|'group')
+// for pieces a naive scan would call active — Inspector observability for
+// suppressed pieces. The plain Map shape is stable for old callers.
 // opts: user-tunable lore defaults (Settings → Generation) — per-piece
-// searchDepth still wins over the global default.
+// searchDepth still wins over the global default. opts.messages: the active
+// path's per-message texts (oldest→newest) for timed activation; opts.rng:
+// probability-roll source (tests inject determinism, prod uses Math.random).
 function scanLore(lorePieces, conversationText, preActivated = null,
-                  { searchDepth = DEFAULT_SEARCH_DEPTH, linkBoost = LINK_BOOST, chars = TOKEN_CHARS } = {}) {
+                  { searchDepth = DEFAULT_SEARCH_DEPTH, linkBoost = LINK_BOOST, chars = TOKEN_CHARS, messages = null, rng = null } = {}) {
   const pieces = Array.isArray(lorePieces) ? lorePieces : [];
   const active = new Map();
+  const detail = new Map();
+  const rand = typeof rng === 'function' ? rng : Math.random;
   for (const piece of pieces) {
     if (!piece || piece.enabled === false) continue;
     if (piece.pinned) { active.set(piece.id, { piece, reason: 'pinned', boost: 0 }); continue; }
@@ -288,10 +362,41 @@ function scanLore(lorePieces, conversationText, preActivated = null,
       active.set(piece.id, { piece, reason, boost: 0 }); continue;
     }
     const depth = Number(piece.searchDepth) > 0 ? Number(piece.searchDepth) : searchDepth;
+    // Timed pieces derive from the per-message path (see timedActivation).
+    if (Array.isArray(messages) && messages.length && hasTimedFields(piece)) {
+      const t = timedActivation(piece, messages, Math.round(depth * chars));
+      if (t.active) {
+        if (probabilityRoll(piece, rand))
+          active.set(piece.id, { piece, reason: t.matchNow ? 'triggered' : 'sticky', boost: 0 });
+        else detail.set(piece.id, 'probability');
+      } else if (t.blocked) detail.set(piece.id, t.blocked);
+      continue;
+    }
     const scanText = conversationText.slice(-Math.round(depth * chars));
     const opts = { wholeWord: !!piece.wholeWord, caseSensitive: !!piece.caseSensitive };
-    if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText, opts)))
-      active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
+    if ((Array.isArray(piece.keys) ? piece.keys : []).some(k => keyMatches(k, scanText, opts))) {
+      if (probabilityRoll(piece, rand)) active.set(piece.id, { piece, reason: 'triggered', boost: 0 });
+      else detail.set(piece.id, 'probability');
+    }
+  }
+  // Inclusion groups: pieces sharing a non-empty `group` name are mutually
+  // exclusive — the highest weight wins (ties: list order), losers are
+  // reported as group-suppressed. Pinned pieces bypass groups entirely;
+  // link-boosted additions below skip the check (a winner pulled them in).
+  const best = new Map(); // group → { id, weight }
+  for (const [id, a] of active) {
+    const g = String(a.piece.group ?? '').trim();
+    if (!g || a.piece.pinned) continue;
+    const w = Number(a.piece.weight) || 0;
+    const cur = best.get(g);
+    if (!cur || w > cur.weight) best.set(g, { id, weight: w });
+  }
+  const winners = new Set([...best.values()].map(b => b.id));
+  for (const [id, a] of active) {
+    const g = String(a.piece.group ?? '').trim();
+    if (!g || a.piece.pinned || winners.has(id)) continue;
+    active.delete(id);
+    detail.set(id, 'group');
   }
   // One hop of link boosting: an active piece lends weight to its linked pieces.
   for (const { piece } of [...active.values()]) {
@@ -303,6 +408,7 @@ function scanLore(lorePieces, conversationText, preActivated = null,
       else active.set(linkId, { piece: target, reason: 'link-boosted', boost: linkBoost });
     }
   }
+  active.detail = detail;
   return active;
 }
 
@@ -409,7 +515,10 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
-function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null }) {
+// memScores (optional): Map(memoryId → cosine score) from the embeddings
+// pass — turns on smart memory recall (similarity-ranked injection) instead
+// of plain recency; null keeps the classic pinned-then-recent fill.
+function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt = '', preActivated = null, pov = null, characters = null, memScores = null }) {
   const personaName = persona?.name?.trim() || 'User';
   const reserve = Number(settings.maxTokens) || DEFAULT_MAX_TOKENS;
   const contextLength = Number(settings.contextLength) || DEFAULT_CONTEXT_LENGTH;
@@ -427,7 +536,6 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     linkBoost: settings.loreLinkBoost ?? LINK_BOOST,
     chars,
   };
-
   // 1. static layer: platform prompt + scenario instructions + backstory +
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
@@ -501,6 +609,8 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const greetingTokens = greetingNode ? est(histText(greetingNode)) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
   const conversationText = path.map(activeText).join('\n');
+  // Timed activation (sticky/cooldown/delay) derives from the per-message path.
+  loreOpts.messages = path.map(activeText);
 
   // 3. lore layer (scenario pieces + linked global characters + per-chat
   //    overlay, chat wins on id) — list merged above the static layer.
@@ -539,7 +649,9 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     if (!p || p.enabled === false || selectedIds.has(p.id)) continue;
     inactive.push({
       id: p.id, title: p.title ?? '',
-      reason: loreScanned.has(p.id) ? 'over-budget' : 'not-triggered',
+      // Timed/probability/group suppressions outrank the generic reasons —
+      // they answer "it matched, why isn't it in?".
+      reason: loreScanned.detail?.get(p.id) ?? (loreScanned.has(p.id) ? 'over-budget' : 'not-triggered'),
       origin: originOf(p),
       tokens: est(`[${p.title ?? ''}]\n${sub(p.content ?? '')}`),
       preview: toPreview(p.content), content: p.content ?? '',
@@ -555,16 +667,31 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   };
 
   // 4. memory layer: pinned first (oldest→newest), then recent unpinned.
-  //    That ordering is only the budget-fill PRIORITY; the selected memories
-  //    are rendered chronologically (createdAt asc) so the model reads the
-  //    memory block forwards in time. Per-memory cost counts the `- ` prefix
-  //    exactly as rendered.
+  //    Smart recall (memScores from the embeddings pass): the newest
+  //    MEM_RECENT_KEEP unpinned memories always inject (recency floor), the
+  //    rest are ranked by similarity and must clear the semantic threshold —
+  //    old but relevant memories beat merely recent ones. Fill order is only
+  //    the budget PRIORITY; the selected memories are rendered chronologically
+  //    (createdAt asc) so the model reads the memory block forwards in time.
+  //    Per-memory cost counts the `- ` prefix exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
   const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
-  const memOrdered = [
-    ...memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt),
-    ...memAll.filter(m => !m.pinned).sort((a, b) => b.createdAt - a.createdAt),
-  ];
+  const smart = memScores instanceof Map;
+  const memThreshold = typeof settings.semanticThreshold === 'number' ? settings.semanticThreshold : 0.55;
+  const memPinnedList = memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt);
+  const memUnpinned = memAll.filter(m => !m.pinned).sort((a, b) => b.createdAt - a.createdAt);
+  let memOrdered, memReason;
+  const recentKeep = new Set(smart ? memUnpinned.slice(0, MEM_RECENT_KEEP).map(m => m.id) : []);
+  if (smart) {
+    const scored = memUnpinned
+      .filter(m => !recentKeep.has(m.id) && (memScores.get(m.id) ?? 0) >= memThreshold)
+      .sort((a, b) => (memScores.get(b.id) ?? 0) - (memScores.get(a.id) ?? 0));
+    memOrdered = [...memPinnedList, ...memUnpinned.filter(m => recentKeep.has(m.id)), ...scored];
+    memReason = (m) => m.pinned ? 'pinned' : recentKeep.has(m.id) ? 'recent' : 'semantic';
+  } else {
+    memOrdered = [...memPinnedList, ...memUnpinned];
+    memReason = (m) => m.pinned ? 'pinned' : 'recent';
+  }
   const memSel = [];
   let memUsed = 0;
   for (const m of memOrdered) {
@@ -573,12 +700,22 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     memSel.push(m);
     memUsed += cost;
   }
+  const memSelIds = new Set(memSel.map(m => m.id));
   const memRender = [...memSel].sort((a, b) => a.createdAt - b.createdAt);
   const memText = memRender.length ? `[Memories]\n${memRender.map(m => `- ${m.text}`).join('\n')}` : '';
   const memTokens = memText ? est(memText) : 0;
   manifest.layers.memory = {
-    tokens: memTokens, cap: memCap,
-    memories: memRender.map(m => ({ id: m.id, pinned: !!m.pinned, tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
+    tokens: memTokens, cap: memCap, recall: smart ? 'smart' : 'recent',
+    memories: memRender.map(m => ({ id: m.id, pinned: !!m.pinned, reason: memReason(m),
+      ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
+      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
+    // Excluded memories, same observability contract as the lore layer.
+    inactive: memAll.filter(m => !memSelIds.has(m.id)).map(m => ({
+      id: m.id, pinned: !!m.pinned,
+      reason: (smart && !m.pinned && !recentKeep.has(m.id) && (memScores.get(m.id) ?? 0) < memThreshold)
+        ? 'below-threshold' : 'over-budget',
+      ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
+      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
   };
 
   // 5. history fills the remainder; oldest messages dropped first.
@@ -594,7 +731,10 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   }
   const dropped = historyNodes.length - kept.length;
   if (dropped > 0) manifest.warnings.push(`${dropped} oldest message(s) dropped to fit the context window.`);
-  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped };
+  // keptIds drives the chat log's context-horizon marker (which messages the
+  // last generation actually saw); the exact-count guard in runGeneration
+  // shifts it when it drops more.
+  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, keptIds: kept.map(n => n.id) };
 
   // 6. chat-completions message array
   const messages = [{ role: 'system', content: staticText }];
@@ -1019,6 +1159,7 @@ const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{us
 const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. Past events only; no speculation; no lists; no formatting.';
 const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
+const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
 const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
 // Generator prompts (✦ Generate in the scenario/character editors) take no
 // runtime placeholders — {{user}} stays literal so the generated text keeps
@@ -1038,8 +1179,14 @@ const asStr = (v) => (v == null ? '' : String(v));
 const asArr = (v) => (Array.isArray(v) ? v : []);
 function normalizeLorePiece(p) {
   const o = (p && typeof p === 'object') ? p : {};
+  // Timed-activation fields: positive ints or absent (0 = off = absent);
+  // prob is a 0–100 percent (0 = never fires — a real value, not "off").
+  const posInt = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : undefined);
+  const pct = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Number(v))) : undefined);
   return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
     keys: asArr(o.keys).map(String),
+    sticky: posInt(o.sticky), cooldown: posInt(o.cooldown), delay: posInt(o.delay),
+    prob: pct(o.prob), group: asStr(o.group).trim() || undefined,
     // update_character version log — shape-only heal; absent stays absent
     // (undefined keys serialize away).
     revisions: o.revisions === undefined ? undefined : asArr(o.revisions).map(r => ({

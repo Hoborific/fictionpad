@@ -3,6 +3,7 @@ const COMPOSER_COMMANDS = [
   ['/continue', 'continue the last reply'],
   ['/pov', 'reply from another character’s view'],
   ['/improve', 'rewrite your draft in persona voice'],
+  ['/impersonate', 'draft your next message as you'],
   ['/recap N', 'summarize the last N messages'],
   ['/memory N', 'save a memory from the last N messages'],
   ['/model NAME', 'set this chat’s model'],

@@ -55,6 +55,7 @@ function LayerCard({ name, tokens, cap, note, about }) {
 
 function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [] }) {
   const [showInactive, setShowInactive] = useState(false);
+  const [showInactiveMem, setShowInactiveMem] = useState(false);
   // Aux calls (memory summaries, lore extraction, suggestions, /improve,
   // /recap) are separate requests that never enter the main context, so the
   // manifest can't show them. Session log (last 12), newest first.
@@ -133,8 +134,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         <${LayerCard} name="Memory"
           tokens=${tok(L.memory.tokens, realCounts?.memory)} cap=${L.memory.cap}
           note=${L.memory.memories.length
-            ? `${L.memory.memories.length} injected · ${memPinned} pinned` : 'no memories yet'}
-          about="Pinned memories first, then recent ones, trimmed to budget; new summaries are written as the chat grows." />
+            ? `${L.memory.memories.length} injected · ${memPinned} pinned${L.memory.recall === 'smart' ? ' · smart recall' : ''}` : 'no memories yet'}
+          about="Pinned memories first, then recent ones, trimmed to budget; new summaries are written as the chat grows. With smart recall (Settings → Generation), older memories ranked by similarity to the recent conversation are injected too." />
         <${LayerCard} name="History"
           tokens=${histTok} cap=${histCap}
           note=${hasGreeting ? `greeting + ${keptNote}` : keptNote}
@@ -176,9 +177,20 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         ${L.memory.memories.length === 0 && html`<div class="hint">No memories injected.</div>`}
         ${L.memory.memories.map((m, i) => html`
           <${InspectorRow} key=${m.id ?? i}
-            pills=${m.pinned ? [{ text: 'pinned', cls: 'pinned' }] : []}
+            pills=${[...(m.pinned ? [{ text: 'pinned', cls: 'pinned' }] : [{ text: m.reason ?? 'recent', cls: m.reason === 'semantic' ? 'semantic' : '' }]),
+              ...(m.score != null && (m.reason === 'semantic') ? [{ text: `sim ${m.score.toFixed(2)}`, cls: 'semantic' }] : [])]}
             title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
             preview=${m.preview} content=${m.text} />`)}
+        ${(L.memory.inactive ?? []).length > 0 && html`
+          <div class="hint ir-toggle" onClick=${() => setShowInactiveMem(!showInactiveMem)}>
+            Not injected (${L.memory.inactive.length}) ${showInactiveMem ? '▾' : '▸'}
+          </div>
+          ${showInactiveMem && L.memory.inactive.map((m, i) => html`
+            <${InspectorRow} key=${m.id ?? i} dimmed
+              pills=${[{ text: m.reason, cls: m.reason === 'below-threshold' ? '' : 'pinned' },
+                ...(m.score != null && m.reason === 'below-threshold' ? [{ text: `sim ${m.score.toFixed(2)}`, cls: '' }] : [])]}
+              title=${`memory ${String(m.id ?? '').slice(-6)}`} meta=${`${m.tokens}t`}
+              preview=${m.preview} content=${m.text} />`)}`}
       <//>
       ${auxSection}
       ${(manifest.toolCalls ?? []).length > 0 && html`

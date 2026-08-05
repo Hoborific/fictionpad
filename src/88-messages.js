@@ -55,7 +55,7 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken }) {
+function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -198,6 +198,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
                   ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
                 </span>`)}
             </span>`}`}
+        ${memCount > 0 && html`
+          <button class="pill memory" title=${`${memCount} ${memCount === 1 ? 'memory' : 'memories'} recorded at this point in the chat — open the Memory tab`}
+            onClick=${() => onOpenMemory?.()}>▤ ${memCount}</button>`}
         ${hasMetaDetails && html`
           <button class="btn small ghost meta-toggle" title="Message info"
             onClick=${() => setMetaOpen(!metaOpen)}>${metaOpen ? '⌄' : '›'}</button>`}

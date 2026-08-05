@@ -1460,5 +1460,160 @@ section('character card import');
   ok(extractPngCardJson(new Uint8Array([1, 2, 3, 4])) === null, 'non-PNG bytes → null');
 }
 
+// ---- timed lore activation (sticky / cooldown / delay / probability) ----
+section('timed lore activation');
+{
+  // Path fixture: key "dragon" hits message 0 and message 5 (chars:1 →
+  // per-piece searchDepth IS the window size in chars).
+  const msgs4 = ['dragon one', 'calm aa', 'calm bb', 'calm cc', 'calm dd', 'dragon two'];
+  const conv4 = msgs4.join('\n');
+  // Plain pieces ignore the messages option entirely (unchanged behavior).
+  const plain = scanLore([lore({ id: 'T', keys: ['dragon'], searchDepth: 12 })], conv4, null, { messages: msgs4, chars: 1 });
+  ok(plain.has('T') && plain.get('T').reason === 'triggered', 'untimed piece scans the window as before');
+
+  // sticky: key left the window, piece held alive
+  const holdMsgs = ['dragon one', 'calm aa', 'calm bb', 'calm cc'];
+  const hold = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 3, searchDepth: 12 })], holdMsgs.join('\n'), null, { messages: holdMsgs, chars: 1 });
+  ok(hold.has('T') && hold.get('T').reason === 'sticky', 'sticky holds the piece after the key leaves the window');
+  const noHold = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 1, searchDepth: 12 })], holdMsgs.join('\n'), null, { messages: holdMsgs, chars: 1 });
+  ok(!noHold.has('T'), 'sticky lapsed → piece inactive');
+
+  // cooldown: lapsed, then a fresh match inside the cooldown is blocked
+  const cd = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 1, cooldown: 3, searchDepth: 12 })], conv4, null, { messages: msgs4, chars: 1 });
+  ok(!cd.has('T') && cd.detail.get('T') === 'cooldown', 're-match inside cooldown blocked + reported');
+  const cdOk = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 1, cooldown: 2, searchDepth: 12 })], conv4, null, { messages: msgs4, chars: 1 });
+  ok(cdOk.has('T') && cdOk.get('T').reason === 'triggered', 're-match after cooldown re-activates');
+
+  // delay: can't activate before the position
+  const dl = scanLore([lore({ id: 'T', keys: ['dragon'], delay: 7 })], conv4, null, { messages: msgs4, chars: 1 });
+  ok(!dl.has('T') && dl.detail.get('T') === 'delayed', 'before the delay position → blocked + reported');
+  const dlOk = scanLore([lore({ id: 'T', keys: ['dragon'], delay: 4 })], conv4, null, { messages: msgs4, chars: 1 });
+  ok(dlOk.has('T'), 'delay reached → activates');
+
+  // probability: injected rng decides
+  const p0 = scanLore([lore({ id: 'T', keys: ['dragon'], prob: 50 })], conv4, null, { rng: () => 0.99 });
+  ok(!p0.has('T') && p0.detail.get('T') === 'probability', 'probability roll-out suppresses + reports');
+  const p1 = scanLore([lore({ id: 'T', keys: ['dragon'], prob: 50 })], conv4, null, { rng: () => 0.01 });
+  ok(p1.has('T'), 'probability roll-in activates');
+  const p100 = scanLore([lore({ id: 'T', keys: ['dragon'], prob: 0 })], conv4, null, {});
+  ok(!p100.has('T'), 'prob 0 never fires');
+
+  // pinned + semantic activations bypass probability and timed fields
+  const pinnedProb = scanLore([lore({ id: 'T', keys: ['dragon'], pinned: true, prob: 0 })], conv4, null, {});
+  ok(pinnedProb.has('T'), 'pinned bypasses probability');
+  const semTimed = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 5, prob: 0 })], 'no key here', new Set(['T']), { messages: ['no key here'] });
+  ok(semTimed.has('T') && semTimed.get('T').reason === 'semantic', 'semantic activation bypasses timed fields + probability');
+
+  // text-only scan (no messages): timed fields no-op, plain window scan
+  const textOnly = scanLore([lore({ id: 'T', keys: ['dragon'], sticky: 9, cooldown: 9, delay: 99 })], conv4);
+  ok(textOnly.has('T') && textOnly.get('T').reason === 'triggered', 'timed fields ignored without a message path');
+}
+
+// ---- inclusion groups ----
+section('inclusion groups');
+{
+  const conv = 'dragon here';
+  const both = scanLore([
+    lore({ id: 'low', keys: ['dragon'], group: 'event', weight: 1 }),
+    lore({ id: 'high', keys: ['dragon'], group: 'event', weight: 9 }),
+    lore({ id: 'free', keys: ['dragon'] }),
+  ], conv);
+  ok(both.has('high') && !both.has('low') && both.detail.get('low') === 'group',
+    'group: highest weight wins, loser reported');
+  ok(both.has('free'), 'ungrouped piece unaffected');
+  const tie = scanLore([
+    lore({ id: 'first', keys: ['dragon'], group: 'event', weight: 5 }),
+    lore({ id: 'second', keys: ['dragon'], group: 'event', weight: 5 }),
+  ], conv);
+  ok(tie.has('first') && !tie.has('second'), 'group tie keeps list order');
+  const pin = scanLore([
+    lore({ id: 'P', keys: ['dragon'], group: 'event', pinned: true, weight: 0 }),
+    lore({ id: 'T', keys: ['dragon'], group: 'event', weight: 9 }),
+  ], conv);
+  ok(pin.has('P') && pin.has('T'), 'pinned member bypasses its group');
+  // a suppressed group loser lends no link boost
+  const noBoost = scanLore([
+    lore({ id: 'low', keys: ['dragon'], group: 'event', weight: 1, links: ['B'] }),
+    lore({ id: 'high', keys: ['dragon'], group: 'event', weight: 9 }),
+    lore({ id: 'B', keys: [] }),
+  ], conv);
+  ok(!noBoost.has('B'), 'group loser lends no link boost');
+}
+
+// ---- smart memory recall ----
+section('smart memory recall');
+{
+  const memChat = { ...baseChat, memoryStore: { memories: [
+    { id: 'm1', text: 'OLD relevant fact', pinned: false, createdAt: 1 },
+    { id: 'm2', text: 'OLD irrelevant fact', pinned: false, createdAt: 2 },
+    { id: 'm3', text: 'recent three', pinned: false, createdAt: 3 },
+    { id: 'm4', text: 'recent four', pinned: false, createdAt: 4 },
+    { id: 'm5', text: 'recent five', pinned: false, createdAt: 5 },
+  ], cursor: 0 } };
+  const scores = new Map([['m1', 0.99], ['m2', 0.30], ['m3', 0.10], ['m4', 0.20], ['m5', 0.05]]);
+  const { manifest } = assemblePrompt({
+    scenario: baseScenario, persona, chat: memChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '', memScores: scores });
+  const mem = manifest.layers.memory;
+  ok(mem.recall === 'smart', 'smart recall flagged on the layer');
+  const byId = new Map(mem.memories.map(m => [m.id, m]));
+  ok(byId.get('m1')?.reason === 'semantic' && byId.get('m1')?.score === 0.99,
+    'old high-similarity memory recalled with its score');
+  ok(['m3', 'm4', 'm5'].every(id => byId.get(id)?.reason === 'recent'),
+    'newest unpinned memories kept on the recency floor');
+  const inact = new Map((mem.inactive ?? []).map(m => [m.id, m]));
+  ok(!byId.has('m2') && inact.get('m2')?.reason === 'below-threshold' && inact.get('m2')?.score === 0.30,
+    'below-threshold memory excluded + reported with its score');
+
+  // pinned memories inject regardless of scores
+  const pinChat = { ...memChat, memoryStore: { memories: [
+    ...memChat.memoryStore.memories,
+    { id: 'mP', text: 'PINNED fact', pinned: true, createdAt: 0 },
+  ], cursor: 0 } };
+  const pinMan = assemblePrompt({
+    scenario: baseScenario, persona, chat: pinChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '', memScores: scores }).manifest;
+  ok(pinMan.layers.memory.memories.some(m => m.id === 'mP' && m.pinned && m.reason === 'pinned'),
+    'pinned memory injects in smart mode without a score');
+
+  // no scores → classic recency fill (m2 survives), no inactive list pressure
+  const classic = assemblePrompt({
+    scenario: baseScenario, persona, chat: memChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '' }).manifest;
+  ok(classic.layers.memory.recall === 'recent' && classic.layers.memory.memories.some(m => m.id === 'm2'),
+    'without scores the fill stays pinned-then-recent');
+}
+
+// ---- context horizon (history keptIds) ----
+section('context horizon keptIds');
+{
+  let chat = baseChat;
+  for (let i = 0; i < 40; i++) {
+    const r = appendMessage(chat, chat.activeLeafId, i % 2 ? 'assistant' : 'user', `message ${i} ` + 'x'.repeat(150), i);
+    chat = r.chat;
+  }
+  const { manifest } = assemblePrompt({
+    scenario: baseScenario, persona, chat,
+    settings: { contextLength: 2000, maxTokens: 400 }, platformPrompt: '' });
+  const h = manifest.layers.history;
+  ok(h.dropped > 0, 'history trimmed under budget pressure (horizon fixture)');
+  ok(Array.isArray(h.keptIds) && h.keptIds.length === h.kept, 'keptIds length matches kept count');
+  ok(h.keptIds.every(id => typeof id === 'string' && chat.messages[id]), 'keptIds are live node ids');
+  ok(h.keptIds[0] !== h.keptIds[h.keptIds.length - 1] && h.keptIds[h.keptIds.length - 1] === chat.activeLeafId,
+    'keptIds run oldest→newest down to the leaf');
+}
+
+// ---- timed/group normalization healing ----
+section('timed field import healing');
+{
+  const healed = normalizeLorePiece({ title: 'X', sticky: '3', cooldown: 0, delay: 2.7, prob: 250, group: '  event  ' });
+  ok(healed.sticky === 3 && healed.delay === 3 && healed.cooldown === undefined,
+    'timed fields coerced to positive ints (0/off → absent)');
+  ok(healed.prob === 100 && healed.group === 'event', 'prob clamped to 0–100, group trimmed');
+  const blank = normalizeLorePiece({ title: 'Y' });
+  ok(blank.sticky === undefined && blank.prob === undefined && blank.group === undefined,
+    'absent timed fields stay absent');
+}
+
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

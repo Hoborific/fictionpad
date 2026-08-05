@@ -87,6 +87,25 @@ function LorePieceFields({ piece, others, set }) {
         <label class="check"><input type="checkbox" checked=${piece.enabled !== false} onChange=${(e) => set({ enabled: e.target.checked })} /> enabled</label>
       </div>
     </div>
+    <div class="grid3">
+      <label class="field" title="Stay active this many messages after the key last matched (measured in path messages; rewind-safe)"><span>Sticky (msgs; blank = off)</span>
+        <${NumInput} value=${piece.sticky} min=${0} step=${1} fallback=${null} placeholder="off"
+          onCommit=${(n) => set({ sticky: n ?? undefined })} /></label>
+      <label class="field" title="After going inactive, the piece can't re-activate for this many messages"><span>Cooldown (msgs; blank = off)</span>
+        <${NumInput} value=${piece.cooldown} min=${0} step=${1} fallback=${null} placeholder="off"
+          onCommit=${(n) => set({ cooldown: n ?? undefined })} /></label>
+      <label class="field" title="The piece can't activate before this position in the chat (1-based message count)"><span>Delay (msgs; blank = off)</span>
+        <${NumInput} value=${piece.delay} min=${0} step=${1} fallback=${null} placeholder="off"
+          onCommit=${(n) => set({ delay: n ?? undefined })} /></label>
+    </div>
+    <div class="grid2">
+      <label class="field" title="Pieces sharing a group name are mutually exclusive — the highest weight wins (random events, fallback chains)"><span>Inclusion group (blank = none)</span>
+        <input type="text" value=${piece.group ?? ''} placeholder="e.g. random-event"
+          onInput=${(e) => set({ group: e.target.value.trim() || undefined })} /></label>
+      <label class="field" title="Percent chance a keyword activation fires each generation (pinned/semantic always fire)"><span>Probability (%; blank = 100)</span>
+        <${NumInput} value=${piece.prob} min=${0} max=${100} step=${5} fallback=${null} placeholder="100"
+          onCommit=${(n) => set({ prob: n ?? undefined })} /></label>
+    </div>
     ${others.length > 0 && html`
       <label class="field"><span>Links — these pieces get a weight boost when this piece is active</span>
         <${RailScroll} className="links-list">

@@ -711,6 +711,7 @@ function Main({ storage, storageKind, storageFailed }) {
     let preActivated = null;
     let semanticWarning = null;
     let semanticReport = null;
+    let memScores = null;
     const semThreshold = typeof st.semanticThreshold === 'number' ? st.semanticThreshold : SEMANTIC_THRESHOLD;
     // All of prep runs outside the stream's try/finally below: a throw here
     // (hostile imported data reaching mergedLorePieces/assemblePrompt) must
@@ -721,31 +722,62 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
     if (st.embeddingModel) {
       const smartPieces = mergedLorePieces(scen, chatObj, gchars).filter(p => p && p.enabled !== false && !p.pinned && p.smart);
-      const queryText = getActivePath(promptChat.messages, promptChat.activeLeafId)
-        .map(activeText).join('\n').slice(-1500);
-      if (smartPieces.length && queryText.trim()) {
-        try {
-          const [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
-          const vecs = await Promise.all(smartPieces.map(p =>
-            embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
-              text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}`, signal: abort.signal })));
-          preActivated = new Set();
-          semanticReport = { threshold: semThreshold, scores: [] };
-          for (let i = 0; i < smartPieces.length; i++) {
-            const score = cosine(queryVec, vecs[i]);
-            if (score >= semThreshold) preActivated.add(smartPieces[i].id);
-            semanticReport.scores.push({ id: smartPieces[i].id, title: smartPieces[i].title ?? '', score });
+      // Smart memory recall (settings.memoryRecall === 'smart'): unpinned
+      // memories are scored against the same recent-conversation query — the
+      // assembler then ranks the non-recent tail by similarity.
+      const recallMems = st.memoryRecall === 'smart'
+        ? (promptChat.memoryStore?.memories ?? []).filter(m => m && !m.pinned && (m.text ?? '').trim())
+        : [];
+      const queryText = (smartPieces.length || recallMems.length)
+        ? getActivePath(promptChat.messages, promptChat.activeLeafId)
+          .map(activeText).join('\n').slice(-1500)
+        : '';
+      if (queryText.trim()) {
+        // One query embedding serves both the lore and the memory pass; each
+        // pass degrades independently (keyword-only lore / recency memories).
+        let queryVec = null;
+        const queryVecOf = async () => {
+          if (!queryVec) [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
+          return queryVec;
+        };
+        if (smartPieces.length) {
+          try {
+            const qv = await queryVecOf();
+            const vecs = await Promise.all(smartPieces.map(p =>
+              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+                text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}`, signal: abort.signal })));
+            preActivated = new Set();
+            semanticReport = { threshold: semThreshold, scores: [] };
+            for (let i = 0; i < smartPieces.length; i++) {
+              const score = cosine(qv, vecs[i]);
+              if (score >= semThreshold) preActivated.add(smartPieces[i].id);
+              semanticReport.scores.push({ id: smartPieces[i].id, title: smartPieces[i].title ?? '', score });
+            }
+          } catch (e) {
+            console.warn('Semantic lore activation failed:', e);
+            semanticWarning = 'Semantic lore activation failed (embeddings); keyword-only for this generation.';
           }
-        } catch (e) {
-          console.warn('Semantic lore activation failed:', e);
-          semanticWarning = 'Semantic lore activation failed (embeddings); keyword-only for this generation.';
+        }
+        if (recallMems.length) {
+          try {
+            const qv = await queryVecOf();
+            const vecs = await Promise.all(recallMems.map(m =>
+              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+                text: m.text.slice(0, 500), signal: abort.signal })));
+            memScores = new Map();
+            for (let i = 0; i < recallMems.length; i++) memScores.set(recallMems[i].id, cosine(qv, vecs[i]));
+          } catch (e) {
+            console.warn('Semantic memory recall failed:', e);
+            semanticWarning = (semanticWarning ? semanticWarning + ' ' : '')
+              + 'Semantic memory recall failed (embeddings); recency order for this generation.';
+          }
         }
       }
     }
     ({ messages, manifest: man } = assemblePrompt({
       scenario: scen, persona: pers, chat: promptChat, settings: st,
       platformPrompt: buildPlatformPrompt(st),
-      preActivated, pov, characters: gchars,
+      preActivated, pov, characters: gchars, memScores,
     }));
     if (semanticWarning) man.warnings.push(semanticWarning);
     if (semanticReport) man.semantic = semanticReport;
@@ -776,6 +808,7 @@ function Main({ storage, storageKind, storageFailed }) {
           messages = [...head, ...hist];
           man.layers.history.kept -= extraDrops;
           man.layers.history.dropped += extraDrops;
+          man.layers.history.keptIds = (man.layers.history.keptIds ?? []).slice(extraDrops);
           man.layers.history.tokens = estHist;
           man.totalTokens = messages.reduce((t, m) => t + estT(m.content), 0);
           man.warnings.push(`Exact token count left less room than the estimate — dropped ${extraDrops} more oldest message(s).`);
@@ -1185,6 +1218,7 @@ function Main({ storage, storageKind, storageFailed }) {
         improveDraft(c, arg);
         return null;
       }
+      if (cmd === '/impersonate') { onImpersonate(); return null; }
       if (cmd === '/recap') {
         const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
         recapChat(c, n);
@@ -1212,7 +1246,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov NAME, /improve, /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov NAME, /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
@@ -1242,6 +1276,38 @@ function Main({ storage, storageKind, storageFailed }) {
       setError(`/improve failed: ${e.message ?? e}`);
     }
   }
+
+  // Impersonate: the aux model drafts the user's next message into the
+  // composer as an editable draft — never sent automatically. Rides auxLogged,
+  // so the composer's Stop aborts it and the call lands in the Inspector's
+  // aux log like every background call.
+  async function impersonateDraft(c) {
+    const { personas: pe, settings: st } = ref.current;
+    const model = st.auxModel || st.model;
+    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
+    const recent = getActivePath(c.messages, c.activeLeafId).slice(-(st.suggestionsDepth ?? 6))
+      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+      .join('\n\n');
+    if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to base a reply on yet.', nonce: Date.now() }); return; }
+    try {
+      const out = await auxLogged('impersonate', {
+        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        system: subUser(st.impersonatePrompt || DEFAULT_IMPERSONATE_PROMPT, pName),
+        user: `Recent scene:\n\n${recent}\n\n${pName}'s next message:`,
+        maxTokens: 400, temperature: st.suggestionsTemp ?? 0.7, stop: st.stopStrings,
+      }, c.id);
+      if (!out) throw new Error('empty response from the model');
+      setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
+    } catch (e) {
+      setError(`Impersonate failed: ${e.message ?? e}`);
+    }
+  }
+  const onImpersonate = () => {
+    const c = ref.current.chats[ui.chatId];
+    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
+    impersonateDraft(c);
+  };
 
   async function recapChat(c, n) {
     const { personas: pe, settings: st } = ref.current;
@@ -1571,8 +1637,17 @@ function Main({ storage, storageKind, storageFailed }) {
     if (st.embeddingModel && mergedLorePieces(ref.current.scenarios[c.scenarioId], c, ref.current.characters)
         .some(p => p && p.enabled !== false && !p.pinned && p.smart))
       man.warnings.push('Preview: semantic activation not run (embeddings) — semantic pieces show keyword-trigger results only.');
+    if (st.embeddingModel && st.memoryRecall === 'smart'
+        && (c.memoryStore?.memories ?? []).some(m => m && !m.pinned))
+      man.warnings.push('Preview: smart memory recall not run (embeddings) — memories show plain recency order.');
     setManifestFor(c.id, man, messages);
   };
+
+  // Context-horizon marker: when the last generation dropped older messages,
+  // the chat log draws a divider above the oldest message it actually saw.
+  const histLayer = manifest?.layers?.history;
+  const horizon = (histLayer?.dropped > 0 && (histLayer.keptIds ?? []).length)
+    ? { id: histLayer.keptIds[0], dropped: histLayer.dropped } : null;
 
   // Suggestions fire after every swipe and would flood the aux list — hidden
   // unless the user opts in (Settings → Features). Entries are per-chat: each
@@ -1690,6 +1765,7 @@ function Main({ storage, storageKind, storageFailed }) {
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
+              horizon=${horizon}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}
               onRerollSuggestions=${() => {
@@ -1701,6 +1777,8 @@ function Main({ storage, storageKind, storageFailed }) {
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
+              onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
+              onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
         </div>

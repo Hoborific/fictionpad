@@ -48,6 +48,7 @@ const DEFAULT_SETTINGS = {
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
+  impersonate: true, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
@@ -55,6 +56,7 @@ const DEFAULT_SETTINGS = {
   memoryMaxTokens: 220, // aux response cap for a summary
   memoryMaxChars: 500, // stored note length cap
   memoryCap: MEMORY_CAP, // memory cards kept per chat (pinned exempt)
+  memoryRecall: 'recent', // 'recent' = pinned-then-newest | 'smart' = similarity-ranked recall (needs embeddingModel)
   loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
   loreExtractTemp: 0.3,
   loreExtractMaxTokens: 400,
@@ -62,6 +64,7 @@ const DEFAULT_SETTINGS = {
   improvePrompt: DEFAULT_IMPROVE_PROMPT, // /improve
   improveTemp: 0.7,
   improveMaxTokens: 400,
+  impersonatePrompt: DEFAULT_IMPERSONATE_PROMPT, // /impersonate + "✦ Write my reply"
   recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
   recapTemp: 0.4,
   recapMaxTokens: 700,
@@ -532,6 +535,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Response suggestions ("what you might do next" chips after each AI reply)
           </label>
           <label class="check">
+            <input type="checkbox" checked=${draft.impersonate !== false} onChange=${(e) => set({ impersonate: e.target.checked })} />
+            Impersonate chip ("✦ Draft my reply" under the latest reply — the AI drafts your message to edit; /impersonate always works)
+          </label>
+          <label class="check">
             <input type="checkbox" checked=${draft.toolsEnabled !== false} onChange=${(e) => set({ toolsEnabled: e.target.checked })} />
             Tool calling (model may register characters + lore mid-reply, into this chat's lore)
           </label>
@@ -576,7 +583,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div>
           <div class="grid3">
             ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}
-          </div>`,
+          </div>
+          <label class="field"><span>Memory recall — how the memory layer picks cards</span>
+            <select value=${draft.memoryRecall ?? 'recent'} onChange=${(e) => set({ memoryRecall: e.target.value })}>
+              <option value="recent">recent — pinned first, then newest (default)</option>
+              <option value="smart">smart — similarity-ranked recall (needs an embedding model)</option>
+            </select>
+            <span class="hint">Smart recall embeds the memory cards each generation and also injects older cards similar to the recent conversation (threshold in the Models tab). Pinned cards and the 3 newest always inject. Embeddings failing → plain recency for that generation.</span></label>`,
           'Summarize / extraction prompts are editable in the Prompts tab. Pinned cards are exempt from the card cap.')}
         ${section('Lore extraction', html`
           <div class="grid3">
@@ -629,6 +642,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             '{{max}} = max pieces per pass (Features tab).')}
           ${promptField('improvePrompt', '/improve prompt — rewrites your draft in character', DEFAULT_IMPROVE_PROMPT, 2,
             '{{user}} = persona name (+ description, when set).')}
+          ${promptField('impersonatePrompt', '/impersonate prompt — drafts your next message as you ("✦ Write my reply")', DEFAULT_IMPERSONATE_PROMPT, 3,
+            '{{user}} = persona name. The draft lands in the composer for editing — never sent automatically.')}
           ${promptField('recapPrompt', '/recap prompt — third-person recap of recent messages', DEFAULT_RECAP_PROMPT, 2,
             '{{words}} = word target (Features tab).')}`)}
         ${section('✦ Generator', html`

@@ -1027,3 +1027,23 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - The "chat" origin pill on lore pieces no longer renders green across themes - `--c-good` is a success semantic, borrowed for two different meanings. The green lives on a dedicated `.pill.ok` class used only by the aux-log/tool-call success status, and the origin pill gets a visible neutral outline (`--c-dim` - the base pill's `--c-border` hairline is 13% contrast and read as no outline at all).
+
+## v4.8 - Stateful lore, memory recall & writer assists
+
+### v4.8.0
+
+**Added**
+
+- Timed lore activation (the SillyTavern-style stateful set, re-derived from the chat tree): per-piece **sticky** (stay active N messages after the key last matched), **cooldown** (after going inactive, can't re-activate for N messages) and **delay** (can't activate before path position N) fields on lore pieces - measured in active-path messages and recomputed from the tree on every scan, so the activation state is derived, never stored, and rewind/regenerate/branch can never leave it stale (universal rollback rule). Matching is per-message within the piece's scan window; a held piece injects with reason `sticky`.
+- **Inclusion groups + probability triggers** on lore pieces: pieces sharing a `group` name are mutually exclusive - the highest weight wins (ties: list order; pinned pieces bypass groups; a group loser lends no link boost) - and `prob` rolls a percent chance per generation on keyword-path activations (pinned/semantic//pov/link-boosted always fire). Random events and fallback lore chains without scripting.
+- **Smart memory recall** (Settings > Generation > Memory > Memory recall, default `recent`): with an embedding model set, unpinned memory cards are scored against the recent conversation each generation (one query embedding shared with the semantic-lore pass) and older cards that clear the semantic threshold inject by similarity instead of recency - pinned cards and the 3 newest unpinned always inject (`MEM_RECENT_KEEP` recency floor). Embeddings failing degrades to plain recency for that generation, keyword-only style.
+- **Context-horizon marker**: when the last generation dropped older messages to fit the context window, a dotted divider in the chat log marks the oldest message it actually saw ("last generation saw from here down · N older messages out of context"). Driven by the manifest's new per-generation `history.keptIds` (shifted in step with the exact-token-count overflow guard); stale markers simply don't render after rewind/swipe-browsing.
+- **Memory pills**: the message where an auto-summary or `/memory` card was recorded (its `atLen` position) carries a quiet `▤ N` pill in its meta row - click opens the Memory tab. Rewind trims the store, so stale pills disappear on their own.
+- **Impersonate**: a "✦ Draft my reply" chip below the latest assistant reply (its own row tucked under the suggestion chips when those are on, the only chip otherwise) has the aux model draft your next message into the composer as an editable draft - never sent automatically. Settings > Features toggle (default on) gates the chip; `/impersonate` always works. Editable prompt (`impersonatePrompt`, Settings > Prompts, `DEFAULT_IMPERSONATE_PROMPT`); the call rides `auxLogged` (composer Stop aborts it, Inspector aux log records it) and uses the suggestions context depth.
+
+**Changed**
+
+- `scanLore` returns its active Map with a `.detail` side-channel (id -> `cooldown`/`delayed`/`probability`/`group`) for matched-but-held-back pieces; the Inspector's "Not injected" list shows the specific suppression reason instead of a bare "not-triggered", and injected pieces can carry the new `sticky` reason pill. The plain Map shape is unchanged for existing callers.
+- The memory layer of the manifest records `recall: 'smart'|'recent'`, per-memory `reason` (`pinned`/`recent`/`semantic`) and similarity scores, and an `inactive` list (over-budget/below-threshold) - the Inspector's memory section shows reason + score pills and a collapsible not-injected subsection, mirroring the lore layer's observability contract.
+- Lore-piece normalization (imports, editor drafts) heals the new fields: `sticky`/`cooldown`/`delay` coerced to positive ints (0 = off = absent), `prob` clamped to 0-100, `group` trimmed.
+- New assembler tests cover the timed state machine (sticky hold/lapse, cooldown block/re-entry, delay), inclusion groups (weight/tie/pinned bypass/no link boost from a loser), probability with an injected rng, smart memory recall (recency floor, threshold gating, pinned bypass, classic fallback), horizon `keptIds`, and import healing.

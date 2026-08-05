@@ -379,6 +379,11 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   padding: 3px 10px; font-size: 12.5px; color: var(--c-dim); cursor: pointer; text-align: left;
 }
 .sugg-chip:hover { color: var(--c-text); border-color: var(--c-accent); }
+/* Impersonate chip: its own row tucked under the suggestion chips (or the only
+   chip when suggestions are off). Same ghost style, marked as AI-authored. */
+.sugg-row.imp-row { margin-top: -10px; }
+.imp-chip { border-style: solid; color: var(--c-faint); }
+.imp-chip:hover { color: var(--c-accent); border-color: var(--c-accent); }
 
 /* ---------- chat panel sheet (modal) + context menu + mobile scrim ---------- */
 .modal.sheet { width: min(680px, 94vw); max-height: 88vh; }
@@ -432,6 +437,25 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .pill.chat { border-color: var(--c-dim); color: var(--c-dim); }
 .pill.character { border-color: var(--c-dialogue); color: var(--c-dialogue); }
 .pill.pov { border-color: var(--c-warning); color: var(--c-warning); }
+/* Sticky hold: a keyword that left the scan window but keeps the piece alive.
+   Distinct from a fresh trigger, same family as link-boosted (derived state). */
+.pill.sticky { border-color: var(--c-user); color: var(--c-user); }
+/* Memory pill on a message row: quiet like the tools gear pill, accent on hover. */
+button.pill.memory {
+  cursor: pointer; font: inherit; font-size: 11px;
+  border-color: transparent; background: transparent; color: var(--c-faint);
+}
+button.pill.memory:hover { color: var(--c-accent); border-color: var(--c-border); }
+/* Context-horizon divider: marks where the last generation's context window
+   began (older messages were dropped from the prompt). Quiet dotted rule. */
+.ctx-horizon {
+  display: flex; align-items: center; gap: 10px; margin: 10px 4px;
+  color: var(--c-faint); font-size: 11px;
+}
+.ctx-horizon::before, .ctx-horizon::after {
+  content: ''; flex: 1; border-top: 1px dashed var(--c-border);
+}
+.ctx-horizon span { white-space: nowrap; }
 /* Gear pill popover: per-swipe tool-call record, anchored to .msg (position: relative).
    Styled like the dim meta row around it, not the inspector's colored reason pills. */
 button.pill.tools-toggle {

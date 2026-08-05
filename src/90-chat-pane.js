@@ -1,7 +1,16 @@
 function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
+  // Memory pills: path position → count of memories stamped there (atLen), so
+  // the message where an auto-summary fired shows it and can jump to the
+  // Memory tab. Rewind trims the store, so stale pills vanish on their own.
+  const memByLen = useMemo(() => {
+    const m = new Map();
+    for (const mem of chat?.memoryStore?.memories ?? [])
+      if (Number.isFinite(mem?.atLen)) m.set(mem.atLen, (m.get(mem.atLen) ?? 0) + 1);
+    return m;
+  }, [chat?.memoryStore]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
   // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
   // unpin/re-pin themselves via the scroll listener.
@@ -144,20 +153,30 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
   const leaf = path[path.length - 1];
   const showSugg = !generating && leaf?.role === 'assistant'
     && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
+  // Impersonate chip: below the suggestion chips when those are on, the only
+  // chip otherwise. Click-triggered only — no aux call until asked.
+  const showImpChip = !generating && !auxBusy.length && leaf?.role === 'assistant' && !!actions.onImpersonate;
   return html`
     <div class="main">
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
         ${path.map((node, i) => html`
-          <${MessageItemMemo} key=${node.id} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+          <${React.Fragment} key=${node.id}>
+          ${horizon && horizon.id === node.id && html`
+            <div class="ctx-horizon" title="The context window is full — everything above this line was outside the last generation's prompt (lore and memories cover older facts).">
+              <span>last generation saw from here down · ${horizon.dropped} older message${horizon.dropped === 1 ? '' : 's'} out of context</span>
+            </div>`}
+          <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             auxBusy=${auxBusy.length > 0}
             dateFormat=${dateFormat} showThinking=${showThinking}
+            memCount=${memByLen.get(i + 1) ?? 0} onOpenMemory=${actions.onOpenMemory}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
-            onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />`)}
+            onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
+          <//>`)}
         ${showSugg && html`
           <div class="sugg-row">
             ${suggestions.loading
@@ -167,6 +186,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
                     <button key=${i} class="sugg-chip" onClick=${() => onPickSuggestion(s)}>${s}</button>`)}
                   <button class="btn small ghost" title="Re-roll suggestions" onClick=${onRerollSuggestions}>⟳</button>
                 `}
+          </div>`}
+        ${showImpChip && html`
+          <div class="sugg-row imp-row">
+            <button class="sugg-chip imp-chip" title="The AI drafts your next message into the composer (/impersonate) — edit, then send"
+              onClick=${() => actions.onImpersonate()}>✦ Draft my reply…</button>
           </div>`}
       </div>
       ${showJump && html`
