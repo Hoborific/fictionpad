@@ -1047,3 +1047,19 @@ Note: this only changes the default prompt text; existing chats with a customize
 - The memory layer of the manifest records `recall: 'smart'|'recent'`, per-memory `reason` (`pinned`/`recent`/`semantic`) and similarity scores, and an `inactive` list (over-budget/below-threshold) - the Inspector's memory section shows reason + score pills and a collapsible not-injected subsection, mirroring the lore layer's observability contract.
 - Lore-piece normalization (imports, editor drafts) heals the new fields: `sticky`/`cooldown`/`delay` coerced to positive ints (0 = off = absent), `prob` clamped to 0-100, `group` trimmed.
 - New assembler tests cover the timed state machine (sticky hold/lapse, cooldown block/re-entry, delay), inclusion groups (weight/tie/pinned bypass/no link boost from a loser), probability with an injected rng, smart memory recall (recency floor, threshold gating, pinned bypass, classic fallback), horizon `keptIds`, and import healing.
+
+### v4.8.1
+
+**Added**
+
+- Two naturally higher-contrast themes: **Midnight** (cool near-black) and **Darker** (warm near-black, the default theme's family) - deeper backgrounds with near-white text, so the derived dim/faint/border colors automatically get stronger ratios than the existing dark themes.
+
+**Fixed**
+
+- iOS: focusing a sampler value field (or any field a scoped rule styles below 16px, like `.sampler-row .sval`) no longer traps the page in a forced zoom with no way to pinch back out. The anti-auto-zoom rule (16px font on text inputs/selects/textareas) moved out of the max-width media block into its own `@media (max-width: 700px), (pointer: coarse)` query - tablets on coarse pointers are covered too - and carries `!important`, so scoped component rules can't undercut it again.
+
+**Changed**
+
+- Token probabilities (logprobs) are now off by default - opt-in via Settings > Features. New installs and never-saved settings get it off; previously saved settings keep their stored value.
+- Memory note defaults raised: note max characters 500 -> 1000, summary max tokens 220 -> 400. Existing saved settings keep their stored values.
+- The memory pass (auto-summary + /memory) now reads the chat's newest prior memory cards (up to 10, whole cards dropped oldest-first past ~3000 chars) as read-only context and is asked to record only NEW developments - independent windows with awareness, instead of overlapping windows (which double-record boundary events) or a rolling rewrite (which drifts over long chats and can't roll back per position). The default memory prompt documents the behavior; saved custom prompts keep working - the "do not repeat" framing rides in the user message.

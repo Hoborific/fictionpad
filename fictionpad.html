@@ -642,8 +642,6 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   .chatlog { padding: 12px 10px; }
   .topbar-inner { padding: 0 8px; gap: 6px; }
   .topbar .sub { display: none; } /* keep buttons reachable on narrow screens */
-  /* Stop iOS auto-zoom on focus. */
-  input[type=text], input[type=number], input[type=password], select, textarea { font-size: 16px; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
   .composer { padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
   .composer .row { gap: 6px; }
@@ -685,6 +683,15 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
     padding: 6px 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
   }
 }
+
+/* Stop iOS auto-zoom on field focus: Safari force-zooms a focused field under
+   16px, and the fixed app shell offers no way to pinch back out. Coarse-pointer
+   (not just width) so tablets are covered too; !important so scoped rules like
+   .sampler-row .sval's 13px can't undercut it. */
+@media (max-width: 700px), (pointer: coarse) {
+  input[type=text], input[type=number], input[type=password], select, textarea { font-size: 16px !important; }
+}
+
 @media (hover: none) {
   /* No hover on touch: message actions stay visible (dimmed). */
   .msg .actions { opacity: 0.65; }
@@ -752,7 +759,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.8.0';
+const APP_VERSION = '4.8.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -781,6 +788,56 @@ const THEMES = {
       '--c-ooc': 'oklch(0.70 0.04 75)',
       '--c-speaker-s': '65%',
       '--c-speaker-l': '72%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+  midnight: {
+    // Naturally higher contrast: near-black cool backgrounds, near-white text.
+    name: 'Midnight',
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': 'oklch(0.13 0.015 260)',
+      '--c-bg-1': 'oklch(0.16 0.015 260)',
+      '--c-bg-2': 'oklch(0.23 0.020 260)',
+      '--c-bg-3': 'oklch(0.30 0.025 260)',
+      '--c-chrome': 'oklch(0.16 0.015 260)',
+      '--c-text': 'oklch(0.97 0.010 260)',
+      '--c-accent': 'oklch(0.80 0.120 230)',
+      '--c-danger': 'oklch(0.68 0.21 25)',
+      '--c-warning': 'oklch(0.85 0.15 85)',
+      '--c-pin': 'oklch(0.85 0.15 85)',
+      '--c-user': 'oklch(0.82 0.100 225)',
+      '--c-action': 'oklch(0.78 0.040 250)',
+      '--c-dialogue': 'oklch(0.97 0.010 260)',
+      '--c-good': 'oklch(0.80 0.13 155)',
+      '--c-ooc': 'oklch(0.74 0.030 250)',
+      '--c-speaker-s': '65%',
+      '--c-speaker-l': '75%',
+      '--font-prose': 'system-ui, sans-serif',
+    },
+  },
+  darker: {
+    // Warm near-black: the default theme's family pushed to higher contrast.
+    name: 'Darker',
+    vars: {
+      'color-scheme': 'dark',
+      '--c-bg-0': 'oklch(0.13 0.018 60)',
+      '--c-bg-1': 'oklch(0.16 0.018 60)',
+      '--c-bg-2': 'oklch(0.23 0.022 60)',
+      '--c-bg-3': 'oklch(0.30 0.026 60)',
+      '--c-chrome': 'oklch(0.16 0.018 60)',
+      '--c-text': 'oklch(0.97 0.030 70)',
+      '--c-accent': 'oklch(0.80 0.130 70)',
+      '--c-danger': 'oklch(0.68 0.20 25)',
+      '--c-warning': 'oklch(0.84 0.15 80)',
+      '--c-pin': 'oklch(0.84 0.15 80)',
+      '--c-user': 'oklch(0.82 0.110 65)',
+      '--c-action': 'oklch(0.78 0.050 75)',
+      '--c-dialogue': 'oklch(0.97 0.030 70)',
+      '--c-good': 'oklch(0.80 0.12 155)',
+      '--c-ooc': 'oklch(0.74 0.035 75)',
+      '--c-speaker-s': '65%',
+      '--c-speaker-l': '75%',
       '--font-prose': 'system-ui, sans-serif',
     },
   },
@@ -2131,7 +2188,7 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // substituted with the persona name at call time; the suggestions prompt also
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
-const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
 const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
@@ -3734,7 +3791,7 @@ const DEFAULT_SETTINGS = {
   // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
   customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
-  tokenProbs: true, // request logprobs + top_logprobs on generations
+  tokenProbs: false, // request logprobs + top_logprobs on generations (opt-in)
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
   suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
@@ -3748,8 +3805,8 @@ const DEFAULT_SETTINGS = {
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
-  memoryMaxTokens: 220, // aux response cap for a summary
-  memoryMaxChars: 500, // stored note length cap
+  memoryMaxTokens: 400, // aux response cap for a summary
+  memoryMaxChars: 1000, // stored note length cap
   memoryCap: MEMORY_CAP, // memory cards kept per chat (pinned exempt)
   memoryRecall: 'recent', // 'recent' = pinned-then-newest | 'smart' = similarity-ranked recall (needs embeddingModel)
   loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
@@ -4218,7 +4275,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       ${tab === 'features' && html`
         ${section('Features', html`
           <label class="check">
-            <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
+            <input type="checkbox" checked=${!!draft.tokenProbs} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
             Token probabilities (logprobs + alternatives per token; count in Generation tab)
           </label>
           <label class="check">
@@ -4273,8 +4330,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
-            ${numField('memoryMaxTokens', 'Summary max tokens', 220, { min: 50, max: 2000, step: 10 })}
-            ${numField('memoryMaxChars', 'Note max characters', 500, { min: 100, max: 5000, step: 50 })}
+            ${numField('memoryMaxTokens', 'Summary max tokens', 400, { min: 50, max: 2000, step: 10 })}
+            ${numField('memoryMaxChars', 'Note max characters', 1000, { min: 100, max: 5000, step: 50 })}
           </div>
           <div class="grid3">
             ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}
@@ -6531,9 +6588,14 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- memory subsystem ----
-  // Shared memory-card generation (auto-summarize + /memory). Returns the
-  // ≤500-char note text, or null when there's nothing to summarize. Throws on
-  // endpoint/HTTP errors.
+  // Shared memory-card generation (auto-summarize + /memory). Returns the note
+  // text (≤ memoryMaxChars), or null when there's nothing to summarize.
+  // Throws on endpoint/HTTP errors.
+  // Windows are independent (no message overlap) but the pass sees the newest
+  // prior cards as read-only context and is asked for NEW developments only —
+  // a rolling rewrite would drift and can't roll back per-position, and
+  // overlapping windows would double-record the same events.
+  const MEM_PRIOR_MAX = 10, MEM_PRIOR_CHARS = 3000; // prior-cards context: newest N, whole cards past the char budget dropped oldest-first
   async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
@@ -6545,12 +6607,16 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return null;
-    const maxChars = st.memoryMaxChars ?? 500;
+    const maxChars = st.memoryMaxChars ?? 1000;
+    const priorTexts = (chatObj.memoryStore?.memories ?? []).slice(-MEM_PRIOR_MAX).map(m => m.text);
+    while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
+    const prior = priorTexts.length
+      ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
     const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
-      user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
-      maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
+      user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
+      maxTokens: st.memoryMaxTokens ?? 400, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
     return out.slice(0, maxChars) || null;
   }

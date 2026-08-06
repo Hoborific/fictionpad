@@ -474,9 +474,14 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- memory subsystem ----
-  // Shared memory-card generation (auto-summarize + /memory). Returns the
-  // ≤500-char note text, or null when there's nothing to summarize. Throws on
-  // endpoint/HTTP errors.
+  // Shared memory-card generation (auto-summarize + /memory). Returns the note
+  // text (≤ memoryMaxChars), or null when there's nothing to summarize.
+  // Throws on endpoint/HTTP errors.
+  // Windows are independent (no message overlap) but the pass sees the newest
+  // prior cards as read-only context and is asked for NEW developments only —
+  // a rolling rewrite would drift and can't roll back per-position, and
+  // overlapping windows would double-record the same events.
+  const MEM_PRIOR_MAX = 10, MEM_PRIOR_CHARS = 3000; // prior-cards context: newest N, whole cards past the char budget dropped oldest-first
   async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
@@ -488,12 +493,16 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return null;
-    const maxChars = st.memoryMaxChars ?? 500;
+    const maxChars = st.memoryMaxChars ?? 1000;
+    const priorTexts = (chatObj.memoryStore?.memories ?? []).slice(-MEM_PRIOR_MAX).map(m => m.text);
+    while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
+    const prior = priorTexts.length
+      ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
     const out = await auxLogged('memory', {
       endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
-      user: `Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters):`,
-      maxTokens: st.memoryMaxTokens ?? 220, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
+      user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
+      maxTokens: st.memoryMaxTokens ?? 400, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
     return out.slice(0, maxChars) || null;
   }

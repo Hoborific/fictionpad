@@ -39,7 +39,7 @@ const DEFAULT_SETTINGS = {
   // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
   customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
-  tokenProbs: true, // request logprobs + top_logprobs on generations
+  tokenProbs: false, // request logprobs + top_logprobs on generations (opt-in)
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
   suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
@@ -53,8 +53,8 @@ const DEFAULT_SETTINGS = {
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
-  memoryMaxTokens: 220, // aux response cap for a summary
-  memoryMaxChars: 500, // stored note length cap
+  memoryMaxTokens: 400, // aux response cap for a summary
+  memoryMaxChars: 1000, // stored note length cap
   memoryCap: MEMORY_CAP, // memory cards kept per chat (pinned exempt)
   memoryRecall: 'recent', // 'recent' = pinned-then-newest | 'smart' = similarity-ranked recall (needs embeddingModel)
   loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
@@ -523,7 +523,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       ${tab === 'features' && html`
         ${section('Features', html`
           <label class="check">
-            <input type="checkbox" checked=${draft.tokenProbs !== false} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
+            <input type="checkbox" checked=${!!draft.tokenProbs} onChange=${(e) => set({ tokenProbs: e.target.checked })} />
             Token probabilities (logprobs + alternatives per token; count in Generation tab)
           </label>
           <label class="check">
@@ -578,8 +578,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
-            ${numField('memoryMaxTokens', 'Summary max tokens', 220, { min: 50, max: 2000, step: 10 })}
-            ${numField('memoryMaxChars', 'Note max characters', 500, { min: 100, max: 5000, step: 50 })}
+            ${numField('memoryMaxTokens', 'Summary max tokens', 400, { min: 50, max: 2000, step: 10 })}
+            ${numField('memoryMaxChars', 'Note max characters', 1000, { min: 100, max: 5000, step: 50 })}
           </div>
           <div class="grid3">
             ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}

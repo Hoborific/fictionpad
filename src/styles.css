@@ -623,8 +623,6 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   .chatlog { padding: 12px 10px; }
   .topbar-inner { padding: 0 8px; gap: 6px; }
   .topbar .sub { display: none; } /* keep buttons reachable on narrow screens */
-  /* Stop iOS auto-zoom on focus. */
-  input[type=text], input[type=number], input[type=password], select, textarea { font-size: 16px; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
   .composer { padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
   .composer .row { gap: 6px; }
@@ -666,6 +664,15 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
     padding: 6px 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
   }
 }
+
+/* Stop iOS auto-zoom on field focus: Safari force-zooms a focused field under
+   16px, and the fixed app shell offers no way to pinch back out. Coarse-pointer
+   (not just width) so tablets are covered too; !important so scoped rules like
+   .sampler-row .sval's 13px can't undercut it. */
+@media (max-width: 700px), (pointer: coarse) {
+  input[type=text], input[type=number], input[type=password], select, textarea { font-size: 16px !important; }
+}
+
 @media (hover: none) {
   /* No hover on touch: message actions stay visible (dimmed). */
   .msg .actions { opacity: 0.65; }
