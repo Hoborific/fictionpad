@@ -735,12 +735,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // default text when unset (existing installs keep current behavior).
   const directive = (settings.lengthDirective ?? LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive)?.trim();
   if (directive) tailParts.push(directive);
-  // /pov reframe: one generation written from another character's perspective.
+  // /pov reframe: one generation written from another character's perspective,
+  // with optional per-reply steering text (`/pov CHAR [TEXT]`).
   const povName = String(pov?.name ?? '').trim();
+  const povText = String(pov?.text ?? '').trim();
   if (speakerNames.length)
     tailParts.push(`Characters who may speak in this scene: ${speakerNames.join(', ')}. When one speaks or acts, begin that part with the exact full name and a colon ("${speakerNames[0]}:") — once, at the start of the part; later lines stay with that character.`);
   if (povName)
-    tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
+    tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".${povText ? ` Direction for this reply: ${povText}` : ''}`);
   let backstory = sub(scenario?.backstory ?? '').trim();
 
   const staticCap = Math.floor(budget * caps.static);

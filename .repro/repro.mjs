@@ -3,8 +3,9 @@
 // the internals, and imports them in Node. Trials cover: Context Inspector
 // preview + SSR render (incl. hostile data shapes), message/prose markdown
 // rendering (dialogue pairing, streaming auto-close), settings/sidebar/editor
-// SSR smoke, ProbsView, the openaiChatStream normalizer (content/lp split,
-// logit_bias, choices-less chunks), alignTokensToSpans / alignStrippedToolSpans
+// SSR smoke, ProbsView, branch-panel outline condensation (fork appearance,
+// growth, active-highlight jumps, swipe tags), the openaiChatStream normalizer
+// (content/lp split, logit_bias, choices-less chunks), alignTokensToSpans / alignStrippedToolSpans
 // tiling, tokenize/embed parsing, and proxy auth-header mapping. Any throw
 // fails the trial; run `node .repro/repro.mjs` (deps: npm install in .repro/).
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -18,7 +19,8 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
-  LorePieceEditor, chatSearchText, matchExcerpt };`);
+  LorePieceEditor, chatSearchText, matchExcerpt,
+  BranchPanel, appendMessage, activateBranch, getActivePath };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -762,6 +764,86 @@ trial('effectiveEndpoint rewriting', () => {
   if (fp.effectiveEndpoint(s({}), false) !== 'http://llm.local:8080') throw new Error('server inactive → raw despite toggle');
   if (fp.effectiveEndpoint(s({ endpoint: '/proxy/http://x' }), true) !== '/proxy/http://x') throw new Error('already /proxy/ unchanged (no double-proxy)');
   if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
+});
+
+// ---- BranchPanel (outline): the condensed view tracks the live tree ----
+// The panel derives everything from its chat prop on every render (no memo)
+// and the modal passes the live chats[chatId], so a branch created in the
+// chat shows on the next state flush. These pin the condensation itself:
+// forks appear when a node gains sibling continuations, chips/counts grow,
+// the active highlight follows activateBranch jumps, swipe tags mark
+// children continuing different parent swipes.
+const bvRender = (chat) => renderToStaticMarkup(html`<${fp.BranchPanel} chat=${chat} personaName="Ari" onJump=${() => {}} />`);
+const bvChain = (steps) => {
+  let chat = { id: 'C', scenarioId: 'S', rootMessageId: null, activeLeafId: null, messages: {} };
+  let parent = null; const ids = [];
+  for (const [role, text] of steps) {
+    const r = fp.appendMessage(chat, parent, role, text);
+    chat = r.chat; parent = r.id; ids.push(r.id);
+  }
+  return { chat, ids };
+};
+
+trial('branch view outline: linear chat collapses to one segment, no forks', () => {
+  const { chat } = bvChain([['assistant', 'Welcome, Ari.'], ['user', 'I head to the dock.'], ['assistant', 'Vex grins.']]);
+  const out = bvRender(chat);
+  if (!out.includes('3 messages · 0 branch points.') || !out.includes('No branches yet'))
+    throw new Error('linear chat should report no branch points');
+  if (out.includes('ct-br')) throw new Error('linear chat should render no fork chips');
+  if (!out.includes('3 msg')) throw new Error('the whole chain should collapse into one segment');
+});
+
+trial('branch view outline: sibling continuation forks, and the view grows', () => {
+  const { chat: c0, ids } = bvChain([['assistant', 'Welcome, Ari.'], ['user', 'dock.'], ['assistant', 'Vex grins.'], ['user', 'credits.'], ['assistant', 'Vex pockets them.']]);
+  // regenerate-style fork: a second assistant continuation under u2 (#4)
+  let r = fp.appendMessage(c0, ids[3], 'assistant', 'Vex counts them twice.');
+  let chat = r.chat;
+  let out = bvRender(chat);
+  if (!out.includes('6 messages · 1 branch point.')) throw new Error('fork not counted');
+  if (!out.includes('⎇ 2')) throw new Error('fork chip missing');
+  for (const t of ['Vex pockets them.', 'Vex counts them twice.'])
+    if (!out.includes(t)) throw new Error(`fork branch "${t}" not shown`);
+  if ((out.match(/>#5</g) ?? []).length !== 2) throw new Error('both fork segments should start at #5');
+  // growth: a third continuation under the same parent bumps the chip only
+  r = fp.appendMessage(chat, ids[3], 'assistant', 'Vex shakes his head.'); chat = r.chat;
+  out = bvRender(chat);
+  if (!out.includes('⎇ 3') || !out.includes('1 branch point.')) throw new Error('third continuation should bump the chip, not the count');
+  // growth: a fork deeper down adds a second branch point
+  r = fp.appendMessage(chat, ids[4], 'user', 'Keep the change.'); chat = r.chat;
+  r = fp.appendMessage(chat, ids[4], 'user', 'Walk away.'); chat = r.chat;
+  out = bvRender(chat);
+  if (!out.includes('2 branch points.')) throw new Error('deeper fork should grow the branch-point count');
+  for (const t of ['Keep the change.', 'Walk away.'])
+    if (!out.includes(t)) throw new Error(`deeper branch "${t}" not shown`);
+});
+
+trial('branch view outline: active highlight follows branch jumps', () => {
+  const { chat: c0, ids } = bvChain([['assistant', 'Welcome, Ari.'], ['user', 'dock.'], ['assistant', 'Vex grins.'], ['user', 'credits.'], ['assistant', 'Vex pockets them.']]);
+  const r = fp.appendMessage(c0, ids[3], 'assistant', 'Vex counts them twice.');
+  // the new continuation is the tip; jump back to the first one
+  const chat = fp.activateBranch(r.chat, ids[4]);
+  if (fp.getActivePath(chat.messages, chat.activeLeafId).at(-1).id !== ids[4])
+    throw new Error('jump did not land on the first continuation');
+  const row = bvRender(chat).split('<button').find(b => b.includes('ct-row active leaf'));
+  if (!row?.includes('Vex pockets them.')) throw new Error('active leaf row is not the jumped-to branch');
+});
+
+trial('branch view outline: swipe tags mark different parent swipes', () => {
+  const { chat: c0, ids } = bvChain([['assistant', 'Welcome.'], ['user', 'hi'], ['assistant', 'take one']]);
+  let r = fp.appendMessage(c0, ids[2], 'user', 'continued from take one'); // fromSwipe 0
+  // the parent gains a second swipe; continuing from it forks with fromSwipe 1
+  const a1 = r.chat.messages[ids[2]];
+  const chat1 = { ...r.chat, messages: { ...r.chat.messages,
+    [ids[2]]: { ...a1, swipes: [...a1.swipes, { text: 'take two', createdAt: Date.now() }], activeSwipe: 1 } } };
+  r = fp.appendMessage(chat1, ids[2], 'user', 'continued from take two');
+  const out = bvRender(r.chat);
+  if (!out.includes('swipe 1') || !out.includes('swipe 2'))
+    throw new Error('sibling rows should tag their differing parent swipes');
+});
+
+trial('branch view outline: empty chat renders the empty state', () => {
+  if (!bvRender({ id: 'C', messages: {}, activeLeafId: null }).includes('No messages yet.'))
+    throw new Error('empty state missing');
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.

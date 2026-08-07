@@ -849,6 +849,15 @@ section('/pov reframe');
   });
   ok(noPiece.messages[0].content.includes("from Nobody's perspective"), 'piece-less pov still reframes');
   ok(noPiece.manifest.layers.lore.pieces.length === 0, 'piece-less pov injects no lore');
+  // optional steering text rides the directive (`/pov CHAR [TEXT]`)
+  const steered = assemblePrompt({
+    scenario: baseScenario, persona, chat: baseChat,
+    settings: { contextLength: 8192, maxTokens: 400 }, platformPrompt: '',
+    pov: { name: 'Veyra', pieceId: null, text: 'She finds the letter.' },
+  });
+  ok(steered.messages[0].content.includes("from Veyra's perspective")
+    && steered.messages[0].content.includes('Direction for this reply: She finds the letter.'),
+    'pov steering text appended to the directive');
   // Map-based preActivated carries custom reasons; semantic Set still works alongside
   const scan = scanLore(scenario.lorePieces, 'nothing', new Map([['c1', 'pov']]));
   ok(scan.get('c1')?.reason === 'pov', 'Map preActivated activates with its custom reason');

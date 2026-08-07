@@ -1,7 +1,7 @@
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -267,7 +267,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
-        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
+        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
 }

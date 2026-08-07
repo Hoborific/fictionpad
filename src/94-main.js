@@ -258,6 +258,15 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterNames = useMemo(
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
+  // Slash-command argument completion domains (composer hint chips + Tab):
+  // /pov completes from the chat's known characters — the exact list the /pov
+  // handler matches against — /theme from theme names, /model from model ids
+  // seen by /v1/models fetches (modelCtxs keys).
+  const cmdArgs = useMemo(() => ({
+    '/pov': characterNames,
+    '/theme': Object.values(THEMES).map(t => t.name),
+    '/model': Object.keys(settings.modelCtxs ?? {}),
+  }), [characterNames, settings.modelCtxs]);
   // Speaker-name colour overrides (global character cards with an explicit
   // colour), keyed by lowercase name — everything else falls back to the
   // name-hash hue in MessageItem.
@@ -1211,19 +1220,32 @@ function Main({ storage, storageKind, storageFailed }) {
       }
       if (cmd === '/continue') { handleContinue(c); return null; }
       if (cmd === '/pov') {
-        if (!arg) return 'Usage: /pov <character name>';
-        // Reframe one generation around another character. If a character-type
-        // lore piece matches the name, it's force-injected (reason 'pov') so
-        // the model sees that definition; otherwise the directive alone stands.
+        if (!arg) return 'Usage: /pov <character> [steering text]';
+        // Reframe one generation around another character. The name is the
+        // longest leading run of words exactly matching a known character's
+        // title (so multi-word names work); any remainder is optional steering
+        // text for this one reply. No exact prefix match → the whole arg is
+        // the name query (exact, then substring), as before. A matched piece
+        // is force-injected (reason 'pov') so the model sees that definition.
         const scen = ref.current.scenarios[c.scenarioId];
-        const q = arg.toLowerCase();
         const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
-        const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
-          ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
+        const words = arg.split(/\s+/);
+        let piece = null, name = '', text = '';
+        for (let n = words.length; n >= 1 && !piece; n--) {
+          const cand = words.slice(0, n).join(' ').toLowerCase();
+          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
+          if (piece) { name = piece.title.trim(); text = words.slice(n).join(' '); }
+        }
+        if (!piece) {
+          const q = arg.toLowerCase();
+          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
+            ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
+          name = piece?.title?.trim() || arg;
+        }
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-        fireGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
+        fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
         return null;
       }
       if (cmd === '/improve') {
@@ -1259,7 +1281,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov NAME, /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
@@ -1859,7 +1881,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
-            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
+            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               genElsewhere=${!!generating && generating.chatId !== chat?.id}

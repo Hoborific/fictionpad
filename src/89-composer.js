@@ -1,22 +1,29 @@
 const COMPOSER_COMMANDS = [
-  ['/ooc', 'speak out of character'],
+  ['/ooc [TEXT]', 'speak out of character'],
   ['/continue', 'continue the last reply'],
-  ['/pov', 'reply from another character’s view'],
-  ['/improve', 'rewrite your draft in persona voice'],
+  ['/pov CHAR [TEXT]', 'reply from another character’s view'],
+  ['/improve [TEXT]', 'rewrite your draft in persona voice'],
   ['/impersonate', 'draft your next message as you'],
-  ['/recap N', 'summarize the last N messages'],
-  ['/memory N', 'save a memory from the last N messages'],
-  ['/model NAME', 'set this chat’s model'],
-  ['/theme NAME', 'switch the UI theme'],
+  ['/recap [N]', 'summarize the last N messages'],
+  ['/memory [N]', 'save a memory from the last N messages'],
+  ['/model [NAME]', 'set this chat’s model'],
+  ['/theme [NAME]', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft }) {
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, cmdArgs = null }) {
   // Draft text seeds from ChatPane's per-chat drafts store (this component
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
   const [text, setTextRaw] = useState(() => initialText ?? '');
   const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
+  // Command feedback ("Theme set to Darker.", usage errors) auto-dismisses
+  // after a few seconds instead of lingering under the composer.
+  useEffect(() => {
+    if (!hint) return;
+    const t = setTimeout(() => setHint(null), 5000);
+    return () => clearTimeout(t);
+  }, [hint]);
   useEffect(() => {
     if (!inject) return;
     // Async injects (e.g. /improve) resolve seconds later; if the user
@@ -36,11 +43,47 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // Enter is always a newline there — sending is the Send button's job.
   // Desktop keeps Enter-to-send, Shift+Enter for newline.
   const coarseEnter = window.matchMedia?.('(pointer: coarse)').matches;
-  // Slash-command hints: while the first token is a / prefix, offer matching
-  // commands (click/tap completes the command word into the draft).
-  const cmdHints = text.startsWith('/') && !/[\s]/.test(text)
-    ? COMPOSER_COMMANDS.filter(([c]) => c.split(' ')[0].startsWith(text) && c.split(' ')[0] !== text)
+  // Slash-command hints. Command-word mode (no space typed yet): offer
+  // matching commands — an exact match stays listed when the command takes an
+  // argument, since the bare name isn't done yet. Argument mode (`/pov mi`):
+  // offer matches from that command's value list (cmdArgs prop: known
+  // character names, theme names, seen model ids). ↑/↓ move a highlight
+  // through the list (wrapping), Enter or Tab completes the highlighted
+  // entry, Esc dismisses the popup so the raw text can still be sent as-is.
+  const slash = text.startsWith('/');
+  const sp = text.indexOf(' ');
+  const cmdKey = slash ? (sp === -1 ? text : text.slice(0, sp)).toLowerCase() : '';
+  const argPartial = sp === -1 ? '' : text.slice(sp + 1).trimStart();
+  const cmdHints = slash && sp === -1
+    ? COMPOSER_COMMANDS.filter(([c]) => {
+        const w = c.split(' ')[0];
+        return w.startsWith(cmdKey) && (w !== cmdKey || c.includes(' '));
+      })
     : [];
+  // Once the partial starts with a full value + space, the argument is done
+  // and the rest is free text (e.g. /pov's steering) — stop hinting values.
+  const argDomain = cmdArgs?.[cmdKey] ?? [];
+  const argDone = argDomain.some(v => argPartial.toLowerCase().startsWith(v.toLowerCase() + ' '));
+  const argHints = slash && sp !== -1 && !argDone
+    ? argDomain.filter(v => {
+        const lv = v.toLowerCase(), lp = argPartial.toLowerCase();
+        return lv.includes(lp) && lv !== lp;
+      })
+    : [];
+  // One normalized list for both modes (they're mutually exclusive).
+  const [hi, setHi] = useState(0);       // highlighted hint index
+  const [esc, setEsc] = useState(false); // popup dismissed until the next edit
+  const hintItems = esc ? [] : cmdHints.length
+    ? cmdHints.map(([c, d]) => ({ label: c, desc: d, completion: c.split(' ')[0] + (c.includes(' ') ? ' ' : '') }))
+    : argHints.slice(0, 8).map(v => ({ label: v, desc: cmdKey, completion: `${cmdKey} ${v}` }));
+  const hiIdx = Math.min(hi, Math.max(0, hintItems.length - 1));
+  const completeHint = (i) => {
+    const it = hintItems[i];
+    if (!it) return;
+    setText(it.completion);
+    setHi(0);
+    taRef.current?.focus();
+  };
   // Auto-grow the textarea with the draft, capped (CSS max-height) so long
   // messages scroll internally instead of eating the screen. Resting state
   // (empty draft) is a single line regardless of focus.
@@ -54,19 +97,30 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   }, [text]);
   return html`
     <div class="composer">
-      ${cmdHints.length > 0 && html`
+      ${hintItems.length > 0 && html`
         <div class="cmd-hints">
-          ${cmdHints.map(([c, d]) => html`
-            <button key=${c} class="cmd-hint"
-              onMouseDown=${(e) => { e.preventDefault(); setText(c.split(' ')[0] + (c.includes(' ') ? ' ' : '')); taRef.current?.focus(); }}>
-              <span class="cmd">${c}</span><span class="desc">${d}</span>
+          ${hintItems.map((it, i) => html`
+            <button key=${it.label} class=${'cmd-hint' + (i === hiIdx ? ' sel' : '')}
+              onMouseDown=${(e) => { e.preventDefault(); completeHint(i); }}>
+              <span class="cmd">${it.label}</span><span class="desc">${it.desc}</span>
             </button>`)}
         </div>`}
       <div class="row">
         <textarea ref=${taRef} value=${text} rows=${1}
           placeholder="Type a message or /"
-          onInput=${(e) => setText(e.target.value)}
+          onInput=${(e) => { setText(e.target.value); setHi(0); setEsc(false); }}
           onKeyDown=${(e) => {
+            if (hintItems.length) {
+              const n = hintItems.length;
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHi(h => (Math.min(h, n - 1) + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+                return;
+              }
+              if (e.key === 'Tab') { e.preventDefault(); completeHint(hiIdx); return; }
+              if (e.key === 'Escape') { e.preventDefault(); setEsc(true); return; }
+              if (e.key === 'Enter' && !e.shiftKey && !coarseEnter) { e.preventDefault(); completeHint(hiIdx); return; }
+            }
             // While generating/busy, Enter falls through to a newline instead
             // of being swallowed with no effect.
             if (e.key === 'Enter' && !e.shiftKey && !coarseEnter && !generating && !busy) { e.preventDefault(); send(); }

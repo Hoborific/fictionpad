@@ -369,6 +369,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   color: var(--c-text); font-size: 13px;
 }
 .cmd-hint:hover { background: var(--c-bg-3); }
+.cmd-hint.sel { background: var(--c-bg-3); box-shadow: inset 0 0 0 1px var(--c-accent); }
 .cmd-hint .cmd { font-family: monospace; color: var(--c-accent); flex: none; }
 .cmd-hint .desc { color: var(--c-dim); font-size: 12px; }
 .composer .row {
@@ -847,7 +848,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.9.1';
+const APP_VERSION = '4.9.2';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1855,12 +1856,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // default text when unset (existing installs keep current behavior).
   const directive = (settings.lengthDirective ?? LENGTH_PRESETS[settings.responseLength ?? 'medium']?.directive)?.trim();
   if (directive) tailParts.push(directive);
-  // /pov reframe: one generation written from another character's perspective.
+  // /pov reframe: one generation written from another character's perspective,
+  // with optional per-reply steering text (`/pov CHAR [TEXT]`).
   const povName = String(pov?.name ?? '').trim();
+  const povText = String(pov?.text ?? '').trim();
   if (speakerNames.length)
     tailParts.push(`Characters who may speak in this scene: ${speakerNames.join(', ')}. When one speaks or acts, begin that part with the exact full name and a colon ("${speakerNames[0]}:") — once, at the start of the part; later lines stay with that character.`);
   if (povName)
-    tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".`);
+    tailParts.push(`Write the next reply from ${povName}'s perspective — ${povName}'s actions, words, and thoughts. Begin the reply with "${povName}:".${povText ? ` Direction for this reply: ${povText}` : ''}`);
   let backstory = sub(scenario?.backstory ?? '').trim();
 
   const staticCap = Math.floor(budget * caps.static);
@@ -5733,24 +5736,31 @@ function BranchPanel({ chat, personaName = 'User', generating = false, onJump })
   return html`<div>${hint}<div class="ctree">${segRoots.map(segView)}</div></div>`;
 }
 const COMPOSER_COMMANDS = [
-  ['/ooc', 'speak out of character'],
+  ['/ooc [TEXT]', 'speak out of character'],
   ['/continue', 'continue the last reply'],
-  ['/pov', 'reply from another character’s view'],
-  ['/improve', 'rewrite your draft in persona voice'],
+  ['/pov CHAR [TEXT]', 'reply from another character’s view'],
+  ['/improve [TEXT]', 'rewrite your draft in persona voice'],
   ['/impersonate', 'draft your next message as you'],
-  ['/recap N', 'summarize the last N messages'],
-  ['/memory N', 'save a memory from the last N messages'],
-  ['/model NAME', 'set this chat’s model'],
-  ['/theme NAME', 'switch the UI theme'],
+  ['/recap [N]', 'summarize the last N messages'],
+  ['/memory [N]', 'save a memory from the last N messages'],
+  ['/model [NAME]', 'set this chat’s model'],
+  ['/theme [NAME]', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft }) {
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, cmdArgs = null }) {
   // Draft text seeds from ChatPane's per-chat drafts store (this component
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
   const [text, setTextRaw] = useState(() => initialText ?? '');
   const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
+  // Command feedback ("Theme set to Darker.", usage errors) auto-dismisses
+  // after a few seconds instead of lingering under the composer.
+  useEffect(() => {
+    if (!hint) return;
+    const t = setTimeout(() => setHint(null), 5000);
+    return () => clearTimeout(t);
+  }, [hint]);
   useEffect(() => {
     if (!inject) return;
     // Async injects (e.g. /improve) resolve seconds later; if the user
@@ -5770,11 +5780,47 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // Enter is always a newline there — sending is the Send button's job.
   // Desktop keeps Enter-to-send, Shift+Enter for newline.
   const coarseEnter = window.matchMedia?.('(pointer: coarse)').matches;
-  // Slash-command hints: while the first token is a / prefix, offer matching
-  // commands (click/tap completes the command word into the draft).
-  const cmdHints = text.startsWith('/') && !/[\s]/.test(text)
-    ? COMPOSER_COMMANDS.filter(([c]) => c.split(' ')[0].startsWith(text) && c.split(' ')[0] !== text)
+  // Slash-command hints. Command-word mode (no space typed yet): offer
+  // matching commands — an exact match stays listed when the command takes an
+  // argument, since the bare name isn't done yet. Argument mode (`/pov mi`):
+  // offer matches from that command's value list (cmdArgs prop: known
+  // character names, theme names, seen model ids). ↑/↓ move a highlight
+  // through the list (wrapping), Enter or Tab completes the highlighted
+  // entry, Esc dismisses the popup so the raw text can still be sent as-is.
+  const slash = text.startsWith('/');
+  const sp = text.indexOf(' ');
+  const cmdKey = slash ? (sp === -1 ? text : text.slice(0, sp)).toLowerCase() : '';
+  const argPartial = sp === -1 ? '' : text.slice(sp + 1).trimStart();
+  const cmdHints = slash && sp === -1
+    ? COMPOSER_COMMANDS.filter(([c]) => {
+        const w = c.split(' ')[0];
+        return w.startsWith(cmdKey) && (w !== cmdKey || c.includes(' '));
+      })
     : [];
+  // Once the partial starts with a full value + space, the argument is done
+  // and the rest is free text (e.g. /pov's steering) — stop hinting values.
+  const argDomain = cmdArgs?.[cmdKey] ?? [];
+  const argDone = argDomain.some(v => argPartial.toLowerCase().startsWith(v.toLowerCase() + ' '));
+  const argHints = slash && sp !== -1 && !argDone
+    ? argDomain.filter(v => {
+        const lv = v.toLowerCase(), lp = argPartial.toLowerCase();
+        return lv.includes(lp) && lv !== lp;
+      })
+    : [];
+  // One normalized list for both modes (they're mutually exclusive).
+  const [hi, setHi] = useState(0);       // highlighted hint index
+  const [esc, setEsc] = useState(false); // popup dismissed until the next edit
+  const hintItems = esc ? [] : cmdHints.length
+    ? cmdHints.map(([c, d]) => ({ label: c, desc: d, completion: c.split(' ')[0] + (c.includes(' ') ? ' ' : '') }))
+    : argHints.slice(0, 8).map(v => ({ label: v, desc: cmdKey, completion: `${cmdKey} ${v}` }));
+  const hiIdx = Math.min(hi, Math.max(0, hintItems.length - 1));
+  const completeHint = (i) => {
+    const it = hintItems[i];
+    if (!it) return;
+    setText(it.completion);
+    setHi(0);
+    taRef.current?.focus();
+  };
   // Auto-grow the textarea with the draft, capped (CSS max-height) so long
   // messages scroll internally instead of eating the screen. Resting state
   // (empty draft) is a single line regardless of focus.
@@ -5788,19 +5834,30 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   }, [text]);
   return html`
     <div class="composer">
-      ${cmdHints.length > 0 && html`
+      ${hintItems.length > 0 && html`
         <div class="cmd-hints">
-          ${cmdHints.map(([c, d]) => html`
-            <button key=${c} class="cmd-hint"
-              onMouseDown=${(e) => { e.preventDefault(); setText(c.split(' ')[0] + (c.includes(' ') ? ' ' : '')); taRef.current?.focus(); }}>
-              <span class="cmd">${c}</span><span class="desc">${d}</span>
+          ${hintItems.map((it, i) => html`
+            <button key=${it.label} class=${'cmd-hint' + (i === hiIdx ? ' sel' : '')}
+              onMouseDown=${(e) => { e.preventDefault(); completeHint(i); }}>
+              <span class="cmd">${it.label}</span><span class="desc">${it.desc}</span>
             </button>`)}
         </div>`}
       <div class="row">
         <textarea ref=${taRef} value=${text} rows=${1}
           placeholder="Type a message or /"
-          onInput=${(e) => setText(e.target.value)}
+          onInput=${(e) => { setText(e.target.value); setHi(0); setEsc(false); }}
           onKeyDown=${(e) => {
+            if (hintItems.length) {
+              const n = hintItems.length;
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHi(h => (Math.min(h, n - 1) + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+                return;
+              }
+              if (e.key === 'Tab') { e.preventDefault(); completeHint(hiIdx); return; }
+              if (e.key === 'Escape') { e.preventDefault(); setEsc(true); return; }
+              if (e.key === 'Enter' && !e.shiftKey && !coarseEnter) { e.preventDefault(); completeHint(hiIdx); return; }
+            }
             // While generating/busy, Enter falls through to a newline instead
             // of being swallowed with no effect.
             if (e.key === 'Enter' && !e.shiftKey && !coarseEnter && !generating && !busy) { e.preventDefault(); send(); }
@@ -5817,7 +5874,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -6083,7 +6140,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
-        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
+        initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
 }
@@ -6918,6 +6975,15 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterNames = useMemo(
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
+  // Slash-command argument completion domains (composer hint chips + Tab):
+  // /pov completes from the chat's known characters — the exact list the /pov
+  // handler matches against — /theme from theme names, /model from model ids
+  // seen by /v1/models fetches (modelCtxs keys).
+  const cmdArgs = useMemo(() => ({
+    '/pov': characterNames,
+    '/theme': Object.values(THEMES).map(t => t.name),
+    '/model': Object.keys(settings.modelCtxs ?? {}),
+  }), [characterNames, settings.modelCtxs]);
   // Speaker-name colour overrides (global character cards with an explicit
   // colour), keyed by lowercase name — everything else falls back to the
   // name-hash hue in MessageItem.
@@ -7871,19 +7937,32 @@ function Main({ storage, storageKind, storageFailed }) {
       }
       if (cmd === '/continue') { handleContinue(c); return null; }
       if (cmd === '/pov') {
-        if (!arg) return 'Usage: /pov <character name>';
-        // Reframe one generation around another character. If a character-type
-        // lore piece matches the name, it's force-injected (reason 'pov') so
-        // the model sees that definition; otherwise the directive alone stands.
+        if (!arg) return 'Usage: /pov <character> [steering text]';
+        // Reframe one generation around another character. The name is the
+        // longest leading run of words exactly matching a known character's
+        // title (so multi-word names work); any remainder is optional steering
+        // text for this one reply. No exact prefix match → the whole arg is
+        // the name query (exact, then substring), as before. A matched piece
+        // is force-injected (reason 'pov') so the model sees that definition.
         const scen = ref.current.scenarios[c.scenarioId];
-        const q = arg.toLowerCase();
         const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
-        const piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
-          ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q));
+        const words = arg.split(/\s+/);
+        let piece = null, name = '', text = '';
+        for (let n = words.length; n >= 1 && !piece; n--) {
+          const cand = words.slice(0, n).join(' ').toLowerCase();
+          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
+          if (piece) { name = piece.title.trim(); text = words.slice(n).join(' '); }
+        }
+        if (!piece) {
+          const q = arg.toLowerCase();
+          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
+            ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
+          name = piece?.title?.trim() || arg;
+        }
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
         upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
-        fireGeneration(c1, id, { fresh: true, pov: { name: piece?.title?.trim() || arg, pieceId: piece?.id ?? null } });
+        fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
         return null;
       }
       if (cmd === '/improve') {
@@ -7919,7 +7998,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov NAME, /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
@@ -8519,7 +8598,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
-            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
+            <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               genElsewhere=${!!generating && generating.chatId !== chat?.id}
