@@ -496,6 +496,42 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .msg .tools-args {
   color: var(--c-faint); font-size: 11.5px; white-space: pre-wrap; word-break: break-word;
 }
+/* Branch chip + popover: a dashed pill under any message with continuations
+   off the active path (the fork point, visible in the flow); the popover
+   lists every child branch. */
+.branch-chip-row { display: flex; justify-content: center; margin: -2px 0 6px; position: relative; }
+/* Keyboard message selection (↑/↓): accent ring on the selected bubble */
+.msg.kbdsel .bubble { box-shadow: 0 0 0 1.5px var(--c-accent); }
+.branch-chip {
+  font: inherit; font-size: 11.5px; color: var(--c-faint); cursor: pointer;
+  background: transparent; border: 1px dashed var(--c-border); border-radius: 999px;
+  padding: 2px 12px;
+}
+.branch-chip:hover:not(:disabled) { color: var(--c-accent); border-color: var(--c-accent); }
+.branch-chip:disabled { opacity: 0.5; cursor: default; }
+.branch-chip-row .branch-pop { top: calc(100% + 4px); left: 50%; transform: translateX(-50%); right: auto; }
+.branch-chip-row .branch-pop.above { top: auto; bottom: calc(100% + 4px); }
+.msg .branch-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%;
+  font: inherit; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 6px; color: var(--c-text);
+}
+.msg .branch-row:hover:not(:disabled) { background: var(--c-bg-1); border-color: var(--c-border); }
+.msg .branch-row.current { border-color: var(--c-accent); cursor: default; }
+.msg .branch-row:disabled:not(.current) { opacity: 0.5; cursor: default; }
+.msg .branch-row .branch-sw {
+  flex: none; font-size: 10.5px; color: var(--c-faint);
+  border: 1px solid var(--c-border); border-radius: 4px; padding: 0 4px;
+}
+.msg .branch-row .branch-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--c-dim);
+}
+.msg .branch-row.current .branch-text { color: var(--c-text); }
+.msg .branch-row .branch-cur { flex: none; font-size: 10.5px; color: var(--c-accent); }
+.msg .branch-row.branch-tree { justify-content: center; color: var(--c-dim); border-top: 1px solid var(--c-border); border-radius: 0; }
+.msg .branch-row.branch-tree:hover { color: var(--c-accent); }
 .mem-item, .lore-item-row {
   border: 1px solid var(--c-border); border-radius: 6px;
   padding: 6px 8px; margin-bottom: 6px; background: var(--c-bg-2);
@@ -574,6 +610,58 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   background: var(--c-bg-1);
 }
 .links-list { max-height: 110px; overflow-y: auto; border: 1px solid var(--c-border); border-radius: 6px; padding: 4px 8px; }
+
+/* Chat tree modal: indent-guided outline of the whole message graph */
+.ctree { font-size: 13px; }
+.ct-kids { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--c-border); }
+.ct-row {
+  display: flex; align-items: baseline; gap: 7px; width: 100%;
+  font: inherit; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 7px; color: var(--c-dim); margin: 1px 0;
+}
+.ct-row:hover:not(:disabled) { background: var(--c-bg-2); border-color: var(--c-border); color: var(--c-text); }
+.ct-row:disabled { opacity: 0.6; cursor: default; }
+.ct-row.active { color: var(--c-text); }
+.ct-row.leaf { border-color: var(--c-accent); }
+.ct-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; }
+.ct-dot.user { background: var(--c-user); }
+.ct-dot.assistant { background: var(--c-accent); }
+.ct-sw {
+  flex: none; font-size: 10.5px; color: var(--c-faint);
+  border: 1px solid var(--c-border); border-radius: 4px; padding: 0 4px;
+}
+.ct-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-num { flex: none; font-size: 10.5px; color: var(--c-faint); }
+.ct-len { flex: none; font-size: 11px; color: var(--c-faint); }
+.ct-br { flex: none; font-size: 11px; color: var(--c-accent); }
+.ct-leaf { flex: none; font-size: 9px; color: var(--c-accent); }
+
+/* Branch graph (sparse): segment nodes + SVG bezier edges, left→right on a
+   fixed grid — the condensed tree is tiny, so no layout engine is needed. */
+.bgraph-wrap {
+  overflow: auto; max-height: 62vh;
+  border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-bg-2);
+}
+.bgraph { position: relative; margin: 0 auto; }
+.bgraph-edges { position: absolute; inset: 0; pointer-events: none; }
+.bgraph-edges path { fill: none; stroke: var(--c-border); stroke-width: 1.5; }
+.bgraph-edges path.active { stroke: var(--c-accent); }
+.bg-node {
+  position: absolute; display: flex; flex-direction: column; gap: 2px;
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  background: var(--c-bg-1); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 5px 8px; color: var(--c-dim);
+}
+.bg-node:hover:not(:disabled) { border-color: var(--c-accent); color: var(--c-text); }
+.bg-node:disabled { opacity: 0.6; cursor: default; }
+.bg-node.active { border-color: var(--c-accent); color: var(--c-text); }
+.bg-node.leaf { border-color: var(--c-accent); }
+.bg-top { display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; color: var(--c-faint); }
+.bg-top .bg-num { color: var(--c-dim); font-weight: 600; }
+.bg-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.bview-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.bview-toggle { flex: none; display: flex; gap: 2px; }
 
 .banner {
   background: color-mix(in oklch, var(--c-danger) 18%, var(--c-bg-1));
@@ -759,7 +847,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.8.1';
+const APP_VERSION = '4.9.0';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1137,12 +1225,129 @@ function getActivePath(messages, activeLeafId) {
 
 function appendMessage(chat, parentId, role, text, modelId = null) {
   const id = uid();
-  const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false };
+  const parent = chat.messages[parentId];
+  // fromSwipe: which swipe of the parent this child continues from — the link
+  // that makes swiping a mid-chain node swap the branch below it.
+  const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false,
+    ...(parent ? { fromSwipe: parent.activeSwipe } : {}) };
   const messages = { ...chat.messages, [id]: node };
   // Record which swipe of the parent the conversation continues from.
-  const parent = messages[parentId];
   if (parent) messages[parentId] = { ...parent, usedSwipe: parent.activeSwipe };
   return { chat: { ...chat, messages, activeLeafId: id }, id };
+}
+
+// Branch links for chats saved before in-chat branching: a child with no
+// fromSwipe continues the swipe the conversation was recorded as continuing
+// from (parent.usedSwipe, else the parent's current view). Clamped to the
+// parent's swipe count. No-op (same object) when nothing needs stamping.
+function normalizeBranchSwipes(chat) {
+  if (!chat?.messages) return chat;
+  let changed = false;
+  const messages = { ...chat.messages };
+  for (const [id, n] of Object.entries(messages)) {
+    if (!n?.parentId || Number.isInteger(n.fromSwipe)) continue;
+    const p = messages[n.parentId];
+    if (!p) continue;
+    const idx = Number.isInteger(p.usedSwipe) ? p.usedSwipe : (p.activeSwipe ?? 0);
+    messages[id] = { ...n, fromSwipe: Math.min(Math.max(idx, 0), (p.swipes?.length ?? 1) - 1) };
+    changed = true;
+  }
+  return changed ? { ...chat, messages } : chat;
+}
+
+// Children of a node, oldest first (first-swipe createdAt, then id).
+function childrenOf(messages, nodeId) {
+  const out = [];
+  for (const n of Object.values(messages ?? {}))
+    if (n?.parentId === nodeId) out.push(n);
+  out.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0))
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return out;
+}
+
+// Switch the visible branch so the active path runs THROUGH nodeId, then
+// descend to the branch tip. Two phases:
+//   1. Align ancestors — each node on the root→nodeId path is set to show the
+//      swipe its path-child continues from (child.fromSwipe), so a rendered
+//      path is always one consistent conversation.
+//   2. Descend from nodeId — follow children matching the node's activeSwipe.
+//      keepPath (swipe cycling) prefers the child already on the current path
+//      when it still matches, so browsing disrupts the tail as little as
+//      possible; otherwise the newest child wins. A node whose viewed swipe
+//      has no continuation but whose usedSwipe does snaps to usedSwipe —
+//      self-heals view state left over from pre-branching chats. The snap
+//      never applies to the start node when snapStart is false (explicit
+//      swipe browsing: the user asked to view that swipe — truncate instead
+//      of snapping back to the continued one).
+//      descend:false stops after phase 1 (chat open: align the persisted view
+//      without re-descending into a rewound branch).
+// Nothing is deleted — hidden branches stay in the tree and re-emerge when
+// their swipe is selected again. Identity return when nothing changes.
+function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapStart = true } = {}) {
+  const msgs = chat?.messages;
+  if (!msgs?.[nodeId]) return chat;
+  let messages = msgs;
+  const setSwipe = (id, idx) => {
+    const n = messages[id];
+    if (!n || !Number.isInteger(idx) || idx < 0 || idx >= (n.swipes?.length ?? 0) || n.activeSwipe === idx) return;
+    if (messages === msgs) messages = { ...msgs };
+    messages[id] = { ...n, activeSwipe: idx };
+  };
+  const matches = (parent, child) => (child.fromSwipe ?? parent.usedSwipe ?? 0) === parent.activeSwipe;
+  const path = getActivePath(msgs, nodeId);
+  for (let i = 0; i < path.length - 1; i++) {
+    const desired = path[i + 1].fromSwipe ?? path[i].usedSwipe;
+    if (Number.isInteger(desired)) setSwipe(path[i].id, desired);
+  }
+  const curPath = keepPath ? new Set(getActivePath(msgs, chat.activeLeafId).map(n => n.id)) : null;
+  let tip = descend ? nodeId : chat.activeLeafId;
+  let atStart = true;
+  for (let guard = descend ? Object.keys(msgs).length + 1 : 0; guard > 0; guard--) {
+    const node = messages[tip];
+    if (!node) break;
+    let kids = childrenOf(messages, tip).filter(k => matches(node, k));
+    if (!kids.length && (snapStart || !atStart)
+        && Number.isInteger(node.usedSwipe) && node.usedSwipe !== node.activeSwipe) {
+      const snapped = { ...node, activeSwipe: node.usedSwipe };
+      const alt = childrenOf(messages, tip).filter(k => matches(snapped, k));
+      if (alt.length) {
+        if (messages === msgs) messages = { ...msgs };
+        messages[tip] = snapped;
+        kids = alt;
+      }
+    }
+    atStart = false;
+    if (!kids.length) break;
+    const next = (curPath && kids.find(k => curPath.has(k.id))) || kids[kids.length - 1];
+    tip = next.id;
+  }
+  if (messages === msgs && tip === chat.activeLeafId) return chat;
+  return { ...chat, messages, activeLeafId: tip };
+}
+
+// Ids on the active path — the branch-visibility scope for world state.
+const pathIdSet = (messages, leafId) => new Set(getActivePath(messages, leafId).map(n => n.id));
+
+// Branch view of a revision-tracked piece: effective content/keys come from
+// the last revision whose origin (createdBy) is global (null) or on the
+// active path. The stored log is never touched — switching branches
+// re-derives the view. Identity return when the latest revision is visible.
+function pieceAtPath(piece, pathIds) {
+  const revs = piece?.revisions;
+  if (!Array.isArray(revs) || revs.length < 2 || !pathIds) return piece;
+  let vis = null;
+  for (const r of revs) if (r?.createdBy == null || pathIds.has(r.createdBy)) vis = r;
+  if (!vis || vis === revs[revs.length - 1]) return piece;
+  return { ...piece, content: vis.content, keys: vis.keys ?? [] };
+}
+
+// Piece-level branch visibility: a piece belongs on this branch when its own
+// origin (createdBy) OR any revision's origin is global/on-path — a tool
+// update written on this branch pulls the piece into this branch's view
+// (pieceAtPath then picks the content this branch last saw).
+function pieceVisibleAt(piece, pathIds) {
+  if (piece?.createdBy == null || pathIds.has(piece.createdBy)) return true;
+  return Array.isArray(piece?.revisions) && piece.revisions.some(r => r?.createdBy != null && pathIds.has(r.createdBy));
 }
 
 // Reset every node's activeSwipe to its recorded usedSwipe (the version the
@@ -1202,7 +1407,15 @@ function pruneInterrupted(chat) {
     const seen = new Set();
     while (cur && !out[cur] && !seen.has(cur)) { seen.add(cur); cur = chat.messages[cur]?.parentId ?? null; }
     if (cur && !out[cur]) cur = null; // the chain closed a cycle
-    if (cur !== n.parentId) out[id] = { ...n, parentId: cur };
+    if (cur !== n.parentId) {
+      // Re-parented: fromSwipe indexes the OLD parent's swipes — re-stamp it
+      // against the new parent (or drop it when the node becomes a root).
+      const p = cur ? out[cur] : null;
+      const nn = { ...n, parentId: cur };
+      if (p) nn.fromSwipe = Number.isInteger(p.usedSwipe) ? p.usedSwipe : (p.activeSwipe ?? 0);
+      else delete nn.fromSwipe;
+      out[id] = nn;
+    }
   }
   let activeLeafId = chat.activeLeafId;
   const leafSeen = new Set();
@@ -1530,12 +1743,13 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null) {
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
   // atLen is stamped at creation, before eviction: in an all-pinned full store
   // the incoming entry is the one dropped, and stamping after the fact would
-  // mis-tag an unrelated old memory's rewind position.
+  // mis-tag an unrelated old memory's rewind position. atMsg (active leaf at
+  // creation) scopes the memory to its branch in assemblePrompt.
   const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}) }];
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -1572,8 +1786,23 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
   const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
-  // Merged once here — the lore layer below reuses this same list.
-  const lorePieces = mergedLorePieces(scenario, chat, characters);
+  // Branch visibility: model/app-written world state is scoped to the branch
+  // it was created on. A chat-overlay piece whose origin node (createdBy) or a
+  // memory whose origin leaf (atMsg) is not on the ACTIVE path is hidden —
+  // derived per assembly, never deleted, so switching branches re-derives it
+  // (unstamped entries are global). A hidden overlay piece also stops
+  // shadowing its scenario/global original, which resurfaces on other
+  // branches. Dedupe paths (applyToolCalls allPieces) still see everything.
+  const pathIds = pathIdSet(chat?.messages ?? {}, chat?.activeLeafId);
+  const branchHidden = (Array.isArray(chat?.lorePieces) ? chat.lorePieces : [])
+    .filter(p => !pieceVisibleAt(p, pathIds));
+  const chatForLore = branchHidden.length
+    ? { ...chat, lorePieces: chat.lorePieces.filter(p => pieceVisibleAt(p, pathIds)) }
+    : chat;
+  // Merged once here — the lore layer below reuses this same list. Pieces with
+  // a revision log are viewed at the last revision visible on this branch.
+  const lorePieces = mergedLorePieces(scenario, chatForLore, characters)
+    .map(p => pieceAtPath(p, pathIds));
   // Registered speakers, spelled out in the prompt: weak models shorten long
   // names ("The Auctioneer" → "Auctioneer:") and the display split is an
   // exact name match, so the full names are listed explicitly. Mirrors
@@ -1648,7 +1877,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    overlay, chat wins on id) — list merged above the static layer.
   const loreCap = Math.floor(budget * caps.lore);
   const chatPieceIds = new Set(
-    (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
+    (Array.isArray(chatForLore?.lorePieces) ? chatForLore.lorePieces : []).map(p => p?.id).filter(Boolean));
   // Resolved global characters carry origin: 'character' from resolveCharacters
   // (via mergedLorePieces). selectLore strips extra piece fields, so origin is
   // recovered by id, not from the selected candidate. A chat overlay piece
@@ -1692,6 +1921,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const overBudget = inactive.filter(p => p.reason === 'over-budget').length;
   if (overBudget > 0)
     manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
+  // Branch-hidden overlay pieces surface in the Inspector's Not-injected list
+  // with their own reason — they're not disabled or unmatched, they belong to
+  // a sibling branch.
+  for (const p of branchHidden) {
+    inactive.push({
+      id: p.id, title: p.title ?? '', reason: 'branch', origin: 'chat',
+      tokens: est(`[${p.title ?? ''}]\n${sub(p.content ?? '')}`),
+      preview: toPreview(p.content), content: p.content ?? '',
+    });
+  }
   manifest.layers.lore = {
     tokens: loreTokens, cap: loreCap,
     pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: originOf(s), tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
@@ -1707,7 +1946,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    (createdAt asc) so the model reads the memory block forwards in time.
   //    Per-memory cost counts the `- ` prefix exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
-  const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
+  // Branch visibility (same rule as the lore layer): a memory stamped with
+  // atMsg (the leaf it was summarized under) injects only while that node is
+  // on the active path; unstamped memories are global.
+  const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
+  const memHidden = memStore.filter(m => m?.atMsg != null && !pathIds.has(m.atMsg));
+  const memAll = memStore.filter(m => !(m?.atMsg != null && !pathIds.has(m.atMsg)));
   const smart = memScores instanceof Map;
   const memThreshold = typeof settings.semanticThreshold === 'number' ? settings.semanticThreshold : 0.55;
   const memPinnedList = memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt);
@@ -1747,7 +1991,11 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       reason: (smart && !m.pinned && !recentKeep.has(m.id) && (memScores.get(m.id) ?? 0) < memThreshold)
         ? 'below-threshold' : 'over-budget',
       ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
-      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
+      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))
+      // Belong to a sibling branch — hidden, not deleted.
+      .concat(memHidden.map(m => ({
+        id: m.id, pinned: !!m.pinned, reason: 'branch',
+        tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))),
   };
 
   // 5. history fills the remainder; oldest messages dropped first.
@@ -2270,7 +2518,7 @@ function normalizeChat(c) {
       ? Math.min(Math.max(n.activeSwipe, 0), swipes.length - 1) : 0;
     messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
   }
-  return { ...o, messages };
+  return normalizeBranchSwipes({ ...o, messages });
 }
 // ---- character card import (chara_card v1/v2/v3, JSON or PNG-embedded) ----
 // Card trigger keys are plain text; FictionPad keys are regex — escape to
@@ -4728,7 +4976,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -4800,6 +5048,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
           </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px' }}>
+        ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
@@ -4980,24 +5229,27 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory }) {
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
   const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
   const [toolsOpen, setToolsOpen] = useState(false); // gear pill: per-swipe tool-call popover
-  // Auto-hide the actions/meta/tools popovers when tapping anywhere else.
+  const [branchOpen, setBranchOpen] = useState(false); // ⎇ chip: branch-picker popover
+  const [branchUp, setBranchUp] = useState(false); // popover flips above the chip near the viewport bottom
+  // Auto-hide the actions/meta/tools/branch popovers when tapping anywhere else.
   useEffect(() => {
-    if (!actionsOpen && !metaOpen && !toolsOpen) return;
+    if (!actionsOpen && !metaOpen && !toolsOpen && !branchOpen) return;
     const onDown = (e) => {
       if (!e.target.closest?.('.actions, .actions-toggle')) setActionsOpen(false);
       if (!e.target.closest?.('.meta-details, .meta-toggle')) setMetaOpen(false);
       if (!e.target.closest?.('.tools-pop, .tools-toggle')) setToolsOpen(false);
+      if (!e.target.closest?.('.branch-pop, .branch-chip')) setBranchOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [actionsOpen, metaOpen, toolsOpen]);
+  }, [actionsOpen, metaOpen, toolsOpen, branchOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
@@ -5038,10 +5290,19 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
   const displayText = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
   const n = node.activeSwipe + 1, m = node.swipes.length;
-  const isLeafAssistant = isLeaf && !isUser;
-  const showNav = m > 1 || isLeafAssistant;
+  // Swipe nav on every assistant message: at the last swipe ▶⁺ generates a
+  // new take THERE (mid-chain regen forks a branch — the continuation is
+  // kept), not just on the leaf.
+  const showNav = m > 1 || !isUser;
+  // Branch data: branchKids = every child of this node (each one a branch
+  // root), childOnPathId = the child the active path follows. The ●/○ marker
+  // derives from the path child's fromSwipe (the swipe the conversation
+  // actually continued from), falling back to the node's usedSwipe record.
+  const pathChild = branchKids.find(k => k.id === childOnPathId) ?? null;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
-  const atUsed = usedIdx === node.activeSwipe;
+  const continuedIdx = pathChild ? (pathChild.fromSwipe ?? usedIdx) : usedIdx;
+  const atUsed = continuedIdx === node.activeSwipe;
+  const offPathKids = branchKids.filter(k => k.id !== childOnPathId);
   // Reasoning channel (swipe.think): its own bubble ahead of the reply —
   // visually separated like a speaker segment, but unnamed and collapsible.
   const thinkBubble = !isUser && !editing && showThinking !== false && swipe.think
@@ -5066,9 +5327,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
       if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
         g.consumed = true;
         setDragX(0);
-        if (dx < 0) { // swipe left: next swipe, or generate on the leaf's last
+        if (dx < 0) { // swipe left: next swipe, or generate a new take here
           if (n < m) onSwipe(node.id, 1);
-          else if (isLeafAssistant) onRegenerate(node.id);
+          else onRegenerate(node.id); // any assistant node — mid-chain forks a branch
         } else if (n > 1) { // swipe right: back
           onSwipe(node.id, -1);
         }
@@ -5097,7 +5358,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // (desktop shows them inline via .meta-details { display: contents }).
   const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
   return html`
-    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''}" data-mid=${node.id}
       onContextMenu=${(e) => {
         // Keep the native menu when the user has text selected (copy etc.).
         if (window.getSelection()?.toString()) return;
@@ -5147,7 +5408,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
             onClick=${() => onRegenerate(node.id)}>↻</button>`}
           ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating || auxBusy}
             onClick=${() => onReply(node.id)}>↻</button>`}
-          <button class="btn small ghost" title="Branch from here" disabled=${generating}
+          <button class="btn small ghost" title="Fork to a new chat (copies everything up to this message)" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
           ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
             onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮\uFE0E</button>`}
@@ -5160,18 +5421,18 @@ ${showNav && html`
           <span class="swipes">
             <button class="btn small ghost" title="Previous swipe" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
             <span>${n}/${m}</span>
-            ${usedIdx != null && html`
+            ${continuedIdx != null && html`
               <span class="used-dot ${atUsed ? '' : 'jump'}"
-                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
-                onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
+                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${continuedIdx + 1} — click to view`}
+                onClick=${() => !atUsed && onSwipeTo(node.id, continuedIdx)}>${atUsed ? '●' : '○'}</span>`}
             ${n < m
               ? html`<button class="btn small ghost" title="Next swipe" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
-              : isLeafAssistant
-                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating || auxBusy}
+              : !isUser
+                ? html`<button class="btn small ghost gen" title="Generate a new version here — the current continuation is kept as a branch" disabled=${generating || auxBusy}
                     onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
                 : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
           </span>`}
-        
+
       </div>
       ${multi && !editing && !(showProbs && hasProbs) ? html`
         ${thinkBubble}
@@ -5203,6 +5464,37 @@ ${showNav && html`
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
             : html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`}
       </div>`}
+      ${offPathKids.length > 0 && html`
+        <div class="branch-chip-row">
+          <button class="branch-chip" disabled=${generating}
+            title="This message has continuations on other branches — click to compare or switch"
+            onClick=${(e) => {
+              if (!branchOpen) {
+                // Flip up when the popover wouldn't fit below the chip (a
+                // truncated pseudo-branch sits at the bottom of the chat).
+                const r = e.currentTarget.getBoundingClientRect();
+                setBranchUp(window.innerHeight - r.bottom < 300);
+              }
+              setBranchOpen(!branchOpen);
+            }}>⎇ ${offPathKids.length} other ${offPathKids.length === 1 ? 'branch' : 'branches'} from here ${branchOpen ? '▴' : '▾'}</button>
+          ${branchOpen && html`
+            <span class="tools-pop branch-pop ${branchUp ? 'above' : ''}">
+              ${branchKids.map(k => {
+                const cur = k.id === childOnPathId;
+                const kFrom = k.fromSwipe ?? usedIdx ?? 0;
+                return html`
+                  <button key=${k.id} class="branch-row ${cur ? 'current' : ''}" disabled=${generating || cur}
+                    title=${cur ? 'This is the branch you are on' : 'Switch to this branch'}
+                    onClick=${() => { setBranchOpen(false); onJump(k.id); }}>
+                    <span class="ct-dot ${k.role}"></span>
+                    ${kFrom !== node.activeSwipe && html`<span class="branch-sw">swipe ${kFrom + 1}</span>`}
+                    <span class="branch-text">${toPreview(activeText(k), 80) || '(empty)'}</span>
+                    ${cur && html`<span class="branch-cur">current</span>`}
+                  </button>`;
+              })}
+              <button class="branch-row branch-tree" onClick=${() => { setBranchOpen(false); onOpenBranches?.(); }}>⎇ View all branches</button>
+            </span>`}
+        </div>`}
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
@@ -5211,7 +5503,7 @@ ${showNav && html`
             isUser
               ? { label: 'Reply from here', fn: () => onReply(node.id), disabled: generating || auxBusy }
               : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id), disabled: generating || auxBusy },
-            { label: 'Branch from here', fn: () => onBranch(node.id) },
+            { label: 'Fork to new chat', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
               { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
@@ -5253,6 +5545,174 @@ const MessageItemMemo = React.memo(MessageItem, (a, b) => {
   return true;
 });
 
+
+// ============================================================================
+// COMPONENTS: BRANCH PANEL — the message graph condensed to its branch
+// structure. Single-child runs collapse into one segment ("#start · preview ·
+// N msg"), so long chats render a handful of items, not one per message; only
+// branch points (≥ 2 children) fork, and swipe alternatives that nothing
+// continues from don't appear (those stay inline-arrow territory).
+// Two renderings: the indent-guided outline (default — degenerates the most
+// gracefully) and a sparse top-down graph (fork depth grows downward —
+// mouse-wheel friendly — with SVG bezier edges on a fixed grid, no library),
+// swapped via the Graph/Outline toggle. Active path highlighted, leaf marked,
+// click = switch.
+// ============================================================================
+function BranchPanel({ chat, personaName = 'User', generating = false, onJump }) {
+  const messages = chat.messages ?? {};
+  const kidsOf = new Map();
+  const roots = [];
+  for (const n of Object.values(messages)) {
+    if (!n) continue;
+    if (n.parentId && messages[n.parentId]) {
+      if (!kidsOf.has(n.parentId)) kidsOf.set(n.parentId, []);
+      kidsOf.get(n.parentId).push(n);
+    } else roots.push(n);
+  }
+  const byAge = (a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1);
+  for (const kids of kidsOf.values()) kids.sort(byAge);
+  roots.sort(byAge);
+  const activeIds = pathIdSet(messages, chat.activeLeafId);
+  // swipe tag for a branch, only when the siblings continue DIFFERENT parent
+  // swipes (same-swipe siblings need no disambiguation).
+  const swipeTagOf = (kid, kids) => {
+    const parent = messages[kid.parentId];
+    if ((parent?.swipes?.length ?? 1) < 2) return null;
+    const froms = new Set(kids.map(k => k.fromSwipe ?? parent?.usedSwipe ?? 0));
+    return froms.size > 1 ? `swipe ${(kid.fromSwipe ?? parent?.usedSwipe ?? 0) + 1}` : null;
+  };
+  // Condensed segments, shared by both renderers. `num` is the segment's
+  // 1-based message position (root = 1, like the chat log's # meta) so a
+  // branch forking at #78 vs #108 reads correctly at a glance.
+  const rendered = new Set(); // cycle guard (crafted imports)
+  const segs = [];
+  const buildSeg = (start, depth, swipeTag) => {
+    if (rendered.has(start.id)) return null;
+    const chain = [start];
+    const seen = new Set([start.id]);
+    let end = start;
+    while ((kidsOf.get(end.id) ?? []).length === 1) {
+      const nxt = kidsOf.get(end.id)[0];
+      if (seen.has(nxt.id)) break;
+      seen.add(nxt.id);
+      end = nxt;
+      chain.push(nxt);
+    }
+    for (const n of chain) rendered.add(n.id);
+    const kids = kidsOf.get(end.id) ?? [];
+    const seg = {
+      id: start.id, start, chain, depth, swipeTag,
+      num: getActivePath(messages, start.id).length,
+      onPath: chain.some(n => activeIds.has(n.id)),
+      hasLeaf: chain.some(n => n.id === chat.activeLeafId),
+      kids: [],
+    };
+    segs.push(seg);
+    if (kids.length > 1)
+      seg.kids = kids.map(k => buildSeg(k, depth + 1, swipeTagOf(k, kids))).filter(Boolean);
+    return seg;
+  };
+  const segRoots = roots.map(r => buildSeg(r, 0, null)).filter(Boolean);
+  const branchPoints = segs.reduce((n, s) => n + (s.kids.length > 1 ? 1 : 0), 0);
+  // View toggle: outline is the default everywhere (it degenerates the most
+  // gracefully); the user can flip to the sparse graph per opening.
+  const [viewPref, setViewPref] = useState(null); // null = default
+  const mode = viewPref ?? 'outline';
+  const hint = html`
+    <div class="hint bview-head">
+      <span>
+        ${Object.keys(messages).length} messages · ${branchPoints} branch ${branchPoints === 1 ? 'point' : 'points'}.
+        ${branchPoints === 0
+          ? 'No branches yet — swiping or regenerating a message mid-chat keeps the old continuation as a branch here.'
+          : 'Each item is a run of messages starting at the # shown; forks are alternative continuations. The highlighted chain is what you are looking at — click to switch to it. Nothing is deleted — branches just leave the active path.'}
+      </span>
+      ${roots.length > 0 && html`
+        <span class="bview-toggle">
+          <button class="btn small ghost ${mode === 'graph' ? 'active' : ''}" onClick=${() => setViewPref('graph')}>Graph</button>
+          <button class="btn small ghost ${mode === 'outline' ? 'active' : ''}" onClick=${() => setViewPref('outline')}>Outline</button>
+        </span>`}
+    </div>`;
+  if (roots.length === 0) return html`<div>${hint}<div class="hint">No messages yet.</div></div>`;
+
+  // ---- sparse graph rendering (top-down: fork depth grows downward with
+  // the scroll wheel, tips spread across columns) ----
+  if (mode === 'graph') {
+    const COL_W = 164, ROW_H = 56, NODE_W = 148, NODE_H = 44, PAD = 10;
+    // Column layout: the oldest continuation keeps the parent's column, so
+    // the mainline reads as one straight vertical line; each further sibling
+    // starts a fresh column to the right, spaced by its subtree's tip count.
+    // (Parent-centered tidy layouts strand whole columns of empty space.)
+    const widthOf = (seg) => seg.kids.length ? seg.kids.reduce((w, k) => w + widthOf(k), 0) : 1;
+    const xOf = new Map(); // segment → column
+    const place = (seg, col) => {
+      xOf.set(seg.id, col);
+      let c = col;
+      for (const kid of seg.kids) { place(kid, c); c += widthOf(kid); }
+    };
+    let colCount = 0;
+    for (const r of segRoots) { place(r, colCount); colCount += widthOf(r); }
+    const maxDepth = segs.reduce((d, s) => Math.max(d, s.depth), 0);
+    const width = PAD * 2 + Math.max(1, colCount) * COL_W;
+    const height = PAD * 2 + (maxDepth + 1) * ROW_H;
+    const posOf = (seg) => ({
+      x: PAD + xOf.get(seg.id) * COL_W + (COL_W - NODE_W) / 2,
+      y: PAD + seg.depth * ROW_H,
+    });
+    const edges = [];
+    for (const seg of segs) for (const kid of seg.kids) {
+      const a = posOf(seg), b = posOf(kid);
+      const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H, x2 = b.x + NODE_W / 2, y2 = b.y;
+      edges.push({ x1, y1, x2, y2, active: seg.onPath && kid.onPath, key: `${seg.id}>${kid.id}` });
+    }
+    return html`
+      <div>${hint}
+        <div class="bgraph-wrap">
+          <div class="bgraph" style=${{ width: `${width}px`, height: `${height}px` }}>
+            <svg class="bgraph-edges" width=${width} height=${height}>
+              ${edges.map(e => html`<path key=${e.key} class=${e.active ? 'active' : ''}
+                d=${`M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + 22}, ${e.x2} ${e.y2 - 22}, ${e.x2} ${e.y2}`} />`)}
+            </svg>
+            ${segs.map(seg => {
+              const p = posOf(seg);
+              return html`
+                <button key=${seg.id} class="bg-node ${seg.onPath ? 'active' : ''} ${seg.hasLeaf ? 'leaf' : ''}"
+                  style=${{ left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, minHeight: `${NODE_H}px` }}
+                  disabled=${generating}
+                  title=${generating ? 'Wait for the generation to finish' : `Switch to this branch — ${toPreview(subUser(activeText(seg.start), personaName), 160)}`}
+                  onClick=${() => onJump(seg.id)}>
+                  <span class="bg-top">
+                    <span class="ct-dot ${seg.start.role === 'user' ? 'user' : 'assistant'}"></span>
+                    <span class="bg-num">#${seg.num}</span>
+                    ${seg.swipeTag && html`<span class="ct-sw">${seg.swipeTag}</span>`}
+                    ${seg.chain.length > 1 && html`<span class="ct-len">${seg.chain.length} msg</span>`}
+                    ${seg.hasLeaf && html`<span class="ct-leaf" title="The active end of the conversation">●</span>`}
+                  </span>
+                  <span class="bg-text">${toPreview(subUser(activeText(seg.start), personaName), 34) || '(empty)'}</span>
+                </button>`;
+            })}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ---- outline fallback (huge branch structures) ----
+  const segView = (seg) => html`
+    <div class="ct-node" key=${seg.id}>
+      <button class="ct-row ${seg.onPath ? 'active' : ''} ${seg.hasLeaf ? 'leaf' : ''}" disabled=${generating}
+        title=${generating ? 'Wait for the generation to finish' : 'Switch to the branch through this message'}
+        onClick=${() => onJump(seg.id)}>
+        <span class="ct-dot ${seg.start.role === 'user' ? 'user' : 'assistant'}"></span>
+        <span class="ct-num">#${seg.num}</span>
+        ${seg.swipeTag && html`<span class="ct-sw">${seg.swipeTag}</span>`}
+        <span class="ct-text">${toPreview(subUser(activeText(seg.start), personaName), 110) || '(empty)'}</span>
+        ${seg.chain.length > 1 && html`<span class="ct-len">${seg.chain.length} msg</span>`}
+        ${seg.kids.length > 1 && html`<span class="ct-br" title=${`${seg.kids.length} branches continue from here`}>⎇ ${seg.kids.length}</span>`}
+        ${seg.hasLeaf && html`<span class="ct-leaf" title="The active end of the conversation">●</span>`}
+      </button>
+      ${seg.kids.length > 1 && html`<div class="ct-kids">${seg.kids.map(segView)}</div>`}
+    </div>`;
+  return html`<div>${hint}<div class="ctree">${segRoots.map(segView)}</div></div>`;
+}
 const COMPOSER_COMMANDS = [
   ['/ooc', 'speak out of character'],
   ['/continue', 'continue the last reply'],
@@ -5335,10 +5795,26 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     </div>`;
 }
 
+const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
+
 function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
+  // Branch data for the swipe-nav badge / branch popover: parentId → children,
+  // oldest first. Keyed on the messages map so identities stay stable across
+  // unrelated re-renders (MessageItem memo compares prop identities).
+  const kidsByParent = useMemo(() => {
+    const map = new Map();
+    for (const n of Object.values(chat?.messages ?? {})) {
+      if (!n?.parentId) continue;
+      if (!map.has(n.parentId)) map.set(n.parentId, []);
+      map.get(n.parentId).push(n);
+    }
+    for (const kids of map.values())
+      kids.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1));
+    return map;
+  }, [chat?.messages]);
   // Memory pills: path position → count of memories stamped there (atLen), so
   // the message where an auto-summary fired shows it and can jump to the
   // Memory tab. Rewind trims the store, so stale pills vanish on their own.
@@ -5417,6 +5893,31 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
   };
   useEffect(() => { // follow growth only when pinned
     const el = logRef.current;
+    // Branch swap (swipe that re-derived the leaf, branch picker/view jump):
+    // keep the acted message on screen instead of force-following to the new
+    // branch's bottom — the tail changed, not the user's reading position.
+    const tgt = scrollTargetRef?.current;
+    if (tgt && tgt.chatId === chat?.id) {
+      scrollTargetRef.current = null;
+      const leafChanged = path[path.length - 1]?.id !== seenLeafRef.current;
+      if (el && leafChanged) {
+        skipLeafScrollRef.current = true; // the seenLeaf effect must not bottom-scroll after us
+        pinnedRef.current = false;
+        setPinned(false);
+        const nodeEl = el.querySelector(`[data-mid="${tgt.nodeId}"]`);
+        if (nodeEl) {
+          const r = nodeEl.getBoundingClientRect();
+          const lr = el.getBoundingClientRect();
+          if (r.top < lr.top + 8 || r.top > lr.bottom - 80) { // not comfortably visible
+            programmaticRef.current = true;
+            el.scrollTop += (r.top - lr.top) - 12; // settle near the top of the log
+            requestAnimationFrame(() => { programmaticRef.current = false; });
+          }
+        }
+        computeJump();
+        return;
+      }
+    }
     if (pinnedRef.current) {
       if (el) scrollElToBottom(el);
     } else computeJump(); // content grew while unpinned — jump may newly apply
@@ -5437,14 +5938,35 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
     wasGenRef.current = !!generating;
   }, [generating]);
   const seenLeafRef = useRef(null);
+  const skipLeafScrollRef = useRef(false); // set when a branch-swap scroll already handled the leaf change
   useEffect(() => {
     const leafId = path[path.length - 1]?.id;
     const role = path[path.length - 1]?.role;
     if (leafId && leafId !== seenLeafRef.current) {
-      if (role === 'user' && seenLeafRef.current !== null) scrollToBottom();
+      if (role === 'user' && seenLeafRef.current !== null && !skipLeafScrollRef.current) scrollToBottom();
+      skipLeafScrollRef.current = false;
       seenLeafRef.current = leafId;
     }
   }, [path]);
+  // Keyboard message selection (↑/↓ in Main): highlight only while the node
+  // is on the active path; scroll it into view (a third down) when needed.
+  const selId = kbdSel && path.some(n => n.id === kbdSel) ? kbdSel : null;
+  useEffect(() => {
+    if (!selId) return;
+    const el = logRef.current;
+    const nodeEl = el?.querySelector(`[data-mid="${selId}"]`);
+    if (!el || !nodeEl) return;
+    const r = nodeEl.getBoundingClientRect();
+    const lr = el.getBoundingClientRect();
+    if (r.top < lr.top + 8 || r.bottom > lr.bottom - 8) {
+      pinnedRef.current = false;
+      setPinned(false);
+      programmaticRef.current = true;
+      el.scrollTop += (r.top - lr.top) - el.clientHeight / 3;
+      requestAnimationFrame(() => { programmaticRef.current = false; });
+      computeJump();
+    }
+  }, [selId]);
   // Per-chat composer drafts (ephemeral, session-only — never persisted). The
   // Composer remounts per chat (key=chat.id) and seeds from this map; edits
   // flow back via onDraft, so an unsent draft survives any number of chat
@@ -5503,14 +6025,16 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
               <span>last generation saw from here down · ${horizon.dropped} older message${horizon.dropped === 1 ? '' : 's'} out of context</span>
             </div>`}
           <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+            selected=${node.id === selId}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             auxBusy=${auxBusy.length > 0}
             dateFormat=${dateFormat} showThinking=${showThinking}
             memCount=${memByLen.get(i + 1) ?? 0} onOpenMemory=${actions.onOpenMemory}
+            branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
-            onSwipeTo=${actions.onSwipeTo}
+            onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
           <//>`)}
@@ -5854,7 +6378,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -5866,13 +6390,13 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
         <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />`}
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
-          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} />`}
+          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -5883,7 +6407,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />
     <//>`;
 }
 
@@ -5897,7 +6421,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -5913,7 +6437,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -6235,6 +6759,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
+  const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
 
   // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
   // separate requests that never touch the main context, so the manifest can't
@@ -6349,15 +6874,16 @@ function Main({ storage, storageKind, storageFailed }) {
 
   const chat = chats[ui.chatId] ?? null;
   // On chat open/switch (incl. after branching): drop debris from generations
-  // killed by a reload, then default to the swipes the conversation actually
-  // continued from. In-session browsing is unaffected.
+  // killed by a reload, stamp branch links on pre-branching chats, default to
+  // the swipes the conversation actually continued from, and align the active
+  // path. In-session browsing is unaffected.
   useEffect(() => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
     // A live generation owns this chat's swipe state — pruning here would
     // strip its in-flight (unflagged) swipe out from under the stream.
     if (generating?.chatId === c.id) return;
-    const next = applyUsedSwipes(pruneInterrupted(c));
+    const next = activateBranch(applyUsedSwipes(normalizeBranchSwipes(pruneInterrupted(c))), c.activeLeafId, { descend: false });
     if (next !== c) upsertChat(next.id, next);
   }, [ui.chatId]);
   const persona = chat?.personaId ? personas[chat.personaId] : null;
@@ -6549,6 +7075,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!c) return;
     switch (action) {
       case 'inspector': return openChatPanel(chatId, 'inspector'); // panel overview: context inspector
+      case 'branches': return setModal({ kind: 'branches', chatId });
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
@@ -6622,10 +7149,11 @@ function Main({ storage, storageKind, storageFailed }) {
   }
   // Append a memory to a chat's store, stamped with atLen (the chat's current
   // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat). Stamped at creation (see addMemory).
+  // timestamp (see rewindChat), and with atMsg (the active leaf) so the
+  // assembler scopes it to this branch. Stamped at creation (see addMemory).
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
-      getActivePath(c.messages, c.activeLeafId).length);
+      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -7486,7 +8014,9 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n || genRef.current || auxBusy.length || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    // The regenerated node becomes the tip: the previous continuation is kept
+    // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
     fireGeneration(c1, nodeId);
   };
@@ -7503,23 +8033,97 @@ function Main({ storage, storageKind, storageFailed }) {
     const prefix = keep.map(t => t.text).join('') + (alt ?? '');
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
     fireGeneration(c1, nodeId, { continuation: true });
   };
+  // Swiping a mid-chain node re-derives the visible branch below it: each
+  // swipe keeps its own continuation (children record the parent swipe they
+  // follow), hidden branches stay in the tree.
   const onSwipe = (nodeId, dir) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n) return;
+    // Mid-stream the generation's commit() owns this chat's messages/leaf — a
+    // swipe would be silently reverted by the next chunk.
+    if (!n || generating?.chatId === c.id) return;
     const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
-    // touch: false — browsing swipes changes no tree state; the chat must not
-    // re-sort to the top of the sidebar.
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, { touch: false });
+    if (next === n.activeSwipe) return;
+    // touch: false — browsing swipes changes no world state; the chat must not
+    // re-sort to the top of the sidebar. snapStart:false — the user explicitly
+    // chose this swipe; an uncontinued one truncates, never snaps back.
+    // scrollTarget: if this swipe re-derives the leaf, keep THIS message on
+    // screen rather than jumping to the new branch's bottom.
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
   };
   const onSwipeTo = (nodeId, idx) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || idx < 0 || idx >= n.swipes.length) return;
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, { touch: false });
+    if (!n || generating?.chatId === c.id || idx < 0 || idx >= n.swipes.length || idx === n.activeSwipe) return;
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
   };
+  // Jump to the branch running through nodeId (branch chip popover / Branches
+  // tab). From another chat's panel modal: switches the active chat too.
+  const onJump = (nodeId, chatId = ui.chatId) => {
+    const c = ref.current.chats[chatId];
+    if (!c?.messages[nodeId] || generating?.chatId === c.id) return;
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch(c, nodeId), { touch: false });
+    if (chatId !== ui.chatId) setUi(u => ({ ...u, chatId }));
+  };
+  // The branch view is a modal (the drawer tab strip is crowded enough with
+  // four) — opened from the chat context menu, the branch chip popover, or
+  // Chat options.
+  const onOpenBranches = (chatId = ui.chatId) => setModal({ kind: 'branches', chatId });
+
+  // ←/→ cycle the leaf message's swipes; → on the last swipe is ▶⁺ (a new
+  // take). ↑/↓ move a keyboard selection through the messages (↓ past the
+  // leaf or Esc clears it); ←/→ then act on the SELECTED message. Plain
+  // arrows only, never while typing in a field or with a modal/menu open —
+  // and the handlers themselves no-op while generating.
+  const [kbdSel, setKbdSel] = useState(null); // nodeId | null
+  useEffect(() => { setKbdSel(null); }, [ui.chatId]); // selection is per chat view
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (kbdSel && !modal && !ctxMenu) setKbdSel(null);
+        return;
+      }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (modal || ctxMenu) return;
+      if (e.target?.closest?.('input, textarea, select, [contenteditable]')) return;
+      const c = ref.current.chats[ui.chatId];
+      if (!c) return;
+      const path = getActivePath(c.messages, c.activeLeafId);
+      if (!path.length) return;
+      const selIdx = kbdSel ? path.findIndex(n => n.id === kbdSel) : -1;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (e.key === 'ArrowUp') {
+          // none selected → start at the leaf and walk up from there
+          setKbdSel(path[selIdx === -1 ? path.length - 1 : Math.max(0, selIdx - 1)].id);
+        } else {
+          if (selIdx === -1) return; // nothing selected — ↓ stays at the live bottom
+          if (selIdx >= path.length - 1) setKbdSel(null); // ↓ past the leaf exits selection
+          else setKbdSel(path[selIdx + 1].id);
+        }
+        return;
+      }
+      // ←/→: the selected message wins, else the leaf.
+      const target = (selIdx >= 0 ? path[selIdx] : null) ?? path[path.length - 1];
+      if (e.key === 'ArrowLeft') {
+        if (target.activeSwipe <= 0) return;
+        e.preventDefault();
+        onSwipe(target.id, -1);
+      } else {
+        e.preventDefault();
+        if (target.activeSwipe < target.swipes.length - 1) onSwipe(target.id, 1);
+        else if (target.role === 'assistant') onRegenerate(target.id); // no-ops when busy
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [modal, ctxMenu, auxBusy, ui.chatId, kbdSel]);
   const onBranch = (nodeId) => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
@@ -7896,9 +8500,11 @@ function Main({ storage, storageKind, storageFailed }) {
                 if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
               composerInject=${composerInject} auxBusy=${auxBusy}
+              scrollTargetRef=${scrollTargetRef} kbdSel=${kbdSel}
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
+              onJump=${onJump} onOpenBranches=${onOpenBranches}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
@@ -7921,6 +8527,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
+        onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -7986,13 +8593,22 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
+        onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'branches' && chats[modal.chatId] && html`
+      <${ErrorBoundary} name="branches"><${Modal} title="Chat branches" wide onClose=${() => setModal(null)}>
+        <${BranchPanel} chat=${chats[modal.chatId]}
+          personaName=${(chats[modal.chatId].personaId && personas[chats[modal.chatId].personaId]?.name?.trim()) || 'User'}
+          generating=${generating?.chatId === modal.chatId}
+          onJump=${(id) => { onJump(id, modal.chatId); setModal(null); }} />
+      <//><//>`}
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${ctxMenu.items ?? [
           { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Branches', fn: () => chatAction(ctxMenu.chatId, 'branches') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

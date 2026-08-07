@@ -55,24 +55,27 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory }) {
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
   const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
   const [toolsOpen, setToolsOpen] = useState(false); // gear pill: per-swipe tool-call popover
-  // Auto-hide the actions/meta/tools popovers when tapping anywhere else.
+  const [branchOpen, setBranchOpen] = useState(false); // ⎇ chip: branch-picker popover
+  const [branchUp, setBranchUp] = useState(false); // popover flips above the chip near the viewport bottom
+  // Auto-hide the actions/meta/tools/branch popovers when tapping anywhere else.
   useEffect(() => {
-    if (!actionsOpen && !metaOpen && !toolsOpen) return;
+    if (!actionsOpen && !metaOpen && !toolsOpen && !branchOpen) return;
     const onDown = (e) => {
       if (!e.target.closest?.('.actions, .actions-toggle')) setActionsOpen(false);
       if (!e.target.closest?.('.meta-details, .meta-toggle')) setMetaOpen(false);
       if (!e.target.closest?.('.tools-pop, .tools-toggle')) setToolsOpen(false);
+      if (!e.target.closest?.('.branch-pop, .branch-chip')) setBranchOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [actionsOpen, metaOpen, toolsOpen]);
+  }, [actionsOpen, metaOpen, toolsOpen, branchOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
@@ -113,10 +116,19 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
   const displayText = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
   const n = node.activeSwipe + 1, m = node.swipes.length;
-  const isLeafAssistant = isLeaf && !isUser;
-  const showNav = m > 1 || isLeafAssistant;
+  // Swipe nav on every assistant message: at the last swipe ▶⁺ generates a
+  // new take THERE (mid-chain regen forks a branch — the continuation is
+  // kept), not just on the leaf.
+  const showNav = m > 1 || !isUser;
+  // Branch data: branchKids = every child of this node (each one a branch
+  // root), childOnPathId = the child the active path follows. The ●/○ marker
+  // derives from the path child's fromSwipe (the swipe the conversation
+  // actually continued from), falling back to the node's usedSwipe record.
+  const pathChild = branchKids.find(k => k.id === childOnPathId) ?? null;
   const usedIdx = Number.isInteger(node.usedSwipe) ? node.usedSwipe : null;
-  const atUsed = usedIdx === node.activeSwipe;
+  const continuedIdx = pathChild ? (pathChild.fromSwipe ?? usedIdx) : usedIdx;
+  const atUsed = continuedIdx === node.activeSwipe;
+  const offPathKids = branchKids.filter(k => k.id !== childOnPathId);
   // Reasoning channel (swipe.think): its own bubble ahead of the reply —
   // visually separated like a speaker segment, but unnamed and collapsible.
   const thinkBubble = !isUser && !editing && showThinking !== false && swipe.think
@@ -141,9 +153,9 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
       if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
         g.consumed = true;
         setDragX(0);
-        if (dx < 0) { // swipe left: next swipe, or generate on the leaf's last
+        if (dx < 0) { // swipe left: next swipe, or generate a new take here
           if (n < m) onSwipe(node.id, 1);
-          else if (isLeafAssistant) onRegenerate(node.id);
+          else onRegenerate(node.id); // any assistant node — mid-chain forks a branch
         } else if (n > 1) { // swipe right: back
           onSwipe(node.id, -1);
         }
@@ -172,7 +184,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
   // (desktop shows them inline via .meta-details { display: contents }).
   const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
   return html`
-    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''}"
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''}" data-mid=${node.id}
       onContextMenu=${(e) => {
         // Keep the native menu when the user has text selected (copy etc.).
         if (window.getSelection()?.toString()) return;
@@ -222,7 +234,7 @@ function MessageItem({ node, index, isRoot, isLeaf, personaName, characterNames,
             onClick=${() => onRegenerate(node.id)}>↻</button>`}
           ${isUser && html`<button class="btn small ghost" title="Reply from here (generate assistant response)" disabled=${generating || auxBusy}
             onClick=${() => onReply(node.id)}>↻</button>`}
-          <button class="btn small ghost" title="Branch from here" disabled=${generating}
+          <button class="btn small ghost" title="Fork to a new chat (copies everything up to this message)" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
           ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
             onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮\uFE0E</button>`}
@@ -235,18 +247,18 @@ ${showNav && html`
           <span class="swipes">
             <button class="btn small ghost" title="Previous swipe" disabled=${generating || n <= 1} onClick=${() => onSwipe(node.id, -1)}>◀\uFE0E</button>
             <span>${n}/${m}</span>
-            ${usedIdx != null && html`
+            ${continuedIdx != null && html`
               <span class="used-dot ${atUsed ? '' : 'jump'}"
-                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${usedIdx + 1} — click to view`}
-                onClick=${() => !atUsed && onSwipeTo(node.id, usedIdx)}>${atUsed ? '●' : '○'}</span>`}
+                title=${atUsed ? 'This is the version the conversation continued from' : `The conversation continued from swipe ${continuedIdx + 1} — click to view`}
+                onClick=${() => !atUsed && onSwipeTo(node.id, continuedIdx)}>${atUsed ? '●' : '○'}</span>`}
             ${n < m
               ? html`<button class="btn small ghost" title="Next swipe" disabled=${generating} onClick=${() => onSwipe(node.id, 1)}>▶\uFE0E</button>`
-              : isLeafAssistant
-                ? html`<button class="btn small ghost gen" title="Generate a new version" disabled=${generating || auxBusy}
+              : !isUser
+                ? html`<button class="btn small ghost gen" title="Generate a new version here — the current continuation is kept as a branch" disabled=${generating || auxBusy}
                     onClick=${() => onRegenerate(node.id)}>▶\uFE0E⁺</button>`
                 : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
           </span>`}
-        
+
       </div>
       ${multi && !editing && !(showProbs && hasProbs) ? html`
         ${thinkBubble}
@@ -278,6 +290,37 @@ ${showNav && html`
             ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
             : html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`}
       </div>`}
+      ${offPathKids.length > 0 && html`
+        <div class="branch-chip-row">
+          <button class="branch-chip" disabled=${generating}
+            title="This message has continuations on other branches — click to compare or switch"
+            onClick=${(e) => {
+              if (!branchOpen) {
+                // Flip up when the popover wouldn't fit below the chip (a
+                // truncated pseudo-branch sits at the bottom of the chat).
+                const r = e.currentTarget.getBoundingClientRect();
+                setBranchUp(window.innerHeight - r.bottom < 300);
+              }
+              setBranchOpen(!branchOpen);
+            }}>⎇ ${offPathKids.length} other ${offPathKids.length === 1 ? 'branch' : 'branches'} from here ${branchOpen ? '▴' : '▾'}</button>
+          ${branchOpen && html`
+            <span class="tools-pop branch-pop ${branchUp ? 'above' : ''}">
+              ${branchKids.map(k => {
+                const cur = k.id === childOnPathId;
+                const kFrom = k.fromSwipe ?? usedIdx ?? 0;
+                return html`
+                  <button key=${k.id} class="branch-row ${cur ? 'current' : ''}" disabled=${generating || cur}
+                    title=${cur ? 'This is the branch you are on' : 'Switch to this branch'}
+                    onClick=${() => { setBranchOpen(false); onJump(k.id); }}>
+                    <span class="ct-dot ${k.role}"></span>
+                    ${kFrom !== node.activeSwipe && html`<span class="branch-sw">swipe ${kFrom + 1}</span>`}
+                    <span class="branch-text">${toPreview(activeText(k), 80) || '(empty)'}</span>
+                    ${cur && html`<span class="branch-cur">current</span>`}
+                  </button>`;
+              })}
+              <button class="branch-row branch-tree" onClick=${() => { setBranchOpen(false); onOpenBranches?.(); }}>⎇ View all branches</button>
+            </span>`}
+        </div>`}
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
@@ -286,7 +329,7 @@ ${showNav && html`
             isUser
               ? { label: 'Reply from here', fn: () => onReply(node.id), disabled: generating || auxBusy }
               : { label: 'Regenerate (new swipe)', fn: () => onRegenerate(node.id), disabled: generating || auxBusy },
-            { label: 'Branch from here', fn: () => onBranch(node.id) },
+            { label: 'Fork to new chat', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
               { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
@@ -328,3 +371,171 @@ const MessageItemMemo = React.memo(MessageItem, (a, b) => {
   return true;
 });
 
+
+// ============================================================================
+// COMPONENTS: BRANCH PANEL — the message graph condensed to its branch
+// structure. Single-child runs collapse into one segment ("#start · preview ·
+// N msg"), so long chats render a handful of items, not one per message; only
+// branch points (≥ 2 children) fork, and swipe alternatives that nothing
+// continues from don't appear (those stay inline-arrow territory).
+// Two renderings: the indent-guided outline (default — degenerates the most
+// gracefully) and a sparse top-down graph (fork depth grows downward —
+// mouse-wheel friendly — with SVG bezier edges on a fixed grid, no library),
+// swapped via the Graph/Outline toggle. Active path highlighted, leaf marked,
+// click = switch.
+// ============================================================================
+function BranchPanel({ chat, personaName = 'User', generating = false, onJump }) {
+  const messages = chat.messages ?? {};
+  const kidsOf = new Map();
+  const roots = [];
+  for (const n of Object.values(messages)) {
+    if (!n) continue;
+    if (n.parentId && messages[n.parentId]) {
+      if (!kidsOf.has(n.parentId)) kidsOf.set(n.parentId, []);
+      kidsOf.get(n.parentId).push(n);
+    } else roots.push(n);
+  }
+  const byAge = (a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1);
+  for (const kids of kidsOf.values()) kids.sort(byAge);
+  roots.sort(byAge);
+  const activeIds = pathIdSet(messages, chat.activeLeafId);
+  // swipe tag for a branch, only when the siblings continue DIFFERENT parent
+  // swipes (same-swipe siblings need no disambiguation).
+  const swipeTagOf = (kid, kids) => {
+    const parent = messages[kid.parentId];
+    if ((parent?.swipes?.length ?? 1) < 2) return null;
+    const froms = new Set(kids.map(k => k.fromSwipe ?? parent?.usedSwipe ?? 0));
+    return froms.size > 1 ? `swipe ${(kid.fromSwipe ?? parent?.usedSwipe ?? 0) + 1}` : null;
+  };
+  // Condensed segments, shared by both renderers. `num` is the segment's
+  // 1-based message position (root = 1, like the chat log's # meta) so a
+  // branch forking at #78 vs #108 reads correctly at a glance.
+  const rendered = new Set(); // cycle guard (crafted imports)
+  const segs = [];
+  const buildSeg = (start, depth, swipeTag) => {
+    if (rendered.has(start.id)) return null;
+    const chain = [start];
+    const seen = new Set([start.id]);
+    let end = start;
+    while ((kidsOf.get(end.id) ?? []).length === 1) {
+      const nxt = kidsOf.get(end.id)[0];
+      if (seen.has(nxt.id)) break;
+      seen.add(nxt.id);
+      end = nxt;
+      chain.push(nxt);
+    }
+    for (const n of chain) rendered.add(n.id);
+    const kids = kidsOf.get(end.id) ?? [];
+    const seg = {
+      id: start.id, start, chain, depth, swipeTag,
+      num: getActivePath(messages, start.id).length,
+      onPath: chain.some(n => activeIds.has(n.id)),
+      hasLeaf: chain.some(n => n.id === chat.activeLeafId),
+      kids: [],
+    };
+    segs.push(seg);
+    if (kids.length > 1)
+      seg.kids = kids.map(k => buildSeg(k, depth + 1, swipeTagOf(k, kids))).filter(Boolean);
+    return seg;
+  };
+  const segRoots = roots.map(r => buildSeg(r, 0, null)).filter(Boolean);
+  const branchPoints = segs.reduce((n, s) => n + (s.kids.length > 1 ? 1 : 0), 0);
+  // View toggle: outline is the default everywhere (it degenerates the most
+  // gracefully); the user can flip to the sparse graph per opening.
+  const [viewPref, setViewPref] = useState(null); // null = default
+  const mode = viewPref ?? 'outline';
+  const hint = html`
+    <div class="hint bview-head">
+      <span>
+        ${Object.keys(messages).length} messages · ${branchPoints} branch ${branchPoints === 1 ? 'point' : 'points'}.
+        ${branchPoints === 0
+          ? 'No branches yet — swiping or regenerating a message mid-chat keeps the old continuation as a branch here.'
+          : 'Each item is a run of messages starting at the # shown; forks are alternative continuations. The highlighted chain is what you are looking at — click to switch to it. Nothing is deleted — branches just leave the active path.'}
+      </span>
+      ${roots.length > 0 && html`
+        <span class="bview-toggle">
+          <button class="btn small ghost ${mode === 'graph' ? 'active' : ''}" onClick=${() => setViewPref('graph')}>Graph</button>
+          <button class="btn small ghost ${mode === 'outline' ? 'active' : ''}" onClick=${() => setViewPref('outline')}>Outline</button>
+        </span>`}
+    </div>`;
+  if (roots.length === 0) return html`<div>${hint}<div class="hint">No messages yet.</div></div>`;
+
+  // ---- sparse graph rendering (top-down: fork depth grows downward with
+  // the scroll wheel, tips spread across columns) ----
+  if (mode === 'graph') {
+    const COL_W = 164, ROW_H = 56, NODE_W = 148, NODE_H = 44, PAD = 10;
+    // Column layout: the oldest continuation keeps the parent's column, so
+    // the mainline reads as one straight vertical line; each further sibling
+    // starts a fresh column to the right, spaced by its subtree's tip count.
+    // (Parent-centered tidy layouts strand whole columns of empty space.)
+    const widthOf = (seg) => seg.kids.length ? seg.kids.reduce((w, k) => w + widthOf(k), 0) : 1;
+    const xOf = new Map(); // segment → column
+    const place = (seg, col) => {
+      xOf.set(seg.id, col);
+      let c = col;
+      for (const kid of seg.kids) { place(kid, c); c += widthOf(kid); }
+    };
+    let colCount = 0;
+    for (const r of segRoots) { place(r, colCount); colCount += widthOf(r); }
+    const maxDepth = segs.reduce((d, s) => Math.max(d, s.depth), 0);
+    const width = PAD * 2 + Math.max(1, colCount) * COL_W;
+    const height = PAD * 2 + (maxDepth + 1) * ROW_H;
+    const posOf = (seg) => ({
+      x: PAD + xOf.get(seg.id) * COL_W + (COL_W - NODE_W) / 2,
+      y: PAD + seg.depth * ROW_H,
+    });
+    const edges = [];
+    for (const seg of segs) for (const kid of seg.kids) {
+      const a = posOf(seg), b = posOf(kid);
+      const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H, x2 = b.x + NODE_W / 2, y2 = b.y;
+      edges.push({ x1, y1, x2, y2, active: seg.onPath && kid.onPath, key: `${seg.id}>${kid.id}` });
+    }
+    return html`
+      <div>${hint}
+        <div class="bgraph-wrap">
+          <div class="bgraph" style=${{ width: `${width}px`, height: `${height}px` }}>
+            <svg class="bgraph-edges" width=${width} height=${height}>
+              ${edges.map(e => html`<path key=${e.key} class=${e.active ? 'active' : ''}
+                d=${`M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + 22}, ${e.x2} ${e.y2 - 22}, ${e.x2} ${e.y2}`} />`)}
+            </svg>
+            ${segs.map(seg => {
+              const p = posOf(seg);
+              return html`
+                <button key=${seg.id} class="bg-node ${seg.onPath ? 'active' : ''} ${seg.hasLeaf ? 'leaf' : ''}"
+                  style=${{ left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, minHeight: `${NODE_H}px` }}
+                  disabled=${generating}
+                  title=${generating ? 'Wait for the generation to finish' : `Switch to this branch — ${toPreview(subUser(activeText(seg.start), personaName), 160)}`}
+                  onClick=${() => onJump(seg.id)}>
+                  <span class="bg-top">
+                    <span class="ct-dot ${seg.start.role === 'user' ? 'user' : 'assistant'}"></span>
+                    <span class="bg-num">#${seg.num}</span>
+                    ${seg.swipeTag && html`<span class="ct-sw">${seg.swipeTag}</span>`}
+                    ${seg.chain.length > 1 && html`<span class="ct-len">${seg.chain.length} msg</span>`}
+                    ${seg.hasLeaf && html`<span class="ct-leaf" title="The active end of the conversation">●</span>`}
+                  </span>
+                  <span class="bg-text">${toPreview(subUser(activeText(seg.start), personaName), 34) || '(empty)'}</span>
+                </button>`;
+            })}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ---- outline fallback (huge branch structures) ----
+  const segView = (seg) => html`
+    <div class="ct-node" key=${seg.id}>
+      <button class="ct-row ${seg.onPath ? 'active' : ''} ${seg.hasLeaf ? 'leaf' : ''}" disabled=${generating}
+        title=${generating ? 'Wait for the generation to finish' : 'Switch to the branch through this message'}
+        onClick=${() => onJump(seg.id)}>
+        <span class="ct-dot ${seg.start.role === 'user' ? 'user' : 'assistant'}"></span>
+        <span class="ct-num">#${seg.num}</span>
+        ${seg.swipeTag && html`<span class="ct-sw">${seg.swipeTag}</span>`}
+        <span class="ct-text">${toPreview(subUser(activeText(seg.start), personaName), 110) || '(empty)'}</span>
+        ${seg.chain.length > 1 && html`<span class="ct-len">${seg.chain.length} msg</span>`}
+        ${seg.kids.length > 1 && html`<span class="ct-br" title=${`${seg.kids.length} branches continue from here`}>⎇ ${seg.kids.length}</span>`}
+        ${seg.hasLeaf && html`<span class="ct-leaf" title="The active end of the conversation">●</span>`}
+      </button>
+      ${seg.kids.length > 1 && html`<div class="ct-kids">${seg.kids.map(segView)}</div>`}
+    </div>`;
+  return html`<div>${hint}<div class="ctree">${segRoots.map(segView)}</div></div>`;
+}

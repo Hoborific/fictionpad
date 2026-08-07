@@ -477,6 +477,42 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .msg .tools-args {
   color: var(--c-faint); font-size: 11.5px; white-space: pre-wrap; word-break: break-word;
 }
+/* Branch chip + popover: a dashed pill under any message with continuations
+   off the active path (the fork point, visible in the flow); the popover
+   lists every child branch. */
+.branch-chip-row { display: flex; justify-content: center; margin: -2px 0 6px; position: relative; }
+/* Keyboard message selection (↑/↓): accent ring on the selected bubble */
+.msg.kbdsel .bubble { box-shadow: 0 0 0 1.5px var(--c-accent); }
+.branch-chip {
+  font: inherit; font-size: 11.5px; color: var(--c-faint); cursor: pointer;
+  background: transparent; border: 1px dashed var(--c-border); border-radius: 999px;
+  padding: 2px 12px;
+}
+.branch-chip:hover:not(:disabled) { color: var(--c-accent); border-color: var(--c-accent); }
+.branch-chip:disabled { opacity: 0.5; cursor: default; }
+.branch-chip-row .branch-pop { top: calc(100% + 4px); left: 50%; transform: translateX(-50%); right: auto; }
+.branch-chip-row .branch-pop.above { top: auto; bottom: calc(100% + 4px); }
+.msg .branch-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%;
+  font: inherit; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 6px; color: var(--c-text);
+}
+.msg .branch-row:hover:not(:disabled) { background: var(--c-bg-1); border-color: var(--c-border); }
+.msg .branch-row.current { border-color: var(--c-accent); cursor: default; }
+.msg .branch-row:disabled:not(.current) { opacity: 0.5; cursor: default; }
+.msg .branch-row .branch-sw {
+  flex: none; font-size: 10.5px; color: var(--c-faint);
+  border: 1px solid var(--c-border); border-radius: 4px; padding: 0 4px;
+}
+.msg .branch-row .branch-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--c-dim);
+}
+.msg .branch-row.current .branch-text { color: var(--c-text); }
+.msg .branch-row .branch-cur { flex: none; font-size: 10.5px; color: var(--c-accent); }
+.msg .branch-row.branch-tree { justify-content: center; color: var(--c-dim); border-top: 1px solid var(--c-border); border-radius: 0; }
+.msg .branch-row.branch-tree:hover { color: var(--c-accent); }
 .mem-item, .lore-item-row {
   border: 1px solid var(--c-border); border-radius: 6px;
   padding: 6px 8px; margin-bottom: 6px; background: var(--c-bg-2);
@@ -555,6 +591,58 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   background: var(--c-bg-1);
 }
 .links-list { max-height: 110px; overflow-y: auto; border: 1px solid var(--c-border); border-radius: 6px; padding: 4px 8px; }
+
+/* Chat tree modal: indent-guided outline of the whole message graph */
+.ctree { font-size: 13px; }
+.ct-kids { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--c-border); }
+.ct-row {
+  display: flex; align-items: baseline; gap: 7px; width: 100%;
+  font: inherit; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 7px; color: var(--c-dim); margin: 1px 0;
+}
+.ct-row:hover:not(:disabled) { background: var(--c-bg-2); border-color: var(--c-border); color: var(--c-text); }
+.ct-row:disabled { opacity: 0.6; cursor: default; }
+.ct-row.active { color: var(--c-text); }
+.ct-row.leaf { border-color: var(--c-accent); }
+.ct-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; }
+.ct-dot.user { background: var(--c-user); }
+.ct-dot.assistant { background: var(--c-accent); }
+.ct-sw {
+  flex: none; font-size: 10.5px; color: var(--c-faint);
+  border: 1px solid var(--c-border); border-radius: 4px; padding: 0 4px;
+}
+.ct-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-num { flex: none; font-size: 10.5px; color: var(--c-faint); }
+.ct-len { flex: none; font-size: 11px; color: var(--c-faint); }
+.ct-br { flex: none; font-size: 11px; color: var(--c-accent); }
+.ct-leaf { flex: none; font-size: 9px; color: var(--c-accent); }
+
+/* Branch graph (sparse): segment nodes + SVG bezier edges, left→right on a
+   fixed grid — the condensed tree is tiny, so no layout engine is needed. */
+.bgraph-wrap {
+  overflow: auto; max-height: 62vh;
+  border: 1px solid var(--c-border); border-radius: 8px; background: var(--c-bg-2);
+}
+.bgraph { position: relative; margin: 0 auto; }
+.bgraph-edges { position: absolute; inset: 0; pointer-events: none; }
+.bgraph-edges path { fill: none; stroke: var(--c-border); stroke-width: 1.5; }
+.bgraph-edges path.active { stroke: var(--c-accent); }
+.bg-node {
+  position: absolute; display: flex; flex-direction: column; gap: 2px;
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  background: var(--c-bg-1); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 5px 8px; color: var(--c-dim);
+}
+.bg-node:hover:not(:disabled) { border-color: var(--c-accent); color: var(--c-text); }
+.bg-node:disabled { opacity: 0.6; cursor: default; }
+.bg-node.active { border-color: var(--c-accent); color: var(--c-text); }
+.bg-node.leaf { border-color: var(--c-accent); }
+.bg-top { display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; color: var(--c-faint); }
+.bg-top .bg-num { color: var(--c-dim); font-weight: 600; }
+.bg-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.bview-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.bview-toggle { flex: none; display: flex; gap: 2px; }
 
 .banner {
   background: color-mix(in oklch, var(--c-danger) 18%, var(--c-bg-1));

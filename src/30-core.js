@@ -105,12 +105,129 @@ function getActivePath(messages, activeLeafId) {
 
 function appendMessage(chat, parentId, role, text, modelId = null) {
   const id = uid();
-  const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false };
+  const parent = chat.messages[parentId];
+  // fromSwipe: which swipe of the parent this child continues from — the link
+  // that makes swiping a mid-chain node swap the branch below it.
+  const node = { id, parentId, role, swipes: [{ text, createdAt: Date.now(), modelId }], activeSwipe: 0, edited: false,
+    ...(parent ? { fromSwipe: parent.activeSwipe } : {}) };
   const messages = { ...chat.messages, [id]: node };
   // Record which swipe of the parent the conversation continues from.
-  const parent = messages[parentId];
   if (parent) messages[parentId] = { ...parent, usedSwipe: parent.activeSwipe };
   return { chat: { ...chat, messages, activeLeafId: id }, id };
+}
+
+// Branch links for chats saved before in-chat branching: a child with no
+// fromSwipe continues the swipe the conversation was recorded as continuing
+// from (parent.usedSwipe, else the parent's current view). Clamped to the
+// parent's swipe count. No-op (same object) when nothing needs stamping.
+function normalizeBranchSwipes(chat) {
+  if (!chat?.messages) return chat;
+  let changed = false;
+  const messages = { ...chat.messages };
+  for (const [id, n] of Object.entries(messages)) {
+    if (!n?.parentId || Number.isInteger(n.fromSwipe)) continue;
+    const p = messages[n.parentId];
+    if (!p) continue;
+    const idx = Number.isInteger(p.usedSwipe) ? p.usedSwipe : (p.activeSwipe ?? 0);
+    messages[id] = { ...n, fromSwipe: Math.min(Math.max(idx, 0), (p.swipes?.length ?? 1) - 1) };
+    changed = true;
+  }
+  return changed ? { ...chat, messages } : chat;
+}
+
+// Children of a node, oldest first (first-swipe createdAt, then id).
+function childrenOf(messages, nodeId) {
+  const out = [];
+  for (const n of Object.values(messages ?? {}))
+    if (n?.parentId === nodeId) out.push(n);
+  out.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0))
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return out;
+}
+
+// Switch the visible branch so the active path runs THROUGH nodeId, then
+// descend to the branch tip. Two phases:
+//   1. Align ancestors — each node on the root→nodeId path is set to show the
+//      swipe its path-child continues from (child.fromSwipe), so a rendered
+//      path is always one consistent conversation.
+//   2. Descend from nodeId — follow children matching the node's activeSwipe.
+//      keepPath (swipe cycling) prefers the child already on the current path
+//      when it still matches, so browsing disrupts the tail as little as
+//      possible; otherwise the newest child wins. A node whose viewed swipe
+//      has no continuation but whose usedSwipe does snaps to usedSwipe —
+//      self-heals view state left over from pre-branching chats. The snap
+//      never applies to the start node when snapStart is false (explicit
+//      swipe browsing: the user asked to view that swipe — truncate instead
+//      of snapping back to the continued one).
+//      descend:false stops after phase 1 (chat open: align the persisted view
+//      without re-descending into a rewound branch).
+// Nothing is deleted — hidden branches stay in the tree and re-emerge when
+// their swipe is selected again. Identity return when nothing changes.
+function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapStart = true } = {}) {
+  const msgs = chat?.messages;
+  if (!msgs?.[nodeId]) return chat;
+  let messages = msgs;
+  const setSwipe = (id, idx) => {
+    const n = messages[id];
+    if (!n || !Number.isInteger(idx) || idx < 0 || idx >= (n.swipes?.length ?? 0) || n.activeSwipe === idx) return;
+    if (messages === msgs) messages = { ...msgs };
+    messages[id] = { ...n, activeSwipe: idx };
+  };
+  const matches = (parent, child) => (child.fromSwipe ?? parent.usedSwipe ?? 0) === parent.activeSwipe;
+  const path = getActivePath(msgs, nodeId);
+  for (let i = 0; i < path.length - 1; i++) {
+    const desired = path[i + 1].fromSwipe ?? path[i].usedSwipe;
+    if (Number.isInteger(desired)) setSwipe(path[i].id, desired);
+  }
+  const curPath = keepPath ? new Set(getActivePath(msgs, chat.activeLeafId).map(n => n.id)) : null;
+  let tip = descend ? nodeId : chat.activeLeafId;
+  let atStart = true;
+  for (let guard = descend ? Object.keys(msgs).length + 1 : 0; guard > 0; guard--) {
+    const node = messages[tip];
+    if (!node) break;
+    let kids = childrenOf(messages, tip).filter(k => matches(node, k));
+    if (!kids.length && (snapStart || !atStart)
+        && Number.isInteger(node.usedSwipe) && node.usedSwipe !== node.activeSwipe) {
+      const snapped = { ...node, activeSwipe: node.usedSwipe };
+      const alt = childrenOf(messages, tip).filter(k => matches(snapped, k));
+      if (alt.length) {
+        if (messages === msgs) messages = { ...msgs };
+        messages[tip] = snapped;
+        kids = alt;
+      }
+    }
+    atStart = false;
+    if (!kids.length) break;
+    const next = (curPath && kids.find(k => curPath.has(k.id))) || kids[kids.length - 1];
+    tip = next.id;
+  }
+  if (messages === msgs && tip === chat.activeLeafId) return chat;
+  return { ...chat, messages, activeLeafId: tip };
+}
+
+// Ids on the active path — the branch-visibility scope for world state.
+const pathIdSet = (messages, leafId) => new Set(getActivePath(messages, leafId).map(n => n.id));
+
+// Branch view of a revision-tracked piece: effective content/keys come from
+// the last revision whose origin (createdBy) is global (null) or on the
+// active path. The stored log is never touched — switching branches
+// re-derives the view. Identity return when the latest revision is visible.
+function pieceAtPath(piece, pathIds) {
+  const revs = piece?.revisions;
+  if (!Array.isArray(revs) || revs.length < 2 || !pathIds) return piece;
+  let vis = null;
+  for (const r of revs) if (r?.createdBy == null || pathIds.has(r.createdBy)) vis = r;
+  if (!vis || vis === revs[revs.length - 1]) return piece;
+  return { ...piece, content: vis.content, keys: vis.keys ?? [] };
+}
+
+// Piece-level branch visibility: a piece belongs on this branch when its own
+// origin (createdBy) OR any revision's origin is global/on-path — a tool
+// update written on this branch pulls the piece into this branch's view
+// (pieceAtPath then picks the content this branch last saw).
+function pieceVisibleAt(piece, pathIds) {
+  if (piece?.createdBy == null || pathIds.has(piece.createdBy)) return true;
+  return Array.isArray(piece?.revisions) && piece.revisions.some(r => r?.createdBy != null && pathIds.has(r.createdBy));
 }
 
 // Reset every node's activeSwipe to its recorded usedSwipe (the version the
@@ -170,7 +287,15 @@ function pruneInterrupted(chat) {
     const seen = new Set();
     while (cur && !out[cur] && !seen.has(cur)) { seen.add(cur); cur = chat.messages[cur]?.parentId ?? null; }
     if (cur && !out[cur]) cur = null; // the chain closed a cycle
-    if (cur !== n.parentId) out[id] = { ...n, parentId: cur };
+    if (cur !== n.parentId) {
+      // Re-parented: fromSwipe indexes the OLD parent's swipes — re-stamp it
+      // against the new parent (or drop it when the node becomes a root).
+      const p = cur ? out[cur] : null;
+      const nn = { ...n, parentId: cur };
+      if (p) nn.fromSwipe = Number.isInteger(p.usedSwipe) ? p.usedSwipe : (p.activeSwipe ?? 0);
+      else delete nn.fromSwipe;
+      out[id] = nn;
+    }
   }
   let activeLeafId = chat.activeLeafId;
   const leafSeen = new Set();
@@ -498,12 +623,13 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null) {
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
   // atLen is stamped at creation, before eviction: in an all-pinned full store
   // the incoming entry is the one dropped, and stamping after the fact would
-  // mis-tag an unrelated old memory's rewind position.
+  // mis-tag an unrelated old memory's rewind position. atMsg (active leaf at
+  // creation) scopes the memory to its branch in assemblePrompt.
   const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}) }];
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -540,8 +666,23 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
   const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
-  // Merged once here — the lore layer below reuses this same list.
-  const lorePieces = mergedLorePieces(scenario, chat, characters);
+  // Branch visibility: model/app-written world state is scoped to the branch
+  // it was created on. A chat-overlay piece whose origin node (createdBy) or a
+  // memory whose origin leaf (atMsg) is not on the ACTIVE path is hidden —
+  // derived per assembly, never deleted, so switching branches re-derives it
+  // (unstamped entries are global). A hidden overlay piece also stops
+  // shadowing its scenario/global original, which resurfaces on other
+  // branches. Dedupe paths (applyToolCalls allPieces) still see everything.
+  const pathIds = pathIdSet(chat?.messages ?? {}, chat?.activeLeafId);
+  const branchHidden = (Array.isArray(chat?.lorePieces) ? chat.lorePieces : [])
+    .filter(p => !pieceVisibleAt(p, pathIds));
+  const chatForLore = branchHidden.length
+    ? { ...chat, lorePieces: chat.lorePieces.filter(p => pieceVisibleAt(p, pathIds)) }
+    : chat;
+  // Merged once here — the lore layer below reuses this same list. Pieces with
+  // a revision log are viewed at the last revision visible on this branch.
+  const lorePieces = mergedLorePieces(scenario, chatForLore, characters)
+    .map(p => pieceAtPath(p, pathIds));
   // Registered speakers, spelled out in the prompt: weak models shorten long
   // names ("The Auctioneer" → "Auctioneer:") and the display split is an
   // exact name match, so the full names are listed explicitly. Mirrors
@@ -616,7 +757,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    overlay, chat wins on id) — list merged above the static layer.
   const loreCap = Math.floor(budget * caps.lore);
   const chatPieceIds = new Set(
-    (Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id).filter(Boolean));
+    (Array.isArray(chatForLore?.lorePieces) ? chatForLore.lorePieces : []).map(p => p?.id).filter(Boolean));
   // Resolved global characters carry origin: 'character' from resolveCharacters
   // (via mergedLorePieces). selectLore strips extra piece fields, so origin is
   // recovered by id, not from the selected candidate. A chat overlay piece
@@ -660,6 +801,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const overBudget = inactive.filter(p => p.reason === 'over-budget').length;
   if (overBudget > 0)
     manifest.warnings.push(`${overBudget} lore piece(s) activated but didn't fit the lore budget.`);
+  // Branch-hidden overlay pieces surface in the Inspector's Not-injected list
+  // with their own reason — they're not disabled or unmatched, they belong to
+  // a sibling branch.
+  for (const p of branchHidden) {
+    inactive.push({
+      id: p.id, title: p.title ?? '', reason: 'branch', origin: 'chat',
+      tokens: est(`[${p.title ?? ''}]\n${sub(p.content ?? '')}`),
+      preview: toPreview(p.content), content: p.content ?? '',
+    });
+  }
   manifest.layers.lore = {
     tokens: loreTokens, cap: loreCap,
     pieces: loreSel.map(s => ({ id: s.id, title: s.title, type: s.type, reason: s.reason, boost: s.boost, weight: s.effWeight, origin: originOf(s), tokens: s.tokens, preview: toPreview(s.content), content: s.content })),
@@ -675,7 +826,12 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    (createdAt asc) so the model reads the memory block forwards in time.
   //    Per-memory cost counts the `- ` prefix exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
-  const memAll = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
+  // Branch visibility (same rule as the lore layer): a memory stamped with
+  // atMsg (the leaf it was summarized under) injects only while that node is
+  // on the active path; unstamped memories are global.
+  const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
+  const memHidden = memStore.filter(m => m?.atMsg != null && !pathIds.has(m.atMsg));
+  const memAll = memStore.filter(m => !(m?.atMsg != null && !pathIds.has(m.atMsg)));
   const smart = memScores instanceof Map;
   const memThreshold = typeof settings.semanticThreshold === 'number' ? settings.semanticThreshold : 0.55;
   const memPinnedList = memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt);
@@ -715,7 +871,11 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
       reason: (smart && !m.pinned && !recentKeep.has(m.id) && (memScores.get(m.id) ?? 0) < memThreshold)
         ? 'below-threshold' : 'over-budget',
       ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
-      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' })),
+      tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))
+      // Belong to a sibling branch — hidden, not deleted.
+      .concat(memHidden.map(m => ({
+        id: m.id, pinned: !!m.pinned, reason: 'branch',
+        tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))),
   };
 
   // 5. history fills the remainder; oldest messages dropped first.
@@ -1238,7 +1398,7 @@ function normalizeChat(c) {
       ? Math.min(Math.max(n.activeSwipe, 0), swipes.length - 1) : 0;
     messages[id] = { ...n, id: n.id ?? id, swipes, activeSwipe };
   }
-  return { ...o, messages };
+  return normalizeBranchSwipes({ ...o, messages });
 }
 // ---- character card import (chara_card v1/v2/v3, JSON or PNG-embedded) ----
 // Card trigger keys are plain text; FictionPad keys are regex — escape to

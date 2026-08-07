@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -73,6 +73,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
           </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px' }}>
+        ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>

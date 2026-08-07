@@ -121,6 +121,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
+  const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
 
   // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
   // separate requests that never touch the main context, so the manifest can't
@@ -235,15 +236,16 @@ function Main({ storage, storageKind, storageFailed }) {
 
   const chat = chats[ui.chatId] ?? null;
   // On chat open/switch (incl. after branching): drop debris from generations
-  // killed by a reload, then default to the swipes the conversation actually
-  // continued from. In-session browsing is unaffected.
+  // killed by a reload, stamp branch links on pre-branching chats, default to
+  // the swipes the conversation actually continued from, and align the active
+  // path. In-session browsing is unaffected.
   useEffect(() => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
     // A live generation owns this chat's swipe state — pruning here would
     // strip its in-flight (unflagged) swipe out from under the stream.
     if (generating?.chatId === c.id) return;
-    const next = applyUsedSwipes(pruneInterrupted(c));
+    const next = activateBranch(applyUsedSwipes(normalizeBranchSwipes(pruneInterrupted(c))), c.activeLeafId, { descend: false });
     if (next !== c) upsertChat(next.id, next);
   }, [ui.chatId]);
   const persona = chat?.personaId ? personas[chat.personaId] : null;
@@ -435,6 +437,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!c) return;
     switch (action) {
       case 'inspector': return openChatPanel(chatId, 'inspector'); // panel overview: context inspector
+      case 'branches': return setModal({ kind: 'branches', chatId });
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
@@ -508,10 +511,11 @@ function Main({ storage, storageKind, storageFailed }) {
   }
   // Append a memory to a chat's store, stamped with atLen (the chat's current
   // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat). Stamped at creation (see addMemory).
+  // timestamp (see rewindChat), and with atMsg (the active leaf) so the
+  // assembler scopes it to this branch. Stamped at creation (see addMemory).
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
-      getActivePath(c.messages, c.activeLeafId).length);
+      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -1372,7 +1376,9 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n || genRef.current || auxBusy.length || !generationReady(c)) return;
     const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    // The regenerated node becomes the tip: the previous continuation is kept
+    // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
     fireGeneration(c1, nodeId);
   };
@@ -1389,23 +1395,97 @@ function Main({ storage, storageKind, storageFailed }) {
     const prefix = keep.map(t => t.text).join('') + (alt ?? '');
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
     upsertChat(c1.id, c1);
     fireGeneration(c1, nodeId, { continuation: true });
   };
+  // Swiping a mid-chain node re-derives the visible branch below it: each
+  // swipe keeps its own continuation (children record the parent swipe they
+  // follow), hidden branches stay in the tree.
   const onSwipe = (nodeId, dir) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n) return;
+    // Mid-stream the generation's commit() owns this chat's messages/leaf — a
+    // swipe would be silently reverted by the next chunk.
+    if (!n || generating?.chatId === c.id) return;
     const next = Math.min(n.swipes.length - 1, Math.max(0, n.activeSwipe + dir));
-    // touch: false — browsing swipes changes no tree state; the chat must not
-    // re-sort to the top of the sidebar.
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, { touch: false });
+    if (next === n.activeSwipe) return;
+    // touch: false — browsing swipes changes no world state; the chat must not
+    // re-sort to the top of the sidebar. snapStart:false — the user explicitly
+    // chose this swipe; an uncontinued one truncates, never snaps back.
+    // scrollTarget: if this swipe re-derives the leaf, keep THIS message on
+    // screen rather than jumping to the new branch's bottom.
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: next } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
   };
   const onSwipeTo = (nodeId, idx) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || idx < 0 || idx >= n.swipes.length) return;
-    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, { touch: false });
+    if (!n || generating?.chatId === c.id || idx < 0 || idx >= n.swipes.length || idx === n.activeSwipe) return;
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
   };
+  // Jump to the branch running through nodeId (branch chip popover / Branches
+  // tab). From another chat's panel modal: switches the active chat too.
+  const onJump = (nodeId, chatId = ui.chatId) => {
+    const c = ref.current.chats[chatId];
+    if (!c?.messages[nodeId] || generating?.chatId === c.id) return;
+    scrollTargetRef.current = { chatId: c.id, nodeId };
+    saveChat(activateBranch(c, nodeId), { touch: false });
+    if (chatId !== ui.chatId) setUi(u => ({ ...u, chatId }));
+  };
+  // The branch view is a modal (the drawer tab strip is crowded enough with
+  // four) — opened from the chat context menu, the branch chip popover, or
+  // Chat options.
+  const onOpenBranches = (chatId = ui.chatId) => setModal({ kind: 'branches', chatId });
+
+  // ←/→ cycle the leaf message's swipes; → on the last swipe is ▶⁺ (a new
+  // take). ↑/↓ move a keyboard selection through the messages (↓ past the
+  // leaf or Esc clears it); ←/→ then act on the SELECTED message. Plain
+  // arrows only, never while typing in a field or with a modal/menu open —
+  // and the handlers themselves no-op while generating.
+  const [kbdSel, setKbdSel] = useState(null); // nodeId | null
+  useEffect(() => { setKbdSel(null); }, [ui.chatId]); // selection is per chat view
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (kbdSel && !modal && !ctxMenu) setKbdSel(null);
+        return;
+      }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (modal || ctxMenu) return;
+      if (e.target?.closest?.('input, textarea, select, [contenteditable]')) return;
+      const c = ref.current.chats[ui.chatId];
+      if (!c) return;
+      const path = getActivePath(c.messages, c.activeLeafId);
+      if (!path.length) return;
+      const selIdx = kbdSel ? path.findIndex(n => n.id === kbdSel) : -1;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (e.key === 'ArrowUp') {
+          // none selected → start at the leaf and walk up from there
+          setKbdSel(path[selIdx === -1 ? path.length - 1 : Math.max(0, selIdx - 1)].id);
+        } else {
+          if (selIdx === -1) return; // nothing selected — ↓ stays at the live bottom
+          if (selIdx >= path.length - 1) setKbdSel(null); // ↓ past the leaf exits selection
+          else setKbdSel(path[selIdx + 1].id);
+        }
+        return;
+      }
+      // ←/→: the selected message wins, else the leaf.
+      const target = (selIdx >= 0 ? path[selIdx] : null) ?? path[path.length - 1];
+      if (e.key === 'ArrowLeft') {
+        if (target.activeSwipe <= 0) return;
+        e.preventDefault();
+        onSwipe(target.id, -1);
+      } else {
+        e.preventDefault();
+        if (target.activeSwipe < target.swipes.length - 1) onSwipe(target.id, 1);
+        else if (target.role === 'assistant') onRegenerate(target.id); // no-ops when busy
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [modal, ctxMenu, auxBusy, ui.chatId, kbdSel]);
   const onBranch = (nodeId) => {
     const c = ref.current.chats[ui.chatId];
     if (!c) return;
@@ -1782,9 +1862,11 @@ function Main({ storage, storageKind, storageFailed }) {
                 if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
               composerInject=${composerInject} auxBusy=${auxBusy}
+              scrollTargetRef=${scrollTargetRef} kbdSel=${kbdSel}
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
+              onJump=${onJump} onOpenBranches=${onOpenBranches}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
@@ -1807,6 +1889,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
+        onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -1872,13 +1955,22 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
+        onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}
+    ${modal?.kind === 'branches' && chats[modal.chatId] && html`
+      <${ErrorBoundary} name="branches"><${Modal} title="Chat branches" wide onClose=${() => setModal(null)}>
+        <${BranchPanel} chat=${chats[modal.chatId]}
+          personaName=${(chats[modal.chatId].personaId && personas[chats[modal.chatId].personaId]?.name?.trim()) || 'User'}
+          generating=${generating?.chatId === modal.chatId}
+          onJump=${(id) => { onJump(id, modal.chatId); setModal(null); }} />
+      <//><//>`}
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${ctxMenu.items ?? [
           { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
+          { label: 'Branches', fn: () => chatAction(ctxMenu.chatId, 'branches') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

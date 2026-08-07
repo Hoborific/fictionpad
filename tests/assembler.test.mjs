@@ -15,6 +15,7 @@ const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes,
@@ -27,6 +28,7 @@ const core = await import('data:text/javascript;charset=utf-8,' + encodeURICompo
 const {
   MEMORY_CAP, LINK_BOOST, LAYER_CAPS, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes,
@@ -1613,6 +1615,234 @@ section('timed field import healing');
   const blank = normalizeLorePiece({ title: 'Y' });
   ok(blank.sticky === undefined && blank.prob === undefined && blank.group === undefined,
     'absent timed fields stay absent');
+}
+
+// ---- in-chat branching: fromSwipe, activateBranch, branch-visible world state ----
+section('in-chat branching');
+{
+  // appendMessage stamps the child with the parent's active swipe
+  {
+    let chat = { ...baseChat, messages: { ...baseChat.messages,
+      root: { ...baseChat.messages.root,
+        swipes: [...baseChat.messages.root.swipes, { text: 'alt greeting', createdAt: 2, modelId: null }],
+        activeSwipe: 1 } } };
+    const r = appendMessage(chat, 'root', 'user', 'hi');
+    ok(r.chat.messages[r.id].fromSwipe === 1, 'appendMessage stamps fromSwipe = parent activeSwipe');
+    ok(r.chat.messages.root.usedSwipe === 1, 'usedSwipe still recorded alongside fromSwipe');
+    ok(!('fromSwipe' in r.chat.messages.root), 'root carries no fromSwipe');
+  }
+  // normalizeBranchSwipes: legacy children heal from parent.usedSwipe
+  {
+    const legacy = {
+      ...baseChat,
+      messages: {
+        root: { ...node('root', null, 'assistant', 'g0', 1),
+          swipes: [{ text: 'g0', createdAt: 1, modelId: null }, { text: 'g1', createdAt: 2, modelId: null }],
+          activeSwipe: 0, usedSwipe: 1 },
+        u1: node('u1', 'root', 'user', 'hi', 3),            // no fromSwipe → heals to 1
+        u2: { ...node('u2', 'root', 'user', 'yo', 4), fromSwipe: 0 }, // already stamped
+      },
+      activeLeafId: 'u1',
+    };
+    const healed = normalizeBranchSwipes(legacy);
+    ok(healed.messages.u1.fromSwipe === 1, 'legacy child stamped from parent usedSwipe');
+    ok(healed.messages.u2.fromSwipe === 0, 'stamped child untouched');
+    ok(normalizeBranchSwipes(healed) === healed, 'normalize is a no-op (same object) when clean');
+    const clamped = normalizeBranchSwipes({ ...legacy, messages: { ...legacy.messages,
+      root: { ...legacy.messages.root, usedSwipe: 99 } } });
+    ok(clamped.messages.u1.fromSwipe === 1, 'out-of-range usedSwipe clamps to swipe count');
+    ok(normalizeChat(legacy).messages.u1.fromSwipe === 1, 'normalizeChat heals imports too');
+  }
+  // branch tree fixture: root(2 swipes) → swipe0: u1 → a1 · swipe1: u2 → a2
+  const bNode = (id, parentId, role, text, createdAt, fromSwipe, extra = {}) => ({
+    id, parentId, role, activeSwipe: 0, edited: false,
+    swipes: [{ text, createdAt, modelId: null }], ...(fromSwipe != null ? { fromSwipe } : {}), ...extra,
+  });
+  const branchChatFx = () => ({
+    ...baseChat,
+    messages: {
+      root: { ...bNode('root', null, 'assistant', 'g0', 1),
+        swipes: [{ text: 'g0', createdAt: 1, modelId: null }, { text: 'g1', createdAt: 2, modelId: null }],
+        usedSwipe: 1 },
+      u1: bNode('u1', 'root', 'user', 'branch A user', 3, 0),
+      a1: bNode('a1', 'u1', 'assistant', 'branch A reply', 4, 0),
+      u2: bNode('u2', 'root', 'user', 'branch B user', 5, 1),
+      a2: bNode('a2', 'u2', 'assistant', 'branch B reply', 6, 0),
+    },
+    activeLeafId: 'a1',
+  });
+  // swipe switch propagates: changing root's swipe swaps the whole branch below
+  {
+    const chat = branchChatFx();
+    const swiped = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, activeSwipe: 1 } } };
+    const next = activateBranch(swiped, 'root', { keepPath: true });
+    ok(next.activeLeafId === 'a2', 'swiping to swipe 1 follows that swipe\'s branch to its tip');
+    ok(getActivePath(next.messages, next.activeLeafId).map(n => n.id).join(',') === 'root,u2,a2',
+      'new path runs through the matching children');
+    // swipe back: branch A re-emerges
+    const back = activateBranch({ ...next, messages: { ...next.messages, root: { ...next.messages.root, activeSwipe: 0 } } }, 'root', { keepPath: true });
+    ok(back.activeLeafId === 'a1', 'swiping back restores branch A');
+    // nothing deleted while browsing
+    ok(Object.keys(next.messages).length === 5, 'hidden branch nodes stay in the tree');
+  }
+  // no continuation under the new swipe → the path truncates to the swiped node
+  {
+    const chat = branchChatFx();
+    const u1swiped = { ...chat, messages: { ...chat.messages, u1: { ...chat.messages.u1,
+      swipes: [...chat.messages.u1.swipes, { text: 'branch A user (take 2)', createdAt: 7, modelId: null }],
+      activeSwipe: 1 } } };
+    const next = activateBranch(u1swiped, 'u1', { keepPath: true });
+    ok(next.activeLeafId === 'u1', 'no child continues the new swipe → leaf truncates to the node');
+    ok(next.messages.a1, 'the old continuation is kept, not deleted');
+    const back = activateBranch({ ...next, messages: { ...next.messages, u1: { ...next.messages.u1, activeSwipe: 0 } } }, 'u1', { keepPath: true });
+    ok(back.activeLeafId === 'a1', 'swiping back re-descends into the kept continuation');
+  }
+  // explicit swipe vs jump into a node whose viewed swipe has no continuation
+  {
+    const chat = branchChatFx();
+    // u1 gains a second swipe; usedSwipe records the conversation continued from swipe 0
+    const u1swiped = { ...chat, messages: { ...chat.messages, u1: { ...chat.messages.u1,
+      swipes: [...chat.messages.u1.swipes, { text: 'branch A user (take 2)', createdAt: 7, modelId: null }],
+      activeSwipe: 1, usedSwipe: 0 } } };
+    const next = activateBranch(u1swiped, 'u1', { keepPath: true, snapStart: false });
+    ok(next.messages.u1.activeSwipe === 1, 'explicit swipe to an uncontinued swipe is not snapped back');
+    ok(next.activeLeafId === 'u1', 'and the path truncates to the swiped node');
+    const jumped = activateBranch(u1swiped, 'u1');
+    ok(jumped.messages.u1.activeSwipe === 0 && jumped.activeLeafId === 'a1',
+      'a tree jump into the same node still snaps to the continued swipe');
+  }
+  // jump: aligns ancestor swipes to the branch being entered
+  {
+    const chat = branchChatFx(); // root.activeSwipe 0, leaf a1
+    const jumped = activateBranch(chat, 'u2');
+    ok(jumped.messages.root.activeSwipe === 1, 'jump aligns the parent to the branch\'s fromSwipe');
+    ok(jumped.activeLeafId === 'a2', 'jump descends to the branch tip');
+    const ident = activateBranch(jumped, 'a2');
+    ok(ident === jumped, 'activateBranch on the aligned leaf is a no-op (same object)');
+  }
+  // keepPath prefers the current child when it still matches
+  {
+    const chat = branchChatFx();
+    // second child under root swipe 1, older than u2 — the current path runs through it
+    chat.messages.u0 = bNode('u0', 'root', 'user', 'older B user', 0, 1);
+    chat.messages.a0 = bNode('a0', 'u0', 'assistant', 'older B reply', 1, 0);
+    chat.activeLeafId = 'a0';
+    chat.messages.root = { ...chat.messages.root, activeSwipe: 1 };
+    const kept = activateBranch(chat, 'root', { keepPath: true });
+    ok(kept.activeLeafId === 'a0', 'keepPath keeps the current child over a newer sibling');
+    const newest = activateBranch(chat, 'root');
+    ok(newest.activeLeafId === 'a2', 'without keepPath the newest matching child wins');
+  }
+  // usedSwipe snap: a node whose viewed swipe has no continuation follows the recorded one
+  {
+    const chat = branchChatFx();
+    chat.messages.u1 = { ...chat.messages.u1, activeSwipe: 0, usedSwipe: 0,
+      swipes: [...chat.messages.u1.swipes, { text: 'draft', createdAt: 7, modelId: null }] };
+    chat.messages.u1.activeSwipe = 1; // browsing an un-continued swipe
+    chat.activeLeafId = 'u1';
+    const jumped = activateBranch(chat, 'u1');
+    ok(jumped.messages.u1.activeSwipe === 0, 'no continuation under viewed swipe → snaps to usedSwipe');
+    ok(jumped.activeLeafId === 'a1', 'and follows the recorded continuation down');
+  }
+  // descend:false aligns the path without moving the leaf (chat open)
+  {
+    const chat = branchChatFx();
+    chat.activeLeafId = 'root';
+    const opened = activateBranch(chat, 'root', { descend: false });
+    ok(opened.activeLeafId === 'root', 'descend:false keeps the persisted (rewound) leaf');
+  }
+  // pruneInterrupted re-stamps fromSwipe when re-parenting
+  {
+    let chat = { ...baseChat, messages: { ...baseChat.messages,
+      root: { ...baseChat.messages.root,
+        swipes: [...baseChat.messages.root.swipes, { text: 'alt greeting', createdAt: 2, modelId: null }],
+        activeSwipe: 1 } } };
+    chat = appendMessage(chat, 'root', 'assistant', '').chat; // placeholder (all-empty) under swipe 1
+    const a1 = chat.activeLeafId;
+    chat = appendMessage(chat, a1, 'user', 'hello?').chat;   // child of the placeholder
+    const u2 = chat.activeLeafId;
+    const pruned = pruneInterrupted(chat);
+    ok(pruned.messages[u2].parentId === 'root', 'child re-parented past the dropped placeholder');
+    ok(pruned.messages[u2].fromSwipe === 1, 'fromSwipe re-stamped against the new parent');
+  }
+}
+section('branch-visible world state');
+{
+  // branch fixture: path A root→u1→a1 vs path B root→u2 (activeLeaf u2)
+  const bChat = () => ({
+    ...baseChat,
+    messages: {
+      root: node('root', null, 'assistant', 'Welcome to Veyra, {{user}}.', 1),
+      u1: { ...node('u1', 'root', 'user', 'hi', 2), fromSwipe: 0 },
+      a1: { ...node('a1', 'u1', 'assistant', 'hello there', 3), fromSwipe: 0 },
+      u2: { ...node('u2', 'root', 'user', 'different hi', 4), fromSwipe: 0 },
+    },
+    activeLeafId: 'u2',
+  });
+  const scen = { ...baseScenario, lorePieces: [
+    lore({ id: 'SP', title: 'Shared', content: 'scenario version', keys: ['Veyra'] }),
+  ] };
+  const chat = bChat();
+  chat.lorePieces = [
+    // shadows the scenario piece, but was written on branch A (createdBy a1)
+    { ...lore({}), id: 'SP', title: 'Shared', content: 'chat shadow version', keys: ['Veyra'],
+      createdBy: 'a1', createdAt: 5, atLen: 3 },
+    // branch-A-only pinned piece
+    lore({ id: 'CL', title: 'BranchA', content: 'branch A secret', keys: [], pinned: true,
+      createdBy: 'a1', createdAt: 5, atLen: 3 }),
+    // written on branch B, then updated by a tool on branch A (revision log)
+    lore({ id: 'CL2', title: 'Mia', content: 'v2 rewritten on branch A', keys: ['Mia'], pinned: true,
+      createdBy: 'u2', createdAt: 4, atLen: 2,
+      revisions: [
+        { content: 'original Mia', keys: ['Mia'], atLen: null, createdAt: null, createdBy: null },
+        { content: 'v2 rewritten on branch A', keys: ['Mia'], atLen: 3, createdAt: 5, createdBy: 'a1' },
+      ] }),
+  ];
+  chat.memoryStore = { memories: [
+    { id: 'mA', text: 'branch A memory', pinned: false, createdAt: 5, atLen: 3, atMsg: 'a1' },
+    { id: 'mB', text: 'global memory', pinned: false, createdAt: 6, atLen: 2 },
+    { id: 'mC', text: 'branch B memory', pinned: false, createdAt: 7, atLen: 2, atMsg: 'u2' },
+  ], cursor: 0 };
+  {
+    const r = assemblePrompt({ scenario: scen, persona, chat, settings });
+    const L = r.manifest.layers.lore;
+    const mem = r.manifest.layers.memory;
+    const sp = L.pieces.find(p => p.id === 'SP');
+    ok(sp && sp.content === 'scenario version', 'branch-hidden shadow stops shadowing — scenario piece resurfaces');
+    ok(sp && sp.origin === 'scenario', 'resurfaced piece reports scenario origin');
+    ok(!L.pieces.some(p => p.id === 'CL'), 'branch-A piece not injected on branch B');
+    const cl2 = L.pieces.find(p => p.id === 'CL2');
+    ok(cl2 && cl2.content === 'original Mia', 'revision view falls back to the last on-path revision');
+    ok(L.inactive.filter(p => p.reason === 'branch').map(p => p.id).sort().join(',') === 'CL,SP',
+      'hidden pieces appear as Not injected · branch');
+    const memIds = mem.memories.map(m => m.id).sort().join(',');
+    ok(memIds === 'mB,mC', 'only global + this-branch memories inject');
+    ok(mem.inactive.some(m => m.id === 'mA' && m.reason === 'branch'), 'branch memory listed as Not injected · branch');
+  }
+  {
+    // same chat viewed from branch A (leaf a1): everything flips back
+    const r = assemblePrompt({ scenario: scen, persona, chat: { ...chat, activeLeafId: 'a1' }, settings });
+    const L = r.manifest.layers.lore;
+    const mem = r.manifest.layers.memory;
+    ok(L.pieces.find(p => p.id === 'SP')?.content === 'chat shadow version', 'branch A sees the shadow again');
+    ok(L.pieces.some(p => p.id === 'CL'), 'branch A piece injected on branch A');
+    ok(L.pieces.find(p => p.id === 'CL2')?.content === 'v2 rewritten on branch A', 'branch A sees its own revision');
+    ok(mem.memories.some(m => m.id === 'mA') && !mem.memories.some(m => m.id === 'mC'),
+      'memory visibility flips with the branch');
+  }
+  // pieceAtPath unit behavior
+  {
+    const bare = lore({ id: 'Y' });
+    ok(pieceAtPath(bare, new Set(['x'])) === bare, 'no revision log → identity');
+    const p = lore({ id: 'X', content: 'latest', revisions: [
+      { content: 'orig', keys: [], createdBy: null },
+      { content: 'latest', keys: [], createdBy: 'somewhere' },
+    ] });
+    ok(pieceAtPath(p, new Set(['somewhere'])) === p, 'latest revision visible → identity');
+    const hidden = pieceAtPath(p, new Set(['elsewhere']));
+    ok(hidden !== p && hidden.content === 'orig', 'latest revision off-path → last visible revision content');
+    ok(hidden.revisions.length === 2, 'revision log itself is never trimmed by the view');
+  }
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

@@ -1,7 +1,23 @@
+const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
+
 function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
+  // Branch data for the swipe-nav badge / branch popover: parentId → children,
+  // oldest first. Keyed on the messages map so identities stay stable across
+  // unrelated re-renders (MessageItem memo compares prop identities).
+  const kidsByParent = useMemo(() => {
+    const map = new Map();
+    for (const n of Object.values(chat?.messages ?? {})) {
+      if (!n?.parentId) continue;
+      if (!map.has(n.parentId)) map.set(n.parentId, []);
+      map.get(n.parentId).push(n);
+    }
+    for (const kids of map.values())
+      kids.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1));
+    return map;
+  }, [chat?.messages]);
   // Memory pills: path position → count of memories stamped there (atLen), so
   // the message where an auto-summary fired shows it and can jump to the
   // Memory tab. Rewind trims the store, so stale pills vanish on their own.
@@ -80,6 +96,31 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
   };
   useEffect(() => { // follow growth only when pinned
     const el = logRef.current;
+    // Branch swap (swipe that re-derived the leaf, branch picker/view jump):
+    // keep the acted message on screen instead of force-following to the new
+    // branch's bottom — the tail changed, not the user's reading position.
+    const tgt = scrollTargetRef?.current;
+    if (tgt && tgt.chatId === chat?.id) {
+      scrollTargetRef.current = null;
+      const leafChanged = path[path.length - 1]?.id !== seenLeafRef.current;
+      if (el && leafChanged) {
+        skipLeafScrollRef.current = true; // the seenLeaf effect must not bottom-scroll after us
+        pinnedRef.current = false;
+        setPinned(false);
+        const nodeEl = el.querySelector(`[data-mid="${tgt.nodeId}"]`);
+        if (nodeEl) {
+          const r = nodeEl.getBoundingClientRect();
+          const lr = el.getBoundingClientRect();
+          if (r.top < lr.top + 8 || r.top > lr.bottom - 80) { // not comfortably visible
+            programmaticRef.current = true;
+            el.scrollTop += (r.top - lr.top) - 12; // settle near the top of the log
+            requestAnimationFrame(() => { programmaticRef.current = false; });
+          }
+        }
+        computeJump();
+        return;
+      }
+    }
     if (pinnedRef.current) {
       if (el) scrollElToBottom(el);
     } else computeJump(); // content grew while unpinned — jump may newly apply
@@ -100,14 +141,35 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
     wasGenRef.current = !!generating;
   }, [generating]);
   const seenLeafRef = useRef(null);
+  const skipLeafScrollRef = useRef(false); // set when a branch-swap scroll already handled the leaf change
   useEffect(() => {
     const leafId = path[path.length - 1]?.id;
     const role = path[path.length - 1]?.role;
     if (leafId && leafId !== seenLeafRef.current) {
-      if (role === 'user' && seenLeafRef.current !== null) scrollToBottom();
+      if (role === 'user' && seenLeafRef.current !== null && !skipLeafScrollRef.current) scrollToBottom();
+      skipLeafScrollRef.current = false;
       seenLeafRef.current = leafId;
     }
   }, [path]);
+  // Keyboard message selection (↑/↓ in Main): highlight only while the node
+  // is on the active path; scroll it into view (a third down) when needed.
+  const selId = kbdSel && path.some(n => n.id === kbdSel) ? kbdSel : null;
+  useEffect(() => {
+    if (!selId) return;
+    const el = logRef.current;
+    const nodeEl = el?.querySelector(`[data-mid="${selId}"]`);
+    if (!el || !nodeEl) return;
+    const r = nodeEl.getBoundingClientRect();
+    const lr = el.getBoundingClientRect();
+    if (r.top < lr.top + 8 || r.bottom > lr.bottom - 8) {
+      pinnedRef.current = false;
+      setPinned(false);
+      programmaticRef.current = true;
+      el.scrollTop += (r.top - lr.top) - el.clientHeight / 3;
+      requestAnimationFrame(() => { programmaticRef.current = false; });
+      computeJump();
+    }
+  }, [selId]);
   // Per-chat composer drafts (ephemeral, session-only — never persisted). The
   // Composer remounts per chat (key=chat.id) and seeds from this map; edits
   // flow back via onDraft, so an unsent draft survives any number of chat
@@ -166,14 +228,16 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
               <span>last generation saw from here down · ${horizon.dropped} older message${horizon.dropped === 1 ? '' : 's'} out of context</span>
             </div>`}
           <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+            selected=${node.id === selId}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             auxBusy=${auxBusy.length > 0}
             dateFormat=${dateFormat} showThinking=${showThinking}
             memCount=${memByLen.get(i + 1) ?? 0} onOpenMemory=${actions.onOpenMemory}
+            branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
-            onSwipeTo=${actions.onSwipeTo}
+            onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
           <//>`)}
