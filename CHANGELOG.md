@@ -1090,3 +1090,16 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Explicitly swiping a mid-chain message to a swipe with no continuation no longer snaps back to the continued swipe - the old swipe stays viewable and the path simply truncates there (the `usedSwipe` self-heal now only applies to tree jumps/descent, never to the node you just swiped).
 - The branch picker popover no longer renders off the bottom of the window when opened from a message near the viewport's lower edge (typical after a swipe change truncated the path, making that message the leaf) - it now flips above the chip when there isn't room below.
+
+### v4.9.1
+
+**Changed**
+
+- Clicking or touching anywhere now clears the arrow-key message selection (the accent ring from `↑`/`↓`) - no need to `Esc` or arrow past the end when you switch back to pointer.
+- Switching chats mid-generation no longer hides the busy state: every chat's composer now shows ■ Stop (and Enter-to-send, the ✦ Generate response pill, and the impersonate chip stand down) while a generation is running anywhere. One generation at a time remains the rule - Stop aborts it from whichever chat you're looking at. Starting a second generation was already refused at the handler level; now the gate is visible instead of a Send button that silently can't send. Browsing swipes/branches in the other chat stays available (the stream only owns its own chat's tree).
+
+**Fixed**
+
+- "Fork to new chat" (⑂) no longer drags the old chat's branches into the new one: it always deep-copied the ENTIRE message tree, which was invisible before v4.9 made branches browsable - so a fork opened its Branches view and branch chips full of the parent's alternates. A fork now keeps only the root→fork path (each chat is its own tree, matching the long-documented "copy the chat up to that message"), with memories, tool lore, the lore queue, and cursors rolled back to the fork point via the rewind cutoffs. Forks made before this fix keep their carried-over trees.
+- The uncompiled `fictionpad.html` actually boots now: its esm.sh importmap has been swallowed by an unclosed `<!-- VENDORED-IMPORTMAP:BEGIN` comment since the compile step was introduced (the compiled build escapes it because the markers' replacement region is regenerated wholesale), so any browser opening the dev build died on "Module name, 'react' does not resolve to a valid URL". The BEGIN comment is now closed on its own line - dev build's importmap is live, compiled artifact byte-identical.
+- A fresh clone's first `node server.mjs` no longer leaves you on the CDN-dependent dev build: the server now builds the self-contained `fictionpad.compiled.html` in the background at startup when it's missing (the pinned deps are fetched from esm.sh once; the compiled build takes over with no restart since the served file is resolved per request). If the build can't run - offline, or no `vendor.mjs` alongside - the fallback keeps serving with a clear log warning that it needs esm.sh at runtime. `FICTIONPAD_AUTOBUILD=0` opts out.

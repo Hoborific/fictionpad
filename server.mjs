@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// FictionPad local server: serves fictionpad.html, proxies LLM API calls
+// FictionPad local server: serves the compiled single-file app
+// (fictionpad.compiled.html — auto-built in the background on first run when
+// missing; the esm.sh dev build is the fallback), proxies LLM API calls
 // (mikupad-style /proxy/*), and optionally stores sessions in SQLite.
 // Zero dependencies — requires Node.js >= 22.13 (node:sqlite, unflagged).
 //
@@ -37,6 +39,9 @@
 //                       recent complete snapshot even without a shutdown.
 //   GET /backup       checkpoints the WAL, then streams the SQLite file as
 //                     an attachment (same auth as the storage routes).
+//   FICTIONPAD_AUTOBUILD=0  disable the background build of
+//                       fictionpad.compiled.html when it's missing (default:
+//                       build once per process at startup, never blocking).
 // CORS: Access-Control-Allow-Origin and the preflight answer are emitted
 //   only when the request's Origin header is absent (same-origin/curl) or
 //   exactly "null" (the file:// build — the only reason CORS exists). Any
@@ -50,6 +55,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -219,11 +225,41 @@ function proxyTargetAllowed(target) {
 }
 
 // Serve the compiled (vendored, offline-capable) build when present — that's
-// the distribution artifact; the readable source is the fallback (dev).
-// Resolved per request so a rebuild is picked up without a server restart.
+// the distribution artifact; the readable source is the fallback (dev build,
+// loads its JS deps from esm.sh at runtime). Resolved per request so a
+// rebuild is picked up without a server restart.
 const appFile = () => existsSync(join(ROOT, 'fictionpad.compiled.html'))
   ? 'fictionpad.compiled.html'
   : 'fictionpad.html';
+
+// Fresh clones have no compiled artifact (it's gitignored — the release asset
+// is the real distribution), so without this a first-time `node server.mjs`
+// would serve the esm.sh dev build: a blank page anywhere the CDN is
+// unreachable. Build the self-contained artifact in the background at
+// startup — appFile() resolves per request, so the compiled build takes over
+// the moment it lands, no restart. A failed build (offline, no vendor.mjs
+// alongside) just keeps the fallback serving, with a warning. Once per
+// process; FICTIONPAD_AUTOBUILD=0 opts out.
+let autobuildTried = false;
+function autobuildCompiled() {
+  if (autobuildTried || process.env.FICTIONPAD_AUTOBUILD === '0') return;
+  autobuildTried = true;
+  if (existsSync(join(ROOT, 'fictionpad.compiled.html'))) return;
+  if (!existsSync(join(ROOT, 'vendor.mjs'))) return; // artifact-only deploy — nothing to build with
+  console.log('FictionPad: fictionpad.compiled.html missing — building it in the background ' +
+    '(first run fetches the pinned deps from esm.sh once)…');
+  const child = spawn(process.execPath, [join(ROOT, 'vendor.mjs')], { cwd: ROOT, stdio: 'inherit' });
+  child.on('error', (err) =>
+    console.warn(`FictionPad: could not run vendor.mjs (${err?.message || err}) — ` +
+      'serving the esm.sh dev build, which needs internet access.'));
+  child.on('exit', (code) => {
+    if (code === 0 && existsSync(join(ROOT, 'fictionpad.compiled.html')))
+      console.log('FictionPad: built fictionpad.compiled.html — now serving the self-contained build (no restart needed).');
+    else
+      console.warn('FictionPad: auto-build failed — serving fictionpad.html, which loads React/htm/marked ' +
+        'from esm.sh on every page open. Run `node vendor.mjs` once with internet access, or use the release asset.');
+  });
+}
 
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -473,7 +509,10 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`FictionPad server running:`);
-  console.log(`  app:     http://localhost:${PORT}/ (serving ${appFile()})`);
+  const served = appFile();
+  console.log(`  app:     http://localhost:${PORT}/ (serving ${served})`);
+  if (served === 'fictionpad.html')
+    console.warn('  note:    no compiled artifact yet — the dev build being served loads React/htm/marked from esm.sh at runtime.');
   console.log(`  proxy:   http://localhost:${PORT}/proxy/<real-endpoint>`);
   console.log(`  storage: SQLite kv at ${DB_PATH}`);
   if (BASIC_HEADER) console.log(`  auth:    basic (user ${BASIC_USER}) — FICTIONPAD_AUTH, whole server except /health`);
@@ -482,4 +521,5 @@ server.listen(PORT, () => {
   if (!BASIC_HEADER && !TOKEN)
     console.warn('  WARNING: no auth configured — anyone who can reach this port can use storage;' +
       ' /proxy is restricted to loopback targets. Set FICTIONPAD_AUTH=user:password before exposing this server.');
+  autobuildCompiled();
 });

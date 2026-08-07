@@ -1,6 +1,6 @@
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
-function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
+function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
                   onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
@@ -217,7 +217,10 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
     && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
   // Impersonate chip: below the suggestion chips when those are on, the only
   // chip otherwise. Click-triggered only — no aux call until asked.
-  const showImpChip = !generating && !auxBusy.length && leaf?.role === 'assistant' && !!actions.onImpersonate;
+  // genElsewhere: a generation is running in ANOTHER chat — one at a time is
+  // the rule, so this chat's generation affordances stand down too (the
+  // composer still shows ■ Stop below, making the busy state visible).
+  const showImpChip = !generating && !genElsewhere && !auxBusy.length && leaf?.role === 'assistant' && !!actions.onImpersonate;
   return html`
     <div class="main">
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
@@ -259,11 +262,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       </div>
       ${showJump && html`
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
-      ${!generating && !auxBusy.length && leaf?.role === 'user' && html`
+      ${!generating && !genElsewhere && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy.length > 0}
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;

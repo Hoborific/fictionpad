@@ -106,6 +106,22 @@ section('message tree');
     'branch forks tree with new id and new leaf');
   b.memoryStore.memories.push({ id: 'x', text: 't', pinned: false, createdAt: 1 });
   ok(chat.memoryStore.memories.length === 0, 'branch deep-copies memoryStore');
+  // The fork is self-contained: only the fork node's ancestor path comes
+  // over — later messages and sibling branches stay behind in the old chat.
+  ok(b.messages.root && b.messages[uid1] && !b.messages[r.id] && Object.keys(b.messages).length === 2,
+    'fork keeps only the root→fork path');
+  ok(getActivePath(b.messages, b.activeLeafId).length === 2, 'fork path is root→fork node');
+  // World state rolls back to the fork point (rewind cutoffs); original untouched.
+  const c2 = { ...chat, memoryStore: { memories: [
+    { id: 'mOld', text: 'old', pinned: false, createdAt: 1, atLen: 2 }, // at the fork node
+    { id: 'mNew', text: 'new', pinned: false, createdAt: 2, atLen: 3 }, // past it
+  ], cursor: 3 } };
+  const b3 = branchChat(c2, uid1);
+  ok(b3.memoryStore.memories.some(m => m.id === 'mOld') && !b3.memoryStore.memories.some(m => m.id === 'mNew'),
+    'fork rolls memories back to the fork point');
+  ok(b3.memoryStore.cursor === 2, 'fork resets the memory cursor to the fork path length');
+  ok(c2.memoryStore.memories.length === 2 && c2.memoryStore.cursor === 3,
+    'fork leaves the source chat untouched');
 }
 
 // ---- lore engine ----

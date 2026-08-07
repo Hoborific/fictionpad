@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, viewport-fit=cover">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232b2118'/%3E%3Cpath d='M32 18c-5-4-12-5-18-4v32c6-1 13 0 18 4 5-4 12-5 18-4V14c-6-1-13 0-18 4z' fill='%23f2e6cf'/%3E%3Cpath d='M32 18v32' stroke='%23c9b795' stroke-width='2'/%3E%3Cpath d='M20 24h8M20 30h8M20 36h8M36 24h8M36 30h8' stroke='%23b39b74' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%232b2118'/%3E%3Cpath d='M32 18c-5-4-12-5-18-4v32c6-1 13 0 18 4 5-4 12-5 18-4V14c-6-1-13 0-18 4z' fill='%23f2e6cf'/%3E%3Cpath d='M32 18v32' stroke='%23c9b795' stroke-width='2'/%3E%3Cpath d='M20 24h8M20 30h8M20 36h8M36 24h8M36 30h8' stroke='%23b39b74' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
-<!-- VENDORED-IMPORTMAP:BEGIN — vendor.mjs replaces this block with vendored data: URLs when compiling to fictionpad.compiled.html. The source below is the dev importmap (esm.sh CDN).
+<!-- VENDORED-IMPORTMAP:BEGIN — vendor.mjs replaces this block with vendored data: URLs when compiling to fictionpad.compiled.html. The source below is the dev importmap (esm.sh CDN). -->
 <script type="importmap">
 {
   "imports": {
@@ -847,7 +847,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.9.0';
+const APP_VERSION = '4.9.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1487,11 +1487,30 @@ function rewindChat(chat, nodeId) {
   return next;
 }
 
-// Fork the whole chat (messages + memory store) into a new chat rooted at the
-// same tree, with nodeId as the active leaf.
+// Fork the chat at nodeId into a NEW self-contained chat. Only the fork
+// node's ancestor path comes over — each chat is its own tree, so the old
+// chat's sibling branches stay behind (before in-chat branching made the
+// tree visible, deep-copying the whole tree was harmless; it isn't anymore).
+// World state rolls back to the fork point via rewindChat's cutoffs
+// (memories, tool lore, loreQueue, cursors); rewind-exempt state (vars,
+// author's note) carries over as with a rewind.
 function branchChat(chat, nodeId) {
   const copy = deepClone(chat);
-  return { ...copy, id: uid(), name: `${chat.name} (branch)`, activeLeafId: nodeId, createdAt: Date.now() };
+  if (!copy.messages?.[nodeId])
+    return { ...copy, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+  // Keep only the fork node's ancestor chain (walk up, cycle-guarded).
+  const keep = new Set();
+  let top = nodeId;
+  for (let id = nodeId; id && copy.messages[id] && !keep.has(id); id = copy.messages[id].parentId) {
+    keep.add(id);
+    top = id;
+  }
+  const messages = {};
+  for (const id of keep.keys()) messages[id] = copy.messages[id];
+  const pruned = { ...copy, messages,
+    ...(messages[copy.rootMessageId] ? {} : { rootMessageId: top }) };
+  const trimmed = rewindChat(pruned, nodeId);
+  return { ...trimmed, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
 }
 
 // ---- lore engine --------------------------------------------------------
@@ -5797,7 +5816,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
 
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
-function ChatPane({ chat, persona, characterNames, characterColors, generating, suggestions, onPickSuggestion, onRerollSuggestions,
+function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
                   onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
@@ -6014,7 +6033,10 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
     && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
   // Impersonate chip: below the suggestion chips when those are on, the only
   // chip otherwise. Click-triggered only — no aux call until asked.
-  const showImpChip = !generating && !auxBusy.length && leaf?.role === 'assistant' && !!actions.onImpersonate;
+  // genElsewhere: a generation is running in ANOTHER chat — one at a time is
+  // the rule, so this chat's generation affordances stand down too (the
+  // composer still shows ■ Stop below, making the busy state visible).
+  const showImpChip = !generating && !genElsewhere && !auxBusy.length && leaf?.role === 'assistant' && !!actions.onImpersonate;
   return html`
     <div class="main">
       <div class="chatlog" ref=${logRef} onScroll=${onLogScroll} onWheel=${noteGesture} onTouchMove=${noteGesture}>
@@ -6056,11 +6078,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
       </div>
       ${showJump && html`
         <button class="jump-latest" title="Scroll to the latest message" onClick=${scrollToBottom}>↓ Jump to latest</button>`}
-      ${!generating && !auxBusy.length && leaf?.role === 'user' && html`
+      ${!generating && !genElsewhere && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
         </div>`}
-      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating} busy=${auxBusy.length > 0}
+      <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft}
         onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
     </div>`;
@@ -8082,6 +8104,14 @@ function Main({ storage, storageKind, storageFailed }) {
   // and the handlers themselves no-op while generating.
   const [kbdSel, setKbdSel] = useState(null); // nodeId | null
   useEffect(() => { setKbdSel(null); }, [ui.chatId]); // selection is per chat view
+  // Any click/touch drops the keyboard selection — the ring belongs to arrow-key
+  // navigation only, and a pointer user shouldn't have to Esc it away.
+  useEffect(() => {
+    if (!kbdSel) return;
+    const clear = () => setKbdSel(null);
+    window.addEventListener('pointerdown', clear);
+    return () => window.removeEventListener('pointerdown', clear);
+  }, [kbdSel]);
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') {
@@ -8492,6 +8522,7 @@ function Main({ storage, storageKind, storageFailed }) {
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
+              genElsewhere=${!!generating && generating.chatId !== chat?.id}
               horizon=${horizon}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}

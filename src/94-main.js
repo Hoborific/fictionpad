@@ -1444,6 +1444,14 @@ function Main({ storage, storageKind, storageFailed }) {
   // and the handlers themselves no-op while generating.
   const [kbdSel, setKbdSel] = useState(null); // nodeId | null
   useEffect(() => { setKbdSel(null); }, [ui.chatId]); // selection is per chat view
+  // Any click/touch drops the keyboard selection — the ring belongs to arrow-key
+  // navigation only, and a pointer user shouldn't have to Esc it away.
+  useEffect(() => {
+    if (!kbdSel) return;
+    const clear = () => setKbdSel(null);
+    window.addEventListener('pointerdown', clear);
+    return () => window.removeEventListener('pointerdown', clear);
+  }, [kbdSel]);
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') {
@@ -1854,6 +1862,7 @@ function Main({ storage, storageKind, storageFailed }) {
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
+              genElsewhere=${!!generating && generating.chatId !== chat?.id}
               horizon=${horizon}
               suggestions=${suggestions}
               onPickSuggestion=${(s) => setComposerInject({ chatId: ui.chatId, text: s, nonce: Date.now() })}

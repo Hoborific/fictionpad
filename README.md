@@ -41,6 +41,8 @@ http://localhost:8788/proxy/http://127.0.0.1:8080
 
 The server serves the app, proxies LLM calls (no CORS pain, your API key goes upstream as `X-Real-Authorization`), and optionally stores sessions in SQLite so they sync across browsers.
 
+On first run the server builds the fully self-contained app (`fictionpad.compiled.html`) in the background — the pinned JS dependencies are fetched from esm.sh once, and after that nothing loads from any CDN. Until that build exists (e.g. an offline first run), the repo's dev build is served instead, which needs esm.sh reachable on every page open; the server log says which one it's serving.
+
 ### Auth and configuration
 
 All via environment variables:
@@ -52,6 +54,7 @@ All via environment variables:
 | `FICTIONPAD_DB=/path/to.db` | SQLite storage path (default: `fictionpad.db` next to `server.mjs`). |
 | `FICTIONPAD_PROXY_ALLOW=host1,host2` | Comma-separated allowlist of `/proxy` target hosts (default: any host when auth is configured; loopback-only with no auth). |
 | `FICTIONPAD_CHECKPOINT_MS=60000` | WAL checkpoint interval in ms — the on-disk `.db` is always a recent complete snapshot; `GET /backup` (same auth as storage) checkpoints and streams it. |
+| `FICTIONPAD_AUTOBUILD=0` | Disable the background build of the self-contained app artifact when it's missing (default: build once at startup, never blocking). |
 
 Example, basic auth on a custom port:
 

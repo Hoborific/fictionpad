@@ -13,6 +13,11 @@
 //   node vendor.mjs          assemble + compile (writes only on change)
 //   node vendor.mjs --check  fail if either artifact is missing or stale
 //
+// server.mjs also runs this automatically in the background at startup when
+// fictionpad.compiled.html is missing (FICTIONPAD_AUTOBUILD=0 opts out), so a
+// fresh clone's first `node server.mjs` self-sufficiently produces the
+// artifact instead of serving the CDN-dependent dev build.
+//
 // Deps are pinned by URL + SHA-256 and cached (pristine) in vendor/ (gitignored).
 // To bump a dependency: change `url`, run `node vendor.mjs --rehash` to print
 // the new hash, paste it into `sha256`, delete the vendor/ cache file, re-run.

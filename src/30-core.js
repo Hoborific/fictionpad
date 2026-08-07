@@ -367,11 +367,30 @@ function rewindChat(chat, nodeId) {
   return next;
 }
 
-// Fork the whole chat (messages + memory store) into a new chat rooted at the
-// same tree, with nodeId as the active leaf.
+// Fork the chat at nodeId into a NEW self-contained chat. Only the fork
+// node's ancestor path comes over — each chat is its own tree, so the old
+// chat's sibling branches stay behind (before in-chat branching made the
+// tree visible, deep-copying the whole tree was harmless; it isn't anymore).
+// World state rolls back to the fork point via rewindChat's cutoffs
+// (memories, tool lore, loreQueue, cursors); rewind-exempt state (vars,
+// author's note) carries over as with a rewind.
 function branchChat(chat, nodeId) {
   const copy = deepClone(chat);
-  return { ...copy, id: uid(), name: `${chat.name} (branch)`, activeLeafId: nodeId, createdAt: Date.now() };
+  if (!copy.messages?.[nodeId])
+    return { ...copy, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+  // Keep only the fork node's ancestor chain (walk up, cycle-guarded).
+  const keep = new Set();
+  let top = nodeId;
+  for (let id = nodeId; id && copy.messages[id] && !keep.has(id); id = copy.messages[id].parentId) {
+    keep.add(id);
+    top = id;
+  }
+  const messages = {};
+  for (const id of keep.keys()) messages[id] = copy.messages[id];
+  const pruned = { ...copy, messages,
+    ...(messages[copy.rootMessageId] ? {} : { rootMessageId: top }) };
+  const trimmed = rewindChat(pruned, nodeId);
+  return { ...trimmed, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
 }
 
 // ---- lore engine --------------------------------------------------------

@@ -37,7 +37,9 @@ async function waitReady(port) {
 
 function startServer(port, env) {
   return spawn(process.execPath, [SERVER, String(port)], {
-    env: { ...process.env, ...env },
+    // Never auto-build the compiled artifact from tests — the suite spawns
+    // several servers per run, and the build is orthogonal to what they assert.
+    env: { FICTIONPAD_AUTOBUILD: '0', ...process.env, ...env },
     stdio: 'ignore',
   });
 }
