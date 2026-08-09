@@ -14,6 +14,12 @@ const DEFAULT_PLATFORM_PROMPT =
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:8080',
   apiKey: '',
+  // Per-role connection overrides (Settings → Connection): blank fields
+  // inherit — the generator falls back through aux, everything ends at the
+  // main connection. Resolution: roleConn (50-api.js).
+  auxEndpoint: '', auxApiKey: '',     // memory, suggestions, /improve, /recap, impersonate, lore extraction
+  genEndpoint: '', genApiKey: '',     // ✦ generator buttons
+  embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
@@ -49,6 +55,7 @@ const DEFAULT_SETTINGS = {
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
   impersonate: true, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
+  avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
@@ -72,12 +79,23 @@ const DEFAULT_SETTINGS = {
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
+  avatarGenPrompt: '', // ✦ avatar button — card → portrait prompt for the image API; blank = DEFAULT_AVATAR_GEN_PROMPT
   genModel: '', // ✦ Generate model; blank = aux model (then chat model)
   genTemp: 0.9, // ✦ Generate temperature
   genMaxTokens: 3000, // ✦ Generate response cap (a full scenario JSON must fit)
+  imagesEnabled: false, // /image command + model-attached images (backend: imageBackend)
+  imageBackend: 'openai', // 'openai' (/v1/images/generations) | 'comfyui' (workflow graph via /prompt + /history)
+  imageEndpoint: '', // images API endpoint (Connection tab); empty = the main endpoint
+  imageApiKey: '', // empty = the main API key
+  imageModel: '', // some backends require a model on image calls (Models tab)
+  imageSize: '1024x1024',
+  imagePrefix: '', // style/quality tags prepended to every image prompt; blank = the bare prompt
+  imageNegative: '', // comfyui: negative prompt substituted into {{negative}}
+  imageWorkflow: '', // comfyui: API-format workflow JSON ("Save (API Format)" export) with {{prompt}} etc.
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
+  imagePrompt: '', // generate_image instructions, appended when image generation is on; blank = DEFAULT_IMAGE_PROMPT
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
@@ -147,7 +165,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
 }
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
-                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft }) {
+                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft, initialTab }) {
   const [draft, setDraft] = useState(() => {
     // initialDraft restores the in-progress draft after the logit-bias detour.
     if (initialDraft) return initialDraft;
@@ -157,7 +175,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     d.lengthDirective ??= LENGTH_PRESETS[d.responseLength ?? 'medium']?.directive ?? '';
     return d;
   });
-  const [tab, setTab] = useState('appearance');
+  const [tab, setTab] = useState(initialTab ?? 'appearance'); // initialTab: test seam (SSR can't click tabs)
   const [dirty, setDirty] = useState(false);
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
@@ -300,7 +318,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="field"><span>Date format — message stamps, memories, chat names</span>
             <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
               ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-            </select></label>`)}
+            </select></label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.avatarsEnabled !== false} onChange=${(e) => set({ avatarsEnabled: e.target.checked })} />
+            Avatars beside chat bubbles (off = the chat spans the full pane width; images set on characters, scenarios, and personas)
+          </label>`)}
         ${section('Panes', html`
           <label class="check">
             <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
@@ -335,7 +357,23 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
             ${testState && testState !== 'busy' && html`
               <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
-          </div>`)}`}
+          </div>`)}
+        ${section('Role connections', html`
+          ${[['aux', 'Aux', 'Memory summaries, lore extraction, suggestions, /improve, /recap, impersonate.'],
+             ['gen', 'Generator', 'The ✦ generator buttons. Blank falls back through the aux connection.'],
+             ['embed', 'Embeddings', 'Semantic lore activation + smart memory recall.'],
+             ['image', 'Images', '/image, model-attached images, avatar renders.']]
+            .map(([k, label, hint]) => html`
+              <div class="grid2" key=${k}>
+                <label class="field"><span>${label} endpoint</span>
+                  <input type="text" value=${draft[`${k}Endpoint`] ?? ''} placeholder=${draft.endpoint || ''}
+                    onInput=${(e) => set({ [`${k}Endpoint`]: e.target.value })} />
+                  <span class="hint">${hint}</span></label>
+                <label class="field"><span>${label} API key</span>
+                  <input type="password" value=${draft[`${k}ApiKey`] ?? ''} placeholder="same as main key when empty"
+                    onInput=${(e) => set({ [`${k}ApiKey`]: e.target.value })} /></label>
+              </div>`)}`,
+          'Optional per-role endpoint + key overrides. Each blank field inherits separately (endpoint-only override → inherited key), ending at the main connection; "route via server" applies to all of them.')}`}
 
       ${tab === 'storage' && html`
         ${section('Storage', html`
@@ -385,6 +423,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <label class="field"><span>Generator model</span>
               <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
+            </label>
+          </div>
+          <div class="grid3">
+            <label class="field"><span>Image model</span>
+              <input type="text" list="fp-models" value=${draft.imageModel ?? ''} onInput=${(e) => set({ imageModel: e.target.value })} />
+              <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
           </div>`)}
         ${section('Embeddings', html`
@@ -550,7 +594,43 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.imagesEnabled} onChange=${(e) => set({ imagesEnabled: e.target.checked })} />
+            Image generation — /image command and model-attached images (configure the backend below)
           </label>`)}
+        ${draft.imagesEnabled && section('Image generation', html`
+          <label class="field"><span>Backend</span>
+            <select value=${draft.imageBackend ?? 'openai'} onChange=${(e) => set({ imageBackend: e.target.value })}>
+              <option value="openai">OpenAI-compatible</option>
+              <option value="comfyui">ComfyUI</option>
+            </select>
+            <span class="hint">${draft.imageBackend === 'comfyui'
+              ? 'Workflow-graph backend. The endpoint is the ComfyUI base URL (Connection tab → Role connections).'
+              : 'OpenAI-compatible /v1/images/generations. Endpoint, key and model: Connection and Models tabs.'}</span></label>
+          <label class="field"><span>Size</span>
+            <input type="text" value=${draft.imageSize ?? '1024x1024'} placeholder="1024x1024"
+              onInput=${(e) => set({ imageSize: e.target.value })} />
+            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders.</span>`}</label>
+          <label class="field"><span>Prompt prefix</span>
+            <input type="text" value=${draft.imagePrefix ?? ''} placeholder="masterpiece, best quality, detailed …"
+              onInput=${(e) => set({ imagePrefix: e.target.value })} />
+            <span class="hint">Prepended to every image prompt — /image, model-attached images, and avatar generation.</span></label>
+          ${draft.imageBackend === 'comfyui' && html`
+            <label class="field"><span>Negative prompt</span>
+              <input type="text" value=${draft.imageNegative ?? ''} placeholder="worst quality, blurry, watermark …"
+                onInput=${(e) => set({ imageNegative: e.target.value })} />
+              <span class="hint">Substituted into the workflow's {{negative}} placeholder.</span></label>
+            <label class="field"><span>Workflow JSON</span>
+              <textarea rows=${8} value=${draft.imageWorkflow ?? ''} spellcheck=${false}
+                placeholder=${'{"3": {"class_type": "KSampler", "inputs": {"seed": "{{seed}}", …}}, …}'}
+                onInput=${(e) => set({ imageWorkflow: e.target.value })} />
+              <span class="hint">ComfyUI web UI → "Save (API Format)". Placeholders substituted per render:
+                {{prompt}}, {{negative}}, {{width}}, {{height}}, {{seed}} — numeric seed inputs are always
+                randomized so takes and re-rolls differ.</span></label>`}`,
+          draft.imageBackend === 'comfyui'
+            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note.'
+            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note.')}
         ${draft.suggestions && section('Response suggestions', html`
           <div class="grid2">
             <label class="field"><span>Number of suggestions (1–5)</span>
@@ -630,6 +710,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           ${draft.toolsEnabled !== false
             ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
             : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
+          ${draft.toolsEnabled !== false && draft.imagesEnabled
+            ? promptField('imagePrompt', 'Image generation instructions — appended to the platform prompt; teaches the model the generate_image block', DEFAULT_IMAGE_PROMPT, 8,
+              'Sent only while image generation is on (Features tab). The model attaches at most one image per reply, as the last block.')
+            : html`<div class="hint">Image generation prompt hidden — image generation is off (Features tab; it rides tool calling, which must stay on).</div>`}
           ${draft.multiSpeaker !== false
             ? promptField('speakerPrompt', 'Multi-speaker instructions — appended to the platform prompt.', SPEAKER_PROMPT, 4)
             : html`<div class="hint">Multi-speaker prompt hidden — multi-speaker is off (Features tab).</div>`}`)}
@@ -652,6 +736,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
             'The reply contract is one JSON object with name, content, keys and greeting.')}
           ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
-            'The reply contract is one JSON object with type, title, content, keys and pinned.')}`)}`}
+            'The reply contract is one JSON object with type, title, content, keys and pinned.')}
+          ${promptField('avatarGenPrompt', 'Avatar image prompt — ✦ on the avatar field in the editors', DEFAULT_AVATAR_GEN_PROMPT, 3,
+            'Condenses the name + card into a square-portrait prompt for the image API; only used when image generation is enabled (Features tab).')}`)}`}
     <//>`;
 }

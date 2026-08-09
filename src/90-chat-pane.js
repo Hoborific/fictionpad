@@ -1,7 +1,7 @@
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
-function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
+function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -233,6 +233,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
           <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             selected=${node.id === selId}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
+            avatars=${avatars} avatarsOn=${avatarsOn}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             auxBusy=${auxBusy.length > 0}
@@ -241,6 +242,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
             branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
+            onImgSwipe=${actions.onImgSwipe} onImgRegen=${actions.onImgRegen} imagesEnabled=${imagesEnabled}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
           <//>`)}

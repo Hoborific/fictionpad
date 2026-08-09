@@ -104,6 +104,16 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
     lp.current = null;
   };
   const act = (e, id, action) => { e.stopPropagation(); onChatAction(id, action); };
+  // Chat row thumbnail: the scenario's avatar, else the first linked
+  // character's — letter tiles stay a chat-bubble thing, so no image = no icon.
+  const chatAvatarEl = (c) => {
+    const sc = scenarios[c.scenarioId];
+    const ch = sc?.avatar ? null
+      : [...(sc?.characterIds ?? []), ...(c.characterIds ?? [])]
+        .map(id => characters?.[id]).find(x => x?.avatar);
+    const a = sc?.avatar ? { name: sc.name, src: sc.avatar } : ch ? { name: ch.name, src: ch.avatar } : null;
+    return a && html`<${Avatar} name=${a.name} src=${a.src} size=${24} />`;
+  };
   const sectionTitle = (key, label, onAdd, addTitle) => html`
     <div class="title">
       <span class="t-toggle" onClick=${() => onToggleSection(key)}>
@@ -126,6 +136,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onScenarioContextMenu(s.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, s.id, onScenarioContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} />`}
               <span class="name">${s.name}</span>
               <span class="tools">
                 <span class="tools-full">
@@ -153,6 +164,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onCharacterContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id, onCharacterContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} />`}
               <span class="name">${c.name}</span>
               <span class="tools">
                 <span class="tools-full">
@@ -189,6 +201,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${chatAvatarEl(c)}
               <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">

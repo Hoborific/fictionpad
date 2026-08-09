@@ -246,26 +246,82 @@ function applyUsedSwipes(chat) {
   return changed ? { ...chat, messages } : chat;
 }
 
+// A swipe image entry with pending: true is reload debris — the generation
+// that would have filled it died with the page. Heal it to a failed entry:
+// same fields minus pending, plus error. Identity return when not pending.
+const healImageEntry = (e) => {
+  if (!e?.pending) return e;
+  const out = {};
+  for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (e[k] !== undefined) out[k] = e[k];
+  out.error = true;
+  return out;
+};
+
+// Group a swipe's image entries into placements ("slots") of one or more
+// takes (per-image swipes, v4.10): every entry stamped with the same `slot`
+// id is a take of ONE image placement; legacy entries without one are
+// singletons (keyed `_${arrayIndex}`). First-occurrence order, input never
+// mutated. `imgUsed[slot]` picks the shown take — default the last one,
+// clamped into range. Returns [{ slot, takes: [entry…], active, activeIdx }].
+const groupImageSlots = (images, imgUsed) => {
+  const groups = [];
+  const bySlot = new Map();
+  (images ?? []).forEach((e, i) => {
+    const key = e?.slot ?? `_${i}`;
+    let g = bySlot.get(key);
+    if (!g) { g = { slot: key, takes: [] }; bySlot.set(key, g); groups.push(g); }
+    g.takes.push(e);
+  });
+  for (const g of groups) {
+    const w = parseInt(imgUsed?.[g.slot], 10);
+    g.activeIdx = Math.min(Math.max(Number.isNaN(w) ? g.takes.length - 1 : w, 0), g.takes.length - 1);
+    g.active = g.takes[g.activeIdx];
+  }
+  return groups;
+};
+
 // Remove debris from generations killed by a page reload/close: assistant
-// swipes with empty text (the stream never delivered). A non-root node left
-// with no swipes at all was a generation placeholder — drop it and re-parent
-// its children. Root is never touched. No-op (same object) when clean.
-// Called on chat open, before applyUsedSwipes.
+// swipes with empty text (the stream never delivered) — but a swipe carrying
+// generated images survives even with empty text (image-only message).
+// Pending image entries on any swipe heal to error (healImageEntry). A
+// non-root node left with no swipes at all was a generation placeholder —
+// drop it and re-parent its children. Root is never dropped. No-op (same
+// object) when clean. Called on chat open, before applyUsedSwipes.
 function pruneInterrupted(chat) {
   if (!chat?.messages) return chat;
   let changed = false;
   const out = {};
   for (const [id, n] of Object.entries(chat.messages)) {
-    if (n.role !== 'assistant' || !n.parentId) { out[id] = n; continue; }
-    const swipes = n.swipes ?? [];
+    // Heal image debris first, on ANY node — kept swipes below carry the
+    // healed copies, and an image-only node heals without being dropped.
+    const rawSwipes = n.swipes ?? [];
+    let healed = null;
+    rawSwipes.forEach((s, i) => {
+      if (!Array.isArray(s?.images)) return;
+      const imgs = s.images.map(healImageEntry);
+      if (imgs.some((e, j) => e !== s.images[j])) {
+        if (!healed) healed = rawSwipes.slice();
+        healed[i] = { ...s, images: imgs };
+      }
+    });
+    if (n.role !== 'assistant' || !n.parentId) {
+      if (healed) { out[id] = { ...n, swipes: healed }; changed = true; }
+      else out[id] = n;
+      continue;
+    }
+    const swipes = healed ?? rawSwipes;
     const kept = [];
     const idxMap = new Map(); // old swipe index → new index
     swipes.forEach((s, i) => {
-      if ((s?.text ?? '') === '') return;
+      if ((s?.text ?? '') === '' && !(Array.isArray(s?.images) && s.images.length)) return;
       idxMap.set(i, kept.length);
       kept.push(s);
     });
-    if (kept.length === swipes.length) { out[id] = n; continue; }
+    if (kept.length === swipes.length) {
+      if (healed) { out[id] = { ...n, swipes: kept }; changed = true; }
+      else out[id] = n;
+      continue;
+    }
     changed = true;
     if (kept.length === 0) continue; // drop the placeholder node entirely
     out[id] = {
@@ -716,7 +772,18 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // so the numbers agree with what's sent.
   const histText = (n) => {
     const t = sub(activeText(n));
-    return n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+    let out = n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+    // Generated images attached to the active swipe (resolved exactly like
+    // activeText) were shown to the reader — mention them cheaply so the
+    // model knows they exist. One marker per SLOT from the active take (a
+    // multi-take placement still showed one image). Only entries that
+    // actually rendered (truthy src); pending/error entries are invisible to
+    // the model.
+    const imgSwipe = n?.swipes?.[n.activeSwipe];
+    if (Array.isArray(imgSwipe?.images))
+      for (const g of groupImageSlots(imgSwipe.images, imgSwipe.imgUsed))
+        if (g.active?.src) out += `\n\n[Image shown: ${String(g.active.caption || g.active.prompt || 'image').slice(0, 200)}]`;
+    return out;
   };
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
@@ -940,6 +1007,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
 // An unterminated fence is never a call (partial stream or model
 // rambling) — it's hidden from display but executes nothing.
 const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
+const IMAGE_CALL_CAP = 1;  // per generation; at most one generated image per reply
 const TOOL_NAME_MAX = 60;
 const TOOL_TEXT_MAX = 2000;
 
@@ -1042,6 +1110,84 @@ function stripToolBlocks(text) {
   while ((om = TOOL_OPEN_RE.exec(out))) open = om.index;
   if (open !== -1) out = out.slice(0, open);
   return out;
+}
+
+// Partition parsed tool calls: generate_image calls go to the image pipeline
+// (IMAGE_CALL_CAP applies there), everything else — lore tools, malformed
+// calls (error set), unknown names — flows to applyToolCalls as before.
+const splitImageCalls = (calls) => {
+  const imageCalls = [], loreCalls = [];
+  for (const c of calls ?? [])
+    (c && !c.error && c.name === 'generate_image' ? imageCalls : loreCalls).push(c);
+  return { imageCalls, loreCalls };
+};
+
+// Prompt prefix (settings.imagePrefix): style/quality boilerplate prepended
+// to every image prompt — comma-join is the image-prompt convention (quality
+// tags first). A blank prefix passes the prompt through untouched.
+const imagePromptWithPrefix = (prefix, prompt) => {
+  const p = String(prefix ?? '').trim();
+  return p ? `${p}, ${prompt}` : prompt;
+};
+
+// ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
+// ComfyUI has no OpenAI images endpoint: POST /prompt queues an API-format
+// workflow graph (web UI → "Save (API Format)"), the run is polled on
+// /history/{prompt_id}, and the finished image downloads from /view.
+// The user-supplied workflow JSON carries placeholders, substituted in ANY
+// string value: {{prompt}} (prefix already folded in), {{negative}},
+// {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
+// int per render — regen/takes must produce different images). Any NUMERIC
+// input key named seed/noise_seed is randomized too — a fixed seed in the
+// graph would make every take identical. Pure: the graph is never mutated.
+const COMFY_SEED_KEYS = /^(seed|noise_seed)$/i;
+const comfyRandomSeed = (rng = Math.random) => Math.floor(rng() * 2 ** 32);
+function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width = 1024, height = 1024, seed } = {}) {
+  const useSeed = Number.isFinite(seed) ? seed : comfyRandomSeed();
+  const sub = (v) => String(v)
+    .replaceAll('{{prompt}}', prompt)
+    .replaceAll('{{negative}}', negative)
+    .replaceAll('{{width}}', String(width))
+    .replaceAll('{{height}}', String(height))
+    .replaceAll('{{seed}}', String(useSeed));
+  const walk = (node) => {
+    if (typeof node === 'string') return sub(node);
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(node))
+        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v);
+      return out;
+    }
+    return node;
+  };
+  return walk(workflow);
+}
+// "1024x768" → { width: 1024, height: 768 }; junk/absent → square 1024.
+const parseImageSize = (size) => {
+  const m = String(size ?? '').trim().match(/^(\d+)\s*x\s*(\d+)$/i);
+  return m ? { width: +m[1], height: +m[2] } : { width: 1024, height: 1024 };
+};
+// Read a /history/{prompt_id} record: {} while queued/running → not done;
+// status_str 'error' → done + message; otherwise the first output image
+// ({filename, subfolder, type}) across all node outputs wins.
+function comfyHistoryResult(history, promptId) {
+  const rec = (promptId ? history?.[promptId] : null) ?? Object.values(history ?? {})[0];
+  if (!rec) return { done: false, error: null, image: null };
+  const statusStr = rec?.status?.status_str;
+  if (statusStr === 'error') {
+    const msgs = (rec?.status?.messages ?? [])
+      .map((m) => Array.isArray(m) ? m.filter(x => typeof x === 'string').join(' ') : String(m))
+      .filter(Boolean).join('; ');
+    return { done: true, error: msgs || 'ComfyUI run failed', image: null };
+  }
+  if (statusStr !== 'success' && rec?.status?.completed !== true)
+    return { done: false, error: null, image: null };
+  for (const nodeOut of Object.values(rec?.outputs ?? {})) {
+    const img = (nodeOut?.images ?? []).find((i) => i?.filename);
+    if (img) return { done: true, error: null, image: img };
+  }
+  return { done: true, error: 'ComfyUI run finished with no image output', image: null };
 }
 
 // Execute parsed calls against the chat's lore overlay. Returns
@@ -1250,6 +1396,15 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // Leading text before the first prefix is narration (speaker: null).
 // Prefixes are stripped from segment text. Unknown `Name:` lines (not in
 // `names`) never split.
+// Each segment also carries `start`/`end`: offsets into the INPUT text
+// delimiting where the segment's visible content begins and ends (used to
+// place generated images between segment bubbles). The split runs on the
+// DEDUPED string, so when dedupe dropped characters the offsets are mapped
+// back line-anchored (dedupe deletes chars only, newlines survive 1:1):
+// a segment's content start always precedes any removal on its line, so
+// `start` stays exact; `end` is best-effort when a mid-line removal precedes
+// it on the same line (greedy char match — segment granularity is all the
+// image placement needs).
 
 // Weak models often repeat a speaker prefix INSIDE the same speaker's stretch
 // ("Mia: … Mia: …" mid-paragraph, or several "Narrator:" parts in a row).
@@ -1298,29 +1453,68 @@ function dedupeSpeakerPrefixes(text, names) {
 }
 
 function splitSpeakerSegments(text, names) {
-  const s = dedupeSpeakerPrefixes(text, names);
-  if (!s || !names?.length) return [{ speaker: null, text: s }];
+  const input = String(text ?? '');
+  const s = dedupeSpeakerPrefixes(input, names);
+  if (!s || !names?.length) return [{ speaker: null, text: s, start: 0, end: s.length }];
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
   const re = SPEAKER_LINE_RE;
+  // Deduped-offset → input-offset map, built only when dedupe changed the
+  // string (otherwise they coincide). Line-anchored: line k of s derives
+  // from line k of the input by deletions, so walk each pair, skipping the
+  // dropped chars; newlines map to newlines.
+  let d2i = null;
+  if (s !== input) {
+    d2i = new Array(s.length);
+    const iLines = input.split('\n'), dLines = s.split('\n');
+    let iBase = 0, dBase = 0;
+    for (let k = 0; k < dLines.length; k++) {
+      const iL = iLines[k] ?? '', dL = dLines[k];
+      let ti = 0;
+      for (let d = 0; d < dL.length; d++) {
+        while (ti < iL.length && iL[ti] !== dL[d]) ti++;
+        d2i[dBase + d] = iBase + Math.min(ti, iL.length);
+        if (ti < iL.length) ti++;
+      }
+      if (dBase + dL.length < s.length) d2i[dBase + dL.length] = iBase + iL.length; // '\n' ↔ '\n'
+      iBase += iL.length + 1; dBase += dL.length + 1;
+    }
+  }
+  const off = (d) => (d2i ? (d2i[d] ?? input.length) : d);
   const segments = [];
-  let cur = { speaker: null, text: '' };
-  const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };
+  // start/end: deduped offsets of the segment's visible content, pending
+  // (-1) until the first non-whitespace contribution arrives.
+  let cur = { speaker: null, text: '', start: -1, end: -1 };
+  let lineStart = 0; // offset of the current line in the deduped string
+  const push = () => {
+    if (cur.text.trim())
+      segments.push({ speaker: cur.speaker, text: cur.text.trim(), start: off(cur.start), end: off(cur.end) });
+  };
   for (const line of s.split('\n')) {
     const m = re.exec(line);
     const key = m?.[1].trim().toLowerCase();
     const name = m && key !== 'narrator' ? byLower.get(key) : null;
-    if (name || key === 'narrator') {
+    const splits = !!(name || key === 'narrator');
+    if (splits) {
       push();
-      cur = { speaker: name ?? null, text: line.slice(m[0].length) };
+      cur = { speaker: name ?? null, text: line.slice(m[0].length), start: -1, end: -1 };
     } else {
       cur.text += (cur.text ? '\n' : '') + line;
     }
+    // The line's visible contribution (prefix stripped on split lines) moves
+    // the pending start at its first non-space char, the end past its last.
+    const cl = line.slice(splits ? m[0].length : 0);
+    const first = cl.search(/\S/);
+    if (first !== -1) {
+      if (cur.start === -1) cur.start = lineStart + (splits ? m[0].length : 0) + first;
+      cur.end = lineStart + (splits ? m[0].length : 0) + cl.trimEnd().length;
+    }
+    lineStart += line.length + 1;
   }
   push();
-  return segments.length ? segments : [{ speaker: null, text: s }];
+  return segments.length ? segments : [{ speaker: null, text: s, start: 0, end: s.length }];
 }
 
 // Default platform-prompt addition permitting multi-speaker replies.
@@ -1349,6 +1543,16 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
+// Image prompts (v4.10): the first teaches the chat model the generate_image
+// tool (platform-prompt addition, user-editable like TOOLS_PROMPT); the
+// second is the system prompt for the avatar-generation aux call (the user
+// message supplies the character's name + card).
+const DEFAULT_IMAGE_PROMPT = `You can attach ONE generated image to a reply by ending it with a tool block in this exact format:
+\`\`\`tool
+{"tool": "generate_image", "args": {"prompt": "Vex, a wiry dock informant with a copper eye and a patched oilskin coat, leaning on a rain-slick railing in a floating city's sky docks at dusk, warm lantern light, painterly style", "caption": "Vex at the sky docks"}}
+\`\`\`
+Rules: attach an image only for visually significant moments — a new location, a character's first appearance, a dramatic reveal — never for ordinary exchanges; the prompt must be a complete, self-contained visual description (subjects, clothing, setting, lighting, style) because the image generator sees nothing else; the caption is at most 12 words; the image block goes at the very end of the reply, after any other tool block; never mention the image block in the prose.`;
+const DEFAULT_AVATAR_GEN_PROMPT = 'You condense character cards into image-generation prompts. Given a character\'s name and card, write a single prompt for a square portrait of that character: face and distinguishing features, expression, and a simple background that fits them. The portrait shows this one character only, with no text and no watermark. Output only the prompt text — no commentary, no quotes.';
 // ---- import normalization ----
 // Imports (sidebar files, bundles, full backups) upsert JSON nearly verbatim —
 // a hand-edited or third-party file can lack fields the editors and the
@@ -1366,6 +1570,10 @@ function normalizeLorePiece(p) {
   const pct = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Number(v))) : undefined);
   return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
     keys: asArr(o.keys).map(String),
+    // Character-type pieces may carry an avatar like a global card (same
+    // idiom as normalizeCharacter; '' = none).
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     sticky: posInt(o.sticky), cooldown: posInt(o.cooldown), delay: posInt(o.delay),
     prob: pct(o.prob), group: asStr(o.group).trim() || undefined,
     // update_character version log — shape-only heal; absent stays absent
@@ -1381,6 +1589,10 @@ function normalizeScenario(s) {
   return { ...o,
     name: asStr(o.name), description: asStr(o.description),
     tags: asArr(o.tags).map(String),
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    // Uncropped ≤1024 companion to the 256² avatar thumb — the chat lightbox
+    // and PNG card export read avatarFull || avatar; '' falls back to the thumb.
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
     scenarioInstructions: asStr(o.scenarioInstructions),
     // Alternate first messages (card imports): new chats offer them as extra
@@ -1398,6 +1610,9 @@ function normalizeCharacter(c) {
   const o = (c && typeof c === 'object') ? c : {};
   return { ...o, name: asStr(o.name), content: asStr(o.content),
     keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    // Uncropped ≤1024 companion to the 256² avatar thumb (see normalizeScenario).
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     // Alternate first messages (card imports) — greeting swipes in new direct chats.
     alternateGreetings: asArr(o.alternateGreetings).map(String),
     // Generation defaults for NEW direct chats — same shape as the scenario's
@@ -1436,6 +1651,24 @@ const u8ToAscii = (bytes) => {
     s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
   return s;
 };
+// Bytes → base64, via the same chunked binary-string route (never spread a
+// large array into String.fromCharCode).
+const u8ToBase64 = (bytes) => btoa(u8ToAscii(bytes));
+// PNG chunk CRC32 (over the chunk's type + data bytes), table-based.
+const PNG_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function pngCrc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = PNG_CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
 // Extract the embedded card JSON text from PNG bytes (tEXt chunk keyword
 // "chara" = v1/v2, "ccv3" = v3; base64 payload). Returns null when the file
 // carries no card. CRCs are not verified (display data, not a trust boundary);
@@ -1462,6 +1695,38 @@ function extractPngCardJson(u8) {
     off = end + 4;
   }
   return null;
+}
+// Inverse of extractPngCardJson (card EXPORT to PNG): returns a new
+// Uint8Array with a tEXt chunk (keyword "chara", base64 UTF-8 JSON payload)
+// inserted immediately before IEND. The input bytes are untouched. Throws on
+// non-PNG input or a PNG with no IEND chunk.
+function embedPngCardJson(u8, jsonStr) {
+  const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (!u8 || u8.length < 8 || sig.some((b, i) => u8[i] !== b)) throw new Error('not a PNG');
+  let off = 8, iend = -1;
+  while (off + 8 <= u8.length) {
+    const len = (((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0);
+    const type = u8ToAscii(u8.subarray(off + 4, off + 8));
+    const end = off + 8 + len; // + 4 CRC bytes after the data
+    if (end + 4 > u8.length) break; // truncated — no usable IEND
+    if (type === 'IEND') { iend = off; break; }
+    off = end + 4;
+  }
+  if (iend === -1) throw new Error('PNG has no IEND chunk');
+  // type + data (all ASCII: 'tEXt' + 'chara' + NUL + base64), then the CRC
+  // over exactly those bytes.
+  const td = Uint8Array.from('tEXt' + 'chara\0' + u8ToBase64(new TextEncoder().encode(String(jsonStr))),
+    c => c.charCodeAt(0));
+  const chunk = new Uint8Array(4 + td.length + 4); // length + type+data + CRC
+  const dv = new DataView(chunk.buffer);
+  dv.setUint32(0, td.length - 4); // data length excludes the type bytes
+  chunk.set(td, 4);
+  dv.setUint32(4 + td.length, pngCrc32(td));
+  const out = new Uint8Array(u8.length + chunk.length);
+  out.set(u8.subarray(0, iend), 0);
+  out.set(chunk, iend);
+  out.set(u8.subarray(iend), iend + chunk.length);
+  return out;
 }
 // Map a character card onto a linked scenario + global character pair, or
 // return null when the object isn't a card. v2/v3 are detected by spec/data,
@@ -1522,5 +1787,38 @@ function parseCharacterCard(obj) {
     emergentLore: 'queue', createdAt: now,
   });
   return { scenario, character };
+}
+// Inverse of parseCharacterCard (card EXPORT): a scenario + character pair →
+// chara_card v2 object. Only fields parseCharacterCard reads are mapped, so
+// parse(build(s, c)) round-trips name / description / greeting / backstory /
+// scenarioInstructions / tags / alternateGreetings. The pair's extra fields
+// (lore pieces, colors, generation defaults, avatar) have no card slot and
+// are dropped by design — in the PNG export (onExportCharacterPng) the avatar
+// instead doubles as the card's image bytes, with this JSON embedded via
+// embedPngCardJson. `scenario` may be null (a character linked nowhere) — the
+// card then carries the character only, scenario fields empty. A card holds
+// ONE greeting set — the character's wins, falling back to the scenario's (on
+// re-import both entities get it).
+function buildCharacterCard(scenario, character) {
+  const s = (scenario && typeof scenario === 'object') ? scenario : {};
+  const c = (character && typeof character === 'object') ? character : {};
+  const alts = asArr(c.alternateGreetings).length ? c.alternateGreetings : asArr(s.alternateGreetings);
+  return {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: asStr(c.name).trim() || asStr(s.name).trim(),
+      description: asStr(c.content),
+      personality: '',
+      scenario: asStr(s.backstory),
+      first_mes: asStr(c.greeting) || asStr(s.greeting),
+      mes_example: '',
+      creator_notes: asStr(s.description),
+      system_prompt: asStr(s.scenarioInstructions),
+      post_history_instructions: '',
+      tags: asArr(s.tags).map(String),
+      alternate_greetings: alts.map(String),
+    },
+  };
 }
 // === PURE CORE END ===

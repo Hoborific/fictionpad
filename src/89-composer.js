@@ -4,6 +4,7 @@ const COMPOSER_COMMANDS = [
   ['/pov CHAR [TEXT]', 'reply from another character’s view'],
   ['/improve [TEXT]', 'rewrite your draft in persona voice'],
   ['/impersonate', 'draft your next message as you'],
+  ['/image [PROMPT]', 'generate an image into the chat'],
   ['/recap [N]', 'summarize the last N messages'],
   ['/memory [N]', 'save a memory from the last N messages'],
   ['/model [NAME]', 'set this chat’s model'],

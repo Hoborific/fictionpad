@@ -278,9 +278,13 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   transition: transform 0.18s ease; /* snap-back after a sub-threshold drag */
 }
 .msg .bubble.dragging { transition: none; }
-/* Multi-speaker segments: consecutive bubbles with a small speaker chip. */
 .msg .bubble + .bubble { margin-top: 6px; }
-.msg .bubble.seg { padding-top: 7px; }
+/* Multi-speaker segments: each segment is its own row — the speaker's avatar
+   hangs in the message's avatar gutter (the message-level column stays an
+   empty spacer), the name chip above its own bubble. */
+.msg .seg-row { display: flex; gap: 10px; margin-top: 6px; }
+.msg .seg-col { flex: 1; min-width: 0; } /* min-width: the bubble shrinks instead of overflowing */
+.msg.with-av .seg-row { margin-left: -50px; } /* hang the segment avatar in the gutter: 40px avatar + 10px gap */
 /* Reasoning bubble: visually auxiliary — dashed border, tighter padding, no
    speaker chip. Sits ahead of the reply bubble(s) like a segment. */
 .msg .bubble.think-bubble { border-style: dashed; padding: 6px 14px; }
@@ -304,6 +308,39 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .swipes .used-dot.jump:hover { color: var(--c-accent); }
 .msg .swipes .gen { color: var(--c-accent); }
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
+
+/* ---------- avatars (chat column, segment gutters, sidebar, editors) ---------- */
+.avatar { display: inline-block; border-radius: 50%; object-fit: cover; flex: none; }
+.avatar-tile {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 600; color: var(--c-bg-0); user-select: none;
+  background: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l));
+}
+.avatar.click { cursor: pointer; }
+.msg.with-av { display: flex; gap: 10px; }
+.msg .msg-av { flex: none; width: 40px; padding-top: 1px; } /* fixed width: an empty slot (imageless user/Narrator) still spaces the column; optically level with the meta row */
+.msg .msg-body { flex: 1; min-width: 0; } /* min-width: bubbles shrink instead of overflowing */
+.side-item .avatar { flex: none; }
+
+/* ---------- lightbox (click-to-expand image view) ---------- */
+.modal.lightbox { width: auto; max-width: 94vw; }
+.modal.lightbox .m-head { border-bottom: none; padding-bottom: 0; }
+.modal.lightbox .m-head h2 { display: none; } /* the title sits under the image as the caption */
+.modal.lightbox .m-body { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.modal.lightbox .lb-img { max-width: 100%; max-height: 72vh; object-fit: contain; border-radius: 6px; }
+.modal.lightbox .lb-cap { color: var(--c-dim); font-size: 13px; text-align: center; }
+
+/* ---------- avatar cropper ---------- */
+.img-crop .crop-frame {
+  position: relative; overflow: hidden; margin: 0 auto;
+  width: min(320px, 100%); aspect-ratio: 1;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
+  touch-action: none; cursor: grab; user-select: none;
+}
+.img-crop .crop-frame.dragging { cursor: grabbing; }
+.img-crop .crop-frame img { position: absolute; max-width: none; max-height: none; pointer-events: none; }
+.img-crop .crop-zoom { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.img-crop .crop-zoom input[type="range"] { flex: 1; }
 
 /* ---------- RP prose formatting ---------- */
 .msg .md { line-height: 1.65; font-family: var(--font-prose); overflow-wrap: break-word; }
@@ -353,6 +390,37 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .waiting span { animation: blink 1.4s steps(1) infinite; }
 .msg .waiting span:nth-child(2) { animation-delay: 0.23s; }
 .msg .waiting span:nth-child(3) { animation-delay: 0.46s; }
+/* Generated-image attachments: finished images cap like prose media and
+   expand on click; pending entries pulse slowly; failures are a dim note.
+   Each placement (slot) renders as a .swipe-img-wrap column — the visual
+   (image, shimmer or note) plus its ◀ n/m ▶⁺ take navigator — and the wrap
+   owns the top margin the bare elements used to carry. The wrap also carries
+   the take-swipe touch gesture (touch-action mirrors .msg .bubble). */
+.msg .swipe-img { display: block; max-width: 100%; max-height: 320px; border-radius: 6px; cursor: zoom-in; }
+.msg .img-pending {
+  width: min(320px, 100%); aspect-ratio: 16 / 10;
+  background: var(--c-bg-2); border-radius: 6px;
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+@keyframes shimmer { 50% { opacity: 0.45; } }
+.msg .img-error { color: var(--c-dim); font-size: 12px; }
+.msg .swipe-img-wrap {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  max-width: 100%; margin-top: 6px;
+  touch-action: pan-y; /* vertical scroll stays native; horizontal is ours */
+}
+.msg .img-swipes { justify-content: center; }
+.msg .bubble > .swipe-img-wrap:first-child { margin-top: 0; }
+.msg .bubble .swipe-img-wrap:not(:last-child) { margin-bottom: 6px; } /* head/embedded image: gap to the text after it */
+/* Free-standing generated image (v4.10): only for a genuine scene break — a
+   generate_image block sitting between two speaker bubbles — or an
+   image-only swipe (no text to attach to). A trailing/leading image on a
+   single-bubble reply rides INSIDE the bubble instead. Centered,
+   prose-width-capped, no bubble chrome. It does not ride the message's swipe
+   gesture — a horizontal swipe on the image flips its own takes instead. */
+.msg .msg-img-free { margin: 8px auto; max-width: min(480px, 100%); }
+.msg .msg-img-free .swipe-img-wrap { margin-top: 0; }
+.msg .msg-img-free .img-error { text-align: center; }
 
 .composer { position: relative; padding: 4px 14px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
 .cmd-hints {
@@ -722,13 +790,18 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   /* All modals go full-screen on phones: a pinned head keeps the ✕ always
      reachable, and 100dvh tracks the visible viewport so the iOS URL bar /
      software keyboard can't push the close button off-screen. */
-  .modal, .modal.wide, .modal.sheet {
+  .modal, .modal.wide, .modal.sheet, .modal.lightbox {
     width: 100vw; height: 100vh; height: 100dvh; max-height: none;
     border-radius: 0; border: none;
   }
   .modal .m-head { padding-top: calc(12px + env(safe-area-inset-top, 0px)); }
   .modal .m-foot { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
   .chatlog { padding: 12px 10px; }
+  /* The avatar column shrinks on phones (inline width/height come from the
+     size prop, so the override needs !important). */
+  .msg .msg-av { width: 32px; }
+  .msg .msg-av .avatar { width: 32px !important; height: 32px !important; font-size: 14px !important; }
+  .msg.with-av .seg-row { margin-left: -42px; } /* gutter tracks the shrunk column: 32px + 10px */
   .topbar-inner { padding: 0 8px; gap: 6px; }
   .topbar .sub { display: none; } /* keep buttons reachable on narrow screens */
   .grid2, .grid3 { grid-template-columns: 1fr; }
@@ -739,8 +812,8 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   .sugg-row { margin-bottom: 10px; }
   /* Chat row actions: no hover on touch — always visible, subtle. */
   .side-item .tools { display: flex; opacity: 0.55; }
-  /* Finger-sized targets (~33px tall): meta-row actions, swipe ◀▶, sidebar tools. */
-  .msg .meta .btn.small, .side-item .tools .btn.small { padding: 7px 10px; }
+  /* Finger-sized targets (~33px tall): meta-row actions, message/image swipe ◀▶, sidebar tools. */
+  .msg .meta .btn.small, .msg .img-swipes .btn.small, .side-item .tools .btn.small { padding: 7px 10px; }
   /* Meta row collapses by FIT in per-item stages (JS adds t1–t6 as the row
      overflows, one step per pre-paint pass, until it fits): details leave the
      inline row from right to left — model, (edited), gen time, date, # — each
@@ -848,7 +921,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.9.2';
+const APP_VERSION = '4.10.0';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1367,26 +1440,82 @@ function applyUsedSwipes(chat) {
   return changed ? { ...chat, messages } : chat;
 }
 
+// A swipe image entry with pending: true is reload debris — the generation
+// that would have filled it died with the page. Heal it to a failed entry:
+// same fields minus pending, plus error. Identity return when not pending.
+const healImageEntry = (e) => {
+  if (!e?.pending) return e;
+  const out = {};
+  for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (e[k] !== undefined) out[k] = e[k];
+  out.error = true;
+  return out;
+};
+
+// Group a swipe's image entries into placements ("slots") of one or more
+// takes (per-image swipes, v4.10): every entry stamped with the same `slot`
+// id is a take of ONE image placement; legacy entries without one are
+// singletons (keyed `_${arrayIndex}`). First-occurrence order, input never
+// mutated. `imgUsed[slot]` picks the shown take — default the last one,
+// clamped into range. Returns [{ slot, takes: [entry…], active, activeIdx }].
+const groupImageSlots = (images, imgUsed) => {
+  const groups = [];
+  const bySlot = new Map();
+  (images ?? []).forEach((e, i) => {
+    const key = e?.slot ?? `_${i}`;
+    let g = bySlot.get(key);
+    if (!g) { g = { slot: key, takes: [] }; bySlot.set(key, g); groups.push(g); }
+    g.takes.push(e);
+  });
+  for (const g of groups) {
+    const w = parseInt(imgUsed?.[g.slot], 10);
+    g.activeIdx = Math.min(Math.max(Number.isNaN(w) ? g.takes.length - 1 : w, 0), g.takes.length - 1);
+    g.active = g.takes[g.activeIdx];
+  }
+  return groups;
+};
+
 // Remove debris from generations killed by a page reload/close: assistant
-// swipes with empty text (the stream never delivered). A non-root node left
-// with no swipes at all was a generation placeholder — drop it and re-parent
-// its children. Root is never touched. No-op (same object) when clean.
-// Called on chat open, before applyUsedSwipes.
+// swipes with empty text (the stream never delivered) — but a swipe carrying
+// generated images survives even with empty text (image-only message).
+// Pending image entries on any swipe heal to error (healImageEntry). A
+// non-root node left with no swipes at all was a generation placeholder —
+// drop it and re-parent its children. Root is never dropped. No-op (same
+// object) when clean. Called on chat open, before applyUsedSwipes.
 function pruneInterrupted(chat) {
   if (!chat?.messages) return chat;
   let changed = false;
   const out = {};
   for (const [id, n] of Object.entries(chat.messages)) {
-    if (n.role !== 'assistant' || !n.parentId) { out[id] = n; continue; }
-    const swipes = n.swipes ?? [];
+    // Heal image debris first, on ANY node — kept swipes below carry the
+    // healed copies, and an image-only node heals without being dropped.
+    const rawSwipes = n.swipes ?? [];
+    let healed = null;
+    rawSwipes.forEach((s, i) => {
+      if (!Array.isArray(s?.images)) return;
+      const imgs = s.images.map(healImageEntry);
+      if (imgs.some((e, j) => e !== s.images[j])) {
+        if (!healed) healed = rawSwipes.slice();
+        healed[i] = { ...s, images: imgs };
+      }
+    });
+    if (n.role !== 'assistant' || !n.parentId) {
+      if (healed) { out[id] = { ...n, swipes: healed }; changed = true; }
+      else out[id] = n;
+      continue;
+    }
+    const swipes = healed ?? rawSwipes;
     const kept = [];
     const idxMap = new Map(); // old swipe index → new index
     swipes.forEach((s, i) => {
-      if ((s?.text ?? '') === '') return;
+      if ((s?.text ?? '') === '' && !(Array.isArray(s?.images) && s.images.length)) return;
       idxMap.set(i, kept.length);
       kept.push(s);
     });
-    if (kept.length === swipes.length) { out[id] = n; continue; }
+    if (kept.length === swipes.length) {
+      if (healed) { out[id] = { ...n, swipes: kept }; changed = true; }
+      else out[id] = n;
+      continue;
+    }
     changed = true;
     if (kept.length === 0) continue; // drop the placeholder node entirely
     out[id] = {
@@ -1837,7 +1966,18 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // so the numbers agree with what's sent.
   const histText = (n) => {
     const t = sub(activeText(n));
-    return n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+    let out = n.role === 'assistant' ? dedupeSpeakerPrefixes(t, speakerNames) : t;
+    // Generated images attached to the active swipe (resolved exactly like
+    // activeText) were shown to the reader — mention them cheaply so the
+    // model knows they exist. One marker per SLOT from the active take (a
+    // multi-take placement still showed one image). Only entries that
+    // actually rendered (truthy src); pending/error entries are invisible to
+    // the model.
+    const imgSwipe = n?.swipes?.[n.activeSwipe];
+    if (Array.isArray(imgSwipe?.images))
+      for (const g of groupImageSlots(imgSwipe.images, imgSwipe.imgUsed))
+        if (g.active?.src) out += `\n\n[Image shown: ${String(g.active.caption || g.active.prompt || 'image').slice(0, 200)}]`;
+    return out;
   };
   const leadParts = [];
   const plat = sub(platformPrompt).trim();
@@ -2061,6 +2201,7 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
 // An unterminated fence is never a call (partial stream or model
 // rambling) — it's hidden from display but executes nothing.
 const TOOL_CALL_CAP = 5;   // per generation; excess calls = manifest warning
+const IMAGE_CALL_CAP = 1;  // per generation; at most one generated image per reply
 const TOOL_NAME_MAX = 60;
 const TOOL_TEXT_MAX = 2000;
 
@@ -2163,6 +2304,84 @@ function stripToolBlocks(text) {
   while ((om = TOOL_OPEN_RE.exec(out))) open = om.index;
   if (open !== -1) out = out.slice(0, open);
   return out;
+}
+
+// Partition parsed tool calls: generate_image calls go to the image pipeline
+// (IMAGE_CALL_CAP applies there), everything else — lore tools, malformed
+// calls (error set), unknown names — flows to applyToolCalls as before.
+const splitImageCalls = (calls) => {
+  const imageCalls = [], loreCalls = [];
+  for (const c of calls ?? [])
+    (c && !c.error && c.name === 'generate_image' ? imageCalls : loreCalls).push(c);
+  return { imageCalls, loreCalls };
+};
+
+// Prompt prefix (settings.imagePrefix): style/quality boilerplate prepended
+// to every image prompt — comma-join is the image-prompt convention (quality
+// tags first). A blank prefix passes the prompt through untouched.
+const imagePromptWithPrefix = (prefix, prompt) => {
+  const p = String(prefix ?? '').trim();
+  return p ? `${p}, ${prompt}` : prompt;
+};
+
+// ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
+// ComfyUI has no OpenAI images endpoint: POST /prompt queues an API-format
+// workflow graph (web UI → "Save (API Format)"), the run is polled on
+// /history/{prompt_id}, and the finished image downloads from /view.
+// The user-supplied workflow JSON carries placeholders, substituted in ANY
+// string value: {{prompt}} (prefix already folded in), {{negative}},
+// {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
+// int per render — regen/takes must produce different images). Any NUMERIC
+// input key named seed/noise_seed is randomized too — a fixed seed in the
+// graph would make every take identical. Pure: the graph is never mutated.
+const COMFY_SEED_KEYS = /^(seed|noise_seed)$/i;
+const comfyRandomSeed = (rng = Math.random) => Math.floor(rng() * 2 ** 32);
+function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width = 1024, height = 1024, seed } = {}) {
+  const useSeed = Number.isFinite(seed) ? seed : comfyRandomSeed();
+  const sub = (v) => String(v)
+    .replaceAll('{{prompt}}', prompt)
+    .replaceAll('{{negative}}', negative)
+    .replaceAll('{{width}}', String(width))
+    .replaceAll('{{height}}', String(height))
+    .replaceAll('{{seed}}', String(useSeed));
+  const walk = (node) => {
+    if (typeof node === 'string') return sub(node);
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(node))
+        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v);
+      return out;
+    }
+    return node;
+  };
+  return walk(workflow);
+}
+// "1024x768" → { width: 1024, height: 768 }; junk/absent → square 1024.
+const parseImageSize = (size) => {
+  const m = String(size ?? '').trim().match(/^(\d+)\s*x\s*(\d+)$/i);
+  return m ? { width: +m[1], height: +m[2] } : { width: 1024, height: 1024 };
+};
+// Read a /history/{prompt_id} record: {} while queued/running → not done;
+// status_str 'error' → done + message; otherwise the first output image
+// ({filename, subfolder, type}) across all node outputs wins.
+function comfyHistoryResult(history, promptId) {
+  const rec = (promptId ? history?.[promptId] : null) ?? Object.values(history ?? {})[0];
+  if (!rec) return { done: false, error: null, image: null };
+  const statusStr = rec?.status?.status_str;
+  if (statusStr === 'error') {
+    const msgs = (rec?.status?.messages ?? [])
+      .map((m) => Array.isArray(m) ? m.filter(x => typeof x === 'string').join(' ') : String(m))
+      .filter(Boolean).join('; ');
+    return { done: true, error: msgs || 'ComfyUI run failed', image: null };
+  }
+  if (statusStr !== 'success' && rec?.status?.completed !== true)
+    return { done: false, error: null, image: null };
+  for (const nodeOut of Object.values(rec?.outputs ?? {})) {
+    const img = (nodeOut?.images ?? []).find((i) => i?.filename);
+    if (img) return { done: true, error: null, image: img };
+  }
+  return { done: true, error: 'ComfyUI run finished with no image output', image: null };
 }
 
 // Execute parsed calls against the chat's lore overlay. Returns
@@ -2371,6 +2590,15 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 // Leading text before the first prefix is narration (speaker: null).
 // Prefixes are stripped from segment text. Unknown `Name:` lines (not in
 // `names`) never split.
+// Each segment also carries `start`/`end`: offsets into the INPUT text
+// delimiting where the segment's visible content begins and ends (used to
+// place generated images between segment bubbles). The split runs on the
+// DEDUPED string, so when dedupe dropped characters the offsets are mapped
+// back line-anchored (dedupe deletes chars only, newlines survive 1:1):
+// a segment's content start always precedes any removal on its line, so
+// `start` stays exact; `end` is best-effort when a mid-line removal precedes
+// it on the same line (greedy char match — segment granularity is all the
+// image placement needs).
 
 // Weak models often repeat a speaker prefix INSIDE the same speaker's stretch
 // ("Mia: … Mia: …" mid-paragraph, or several "Narrator:" parts in a row).
@@ -2419,29 +2647,68 @@ function dedupeSpeakerPrefixes(text, names) {
 }
 
 function splitSpeakerSegments(text, names) {
-  const s = dedupeSpeakerPrefixes(text, names);
-  if (!s || !names?.length) return [{ speaker: null, text: s }];
+  const input = String(text ?? '');
+  const s = dedupeSpeakerPrefixes(input, names);
+  if (!s || !names?.length) return [{ speaker: null, text: s, start: 0, end: s.length }];
   const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
   const re = SPEAKER_LINE_RE;
+  // Deduped-offset → input-offset map, built only when dedupe changed the
+  // string (otherwise they coincide). Line-anchored: line k of s derives
+  // from line k of the input by deletions, so walk each pair, skipping the
+  // dropped chars; newlines map to newlines.
+  let d2i = null;
+  if (s !== input) {
+    d2i = new Array(s.length);
+    const iLines = input.split('\n'), dLines = s.split('\n');
+    let iBase = 0, dBase = 0;
+    for (let k = 0; k < dLines.length; k++) {
+      const iL = iLines[k] ?? '', dL = dLines[k];
+      let ti = 0;
+      for (let d = 0; d < dL.length; d++) {
+        while (ti < iL.length && iL[ti] !== dL[d]) ti++;
+        d2i[dBase + d] = iBase + Math.min(ti, iL.length);
+        if (ti < iL.length) ti++;
+      }
+      if (dBase + dL.length < s.length) d2i[dBase + dL.length] = iBase + iL.length; // '\n' ↔ '\n'
+      iBase += iL.length + 1; dBase += dL.length + 1;
+    }
+  }
+  const off = (d) => (d2i ? (d2i[d] ?? input.length) : d);
   const segments = [];
-  let cur = { speaker: null, text: '' };
-  const push = () => { if (cur.text.trim()) segments.push({ speaker: cur.speaker, text: cur.text.trim() }); };
+  // start/end: deduped offsets of the segment's visible content, pending
+  // (-1) until the first non-whitespace contribution arrives.
+  let cur = { speaker: null, text: '', start: -1, end: -1 };
+  let lineStart = 0; // offset of the current line in the deduped string
+  const push = () => {
+    if (cur.text.trim())
+      segments.push({ speaker: cur.speaker, text: cur.text.trim(), start: off(cur.start), end: off(cur.end) });
+  };
   for (const line of s.split('\n')) {
     const m = re.exec(line);
     const key = m?.[1].trim().toLowerCase();
     const name = m && key !== 'narrator' ? byLower.get(key) : null;
-    if (name || key === 'narrator') {
+    const splits = !!(name || key === 'narrator');
+    if (splits) {
       push();
-      cur = { speaker: name ?? null, text: line.slice(m[0].length) };
+      cur = { speaker: name ?? null, text: line.slice(m[0].length), start: -1, end: -1 };
     } else {
       cur.text += (cur.text ? '\n' : '') + line;
     }
+    // The line's visible contribution (prefix stripped on split lines) moves
+    // the pending start at its first non-space char, the end past its last.
+    const cl = line.slice(splits ? m[0].length : 0);
+    const first = cl.search(/\S/);
+    if (first !== -1) {
+      if (cur.start === -1) cur.start = lineStart + (splits ? m[0].length : 0) + first;
+      cur.end = lineStart + (splits ? m[0].length : 0) + cl.trimEnd().length;
+    }
+    lineStart += line.length + 1;
   }
   push();
-  return segments.length ? segments : [{ speaker: null, text: s }];
+  return segments.length ? segments : [{ speaker: null, text: s, start: 0, end: s.length }];
 }
 
 // Default platform-prompt addition permitting multi-speaker replies.
@@ -2470,6 +2737,16 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
 const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
 const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
+// Image prompts (v4.10): the first teaches the chat model the generate_image
+// tool (platform-prompt addition, user-editable like TOOLS_PROMPT); the
+// second is the system prompt for the avatar-generation aux call (the user
+// message supplies the character's name + card).
+const DEFAULT_IMAGE_PROMPT = `You can attach ONE generated image to a reply by ending it with a tool block in this exact format:
+\`\`\`tool
+{"tool": "generate_image", "args": {"prompt": "Vex, a wiry dock informant with a copper eye and a patched oilskin coat, leaning on a rain-slick railing in a floating city's sky docks at dusk, warm lantern light, painterly style", "caption": "Vex at the sky docks"}}
+\`\`\`
+Rules: attach an image only for visually significant moments — a new location, a character's first appearance, a dramatic reveal — never for ordinary exchanges; the prompt must be a complete, self-contained visual description (subjects, clothing, setting, lighting, style) because the image generator sees nothing else; the caption is at most 12 words; the image block goes at the very end of the reply, after any other tool block; never mention the image block in the prose.`;
+const DEFAULT_AVATAR_GEN_PROMPT = 'You condense character cards into image-generation prompts. Given a character\'s name and card, write a single prompt for a square portrait of that character: face and distinguishing features, expression, and a simple background that fits them. The portrait shows this one character only, with no text and no watermark. Output only the prompt text — no commentary, no quotes.';
 // ---- import normalization ----
 // Imports (sidebar files, bundles, full backups) upsert JSON nearly verbatim —
 // a hand-edited or third-party file can lack fields the editors and the
@@ -2487,6 +2764,10 @@ function normalizeLorePiece(p) {
   const pct = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Number(v))) : undefined);
   return { ...o, id: o.id ?? uid(), title: asStr(o.title), content: asStr(o.content),
     keys: asArr(o.keys).map(String),
+    // Character-type pieces may carry an avatar like a global card (same
+    // idiom as normalizeCharacter; '' = none).
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     sticky: posInt(o.sticky), cooldown: posInt(o.cooldown), delay: posInt(o.delay),
     prob: pct(o.prob), group: asStr(o.group).trim() || undefined,
     // update_character version log — shape-only heal; absent stays absent
@@ -2502,6 +2783,10 @@ function normalizeScenario(s) {
   return { ...o,
     name: asStr(o.name), description: asStr(o.description),
     tags: asArr(o.tags).map(String),
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    // Uncropped ≤1024 companion to the 256² avatar thumb — the chat lightbox
+    // and PNG card export read avatarFull || avatar; '' falls back to the thumb.
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
     scenarioInstructions: asStr(o.scenarioInstructions),
     // Alternate first messages (card imports): new chats offer them as extra
@@ -2519,6 +2804,9 @@ function normalizeCharacter(c) {
   const o = (c && typeof c === 'object') ? c : {};
   return { ...o, name: asStr(o.name), content: asStr(o.content),
     keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    // Uncropped ≤1024 companion to the 256² avatar thumb (see normalizeScenario).
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     // Alternate first messages (card imports) — greeting swipes in new direct chats.
     alternateGreetings: asArr(o.alternateGreetings).map(String),
     // Generation defaults for NEW direct chats — same shape as the scenario's
@@ -2557,6 +2845,24 @@ const u8ToAscii = (bytes) => {
     s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
   return s;
 };
+// Bytes → base64, via the same chunked binary-string route (never spread a
+// large array into String.fromCharCode).
+const u8ToBase64 = (bytes) => btoa(u8ToAscii(bytes));
+// PNG chunk CRC32 (over the chunk's type + data bytes), table-based.
+const PNG_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function pngCrc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = PNG_CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
 // Extract the embedded card JSON text from PNG bytes (tEXt chunk keyword
 // "chara" = v1/v2, "ccv3" = v3; base64 payload). Returns null when the file
 // carries no card. CRCs are not verified (display data, not a trust boundary);
@@ -2583,6 +2889,38 @@ function extractPngCardJson(u8) {
     off = end + 4;
   }
   return null;
+}
+// Inverse of extractPngCardJson (card EXPORT to PNG): returns a new
+// Uint8Array with a tEXt chunk (keyword "chara", base64 UTF-8 JSON payload)
+// inserted immediately before IEND. The input bytes are untouched. Throws on
+// non-PNG input or a PNG with no IEND chunk.
+function embedPngCardJson(u8, jsonStr) {
+  const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (!u8 || u8.length < 8 || sig.some((b, i) => u8[i] !== b)) throw new Error('not a PNG');
+  let off = 8, iend = -1;
+  while (off + 8 <= u8.length) {
+    const len = (((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0);
+    const type = u8ToAscii(u8.subarray(off + 4, off + 8));
+    const end = off + 8 + len; // + 4 CRC bytes after the data
+    if (end + 4 > u8.length) break; // truncated — no usable IEND
+    if (type === 'IEND') { iend = off; break; }
+    off = end + 4;
+  }
+  if (iend === -1) throw new Error('PNG has no IEND chunk');
+  // type + data (all ASCII: 'tEXt' + 'chara' + NUL + base64), then the CRC
+  // over exactly those bytes.
+  const td = Uint8Array.from('tEXt' + 'chara\0' + u8ToBase64(new TextEncoder().encode(String(jsonStr))),
+    c => c.charCodeAt(0));
+  const chunk = new Uint8Array(4 + td.length + 4); // length + type+data + CRC
+  const dv = new DataView(chunk.buffer);
+  dv.setUint32(0, td.length - 4); // data length excludes the type bytes
+  chunk.set(td, 4);
+  dv.setUint32(4 + td.length, pngCrc32(td));
+  const out = new Uint8Array(u8.length + chunk.length);
+  out.set(u8.subarray(0, iend), 0);
+  out.set(chunk, iend);
+  out.set(u8.subarray(iend), iend + chunk.length);
+  return out;
 }
 // Map a character card onto a linked scenario + global character pair, or
 // return null when the object isn't a card. v2/v3 are detected by spec/data,
@@ -2643,6 +2981,39 @@ function parseCharacterCard(obj) {
     emergentLore: 'queue', createdAt: now,
   });
   return { scenario, character };
+}
+// Inverse of parseCharacterCard (card EXPORT): a scenario + character pair →
+// chara_card v2 object. Only fields parseCharacterCard reads are mapped, so
+// parse(build(s, c)) round-trips name / description / greeting / backstory /
+// scenarioInstructions / tags / alternateGreetings. The pair's extra fields
+// (lore pieces, colors, generation defaults, avatar) have no card slot and
+// are dropped by design — in the PNG export (onExportCharacterPng) the avatar
+// instead doubles as the card's image bytes, with this JSON embedded via
+// embedPngCardJson. `scenario` may be null (a character linked nowhere) — the
+// card then carries the character only, scenario fields empty. A card holds
+// ONE greeting set — the character's wins, falling back to the scenario's (on
+// re-import both entities get it).
+function buildCharacterCard(scenario, character) {
+  const s = (scenario && typeof scenario === 'object') ? scenario : {};
+  const c = (character && typeof character === 'object') ? character : {};
+  const alts = asArr(c.alternateGreetings).length ? c.alternateGreetings : asArr(s.alternateGreetings);
+  return {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: asStr(c.name).trim() || asStr(s.name).trim(),
+      description: asStr(c.content),
+      personality: '',
+      scenario: asStr(s.backstory),
+      first_mes: asStr(c.greeting) || asStr(s.greeting),
+      mes_example: '',
+      creator_notes: asStr(s.description),
+      system_prompt: asStr(s.scenarioInstructions),
+      post_history_instructions: '',
+      tags: asArr(s.tags).map(String),
+      alternate_greetings: alts.map(String),
+    },
+  };
 }
 // === PURE CORE END ===
 // ============================================================================
@@ -2873,6 +3244,11 @@ function normalizeEndpoint(url) {
 }
 const chatCompletionsURL = (ep) => `${normalizeEndpoint(ep)}/v1/chat/completions`;
 const modelsURL = (ep) => `${normalizeEndpoint(ep)}/v1/models`;
+const imagesURL = (ep) => `${normalizeEndpoint(ep)}/v1/images/generations`;
+// ComfyUI REST (backend 'comfyui'): queue → poll → download.
+const comfyPromptURL = (ep) => `${normalizeEndpoint(ep)}/prompt`;
+const comfyHistoryURL = (ep, id) => `${normalizeEndpoint(ep)}/history/${encodeURIComponent(id)}`;
+const comfyViewURL = (ep, img) => `${normalizeEndpoint(ep)}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder ?? '')}&type=${encodeURIComponent(img.type ?? 'output')}`;
 // True when the endpoint goes through OUR server's /proxy/ (same-origin).
 // Relative '/proxy/…' is same-origin by construction; absolute URLs must match.
 function isServerProxy(endpoint) {
@@ -2892,6 +3268,25 @@ function effectiveEndpoint(settings, serverStorageActive) {
   const ep = String(settings?.endpoint ?? '');
   if (!ep || ep.startsWith('/proxy/')) return ep;
   return serverStorageActive && settings?.routeViaServer !== false ? `/proxy/${ep}` : ep;
+}
+
+// Per-role connection overrides (Settings → Connection → Role connections):
+// each role may carry its own endpoint+key pair ('aux'/'gen'/'embed'/'image'
+// → <role>Endpoint/<role>ApiKey). Resolution walks the role chain and takes
+// the first non-blank value PER FIELD, ending at the main connection — an
+// endpoint-only override inherits the key, exactly like the long-standing
+// image connection. Chains mirror the model fallbacks: the generator resolves
+// ('gen','aux') → main, aux roles ('aux') → main, embeddings/images their own
+// role → main; no roles = the main connection verbatim.
+function roleConn(st, ...roles) {
+  const pick = (suffix, main) => {
+    for (const r of roles) {
+      const v = String(st?.[`${r}${suffix}`] ?? '').trim();
+      if (v) return v;
+    }
+    return String(main ?? '');
+  };
+  return { endpoint: pick('Endpoint', st?.endpoint), apiKey: pick('ApiKey', st?.apiKey) };
 }
 
 // LLM credential header. Through our own (possibly Basic-authed) proxy the
@@ -3336,6 +3731,137 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
   return String(json.choices?.[0]?.message?.content ?? '').trim();
 }
 
+// ---- /images/generations (OpenAI-compatible; /image command) ----
+// One image per call, always returned as a JPEG data URL capped at 1024px.
+// b64_json is the primary shape; a url response is fetched and converted
+// (through our own /proxy when the request went through it, so an absolute
+// image URL on a CORS-less host still loads). The LLM key is never sent on
+// the url fetch — image CDNs don't need it and it must not leak off-origin.
+async function generateImage({ endpoint, apiKey, serverToken, model, prompt, size, signal, prefix = '', backend = 'openai', workflow = '', negative = '' }) {
+  if (backend === 'comfyui')
+    return generateComfyImage({ endpoint, apiKey, serverToken, workflow, prompt, negative, size, signal, prefix });
+  const res = await fetchAPI(endpoint, imagesURL(endpoint), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({
+      prompt: imagePromptWithPrefix(prefix, prompt),
+      ...(model ? { model } : {}),
+      ...(size ? { size } : {}),
+      response_format: 'b64_json',
+    }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      msg = json?.error?.message ?? json?.message ?? msg;
+    } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const json = await res.json();
+  if (json?.error?.message) throw new Error(json.error.message);
+  const item = json?.data?.[0];
+  let dataURL;
+  if (item?.b64_json) {
+    dataURL = `data:image/png;base64,${item.b64_json}`;
+  } else if (item?.url) {
+    // The proxy target is the part after /proxy/; the image fetch reuses that
+    // shape with the image URL as the target (server.mjs decodes it whole).
+    const u = String(item.url);
+    const proxied = isServerProxy(endpoint) && /^https?:\/\//i.test(u) ? `/proxy/${u}` : u;
+    const imgRes = await fetchAPI(endpoint, proxied, {
+      headers: { ...(serverToken && isServerProxy(endpoint) ? { 'Authorization': `Bearer ${serverToken}` } : {}) },
+      ...(signal ? { signal } : {}),
+    });
+    if (!imgRes.ok) {
+      const err = new Error(`image fetch failed (HTTP ${imgRes.status})`);
+      err.status = imgRes.status;
+      throw err;
+    }
+    const blob = await imgRes.blob();
+    dataURL = await blobToDataURL(blob);
+  } else {
+    throw new Error('Malformed images response — no b64_json or url in data[0]');
+  }
+  const img = await loadImage(dataURL);
+  return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+}
+
+const blobToDataURL = (blob) => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(String(fr.result));
+  fr.onerror = () => reject(new Error('could not read the image response'));
+  fr.readAsDataURL(blob);
+});
+
+// ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
+// Queue the substituted workflow, poll /history until the run lands, then
+// download the first output image from /view. Same JPEG-data-URL contract as
+// the OpenAI path. ComfyUI answers identical graphs from its cache, so the
+// history is checked BEFORE the first sleep — a cached run returns at once.
+// The workflow comes from settings.imageWorkflow (web UI "Save (API Format)"
+// export); substitution + seed rules live in substituteComfyWorkflow (core).
+async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, prompt, negative, size, signal, prefix = '', timeoutMs = 300000 }) {
+  let graph;
+  try { graph = JSON.parse(String(workflow ?? '')); } catch {
+    throw new Error('The ComfyUI workflow in Settings is not valid JSON — paste the "Save (API Format)" export.');
+  }
+  const { width, height } = parseImageSize(size);
+  const payload = substituteComfyWorkflow(graph, {
+    prompt: imagePromptWithPrefix(prefix, prompt), negative, width, height });
+  const headers = { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) };
+  const res = await fetchAPI(endpoint, comfyPromptURL(endpoint), {
+    method: 'POST', headers, ...(signal ? { signal } : {}),
+    body: JSON.stringify({ prompt: payload }),
+  });
+  if (!res.ok) {
+    // ComfyUI rejects a bad graph as { error: { type, message }, node_errors }
+    let msg = `HTTP ${res.status}`;
+    try { const json = await res.json(); msg = json?.error?.message ?? json?.message ?? msg; } catch {}
+    const err = new Error(String(msg));
+    err.status = res.status;
+    throw err;
+  }
+  const queued = await res.json();
+  const promptId = queued?.prompt_id;
+  if (!promptId) throw new Error('ComfyUI did not return a prompt_id — is this a ComfyUI server?');
+  const deadline = Date.now() + timeoutMs;
+  const sleep = (ms) => new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason ?? new Error('aborted')); }, { once: true });
+  });
+  for (;;) {
+    const hRes = await fetchAPI(endpoint, comfyHistoryURL(endpoint, promptId), {
+      headers: { ...authHeaders(apiKey, endpoint, serverToken) }, ...(signal ? { signal } : {}) });
+    if (!hRes.ok) {
+      const err = new Error(`HTTP ${hRes.status}`);
+      err.status = hRes.status;
+      throw err;
+    }
+    const result = comfyHistoryResult(await hRes.json(), promptId);
+    if (result.error) throw new Error(result.error);
+    if (result.done && result.image) {
+      // /view authenticates exactly like /prompt above (the configured image
+      // key belongs to this host; through our proxy it maps as usual).
+      const imgRes = await fetchAPI(endpoint, comfyViewURL(endpoint, result.image), {
+        headers: { ...authHeaders(apiKey, endpoint, serverToken) }, ...(signal ? { signal } : {}) });
+      if (!imgRes.ok) {
+        const err = new Error(`image fetch failed (HTTP ${imgRes.status})`);
+        err.status = imgRes.status;
+        throw err;
+      }
+      const dataURL = await blobToDataURL(await imgRes.blob());
+      const img = await loadImage(dataURL);
+      return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+    }
+    if (Date.now() > deadline) throw new Error('ComfyUI timed out — the run never landed in history');
+    await sleep(1500);
+  }
+}
+
 // ============================================================================
 // HOOKS — localStorage UI prefs + per-collection state over the storage layer.
 // ============================================================================
@@ -3383,13 +3909,16 @@ function useStoredMap(storage, store) {
 // ============================================================================
 // HELPERS — export/import, misc UI utilities.
 // ============================================================================
-function downloadJSON(filename, obj) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function downloadJSON(filename, obj) {
+  downloadBlob(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), filename);
 }
 
 function pickFile(accept) {
@@ -3403,6 +3932,48 @@ function pickFile(accept) {
     input.oncancel = () => resolve(null);
     input.click();
   });
+}
+
+// Decode an image source URL (data:, blob:, http(s)) into an
+// HTMLImageElement. Rejects on decode failure.
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('could not decode image'));
+    img.src = src;
+  });
+}
+
+// Decode an image file into an HTMLImageElement via an object URL (revoked
+// once the load settles). Rejects on decode failure.
+function loadImageFromFile(file) {
+  const url = URL.createObjectURL(file);
+  return loadImage(url).then(
+    (img) => { URL.revokeObjectURL(url); return img; },
+    () => { URL.revokeObjectURL(url); throw new Error('could not decode image file'); });
+}
+
+// Draw `img` scaled so its longest edge is at most maxEdge (aspect kept,
+// never upscaled) and return a data URL. Browsers without WebP encode
+// silently return PNG from toDataURL — acceptable.
+function downscaleImageToDataURL(img, maxEdge, type = 'image/webp', quality = 0.85) {
+  const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(img, 0, 0, w, h);
+  return cv.toDataURL(type, quality);
+}
+
+// Crop the square source rect (sx, sy, sSize) out of `img` and return it as
+// an out×out data URL (avatar pipeline). Same WebP→PNG fallback note.
+function cropSquareToDataURL(img, sx, sy, sSize, out = 256, type = 'image/webp', quality = 0.85) {
+  const cv = document.createElement('canvas');
+  cv.width = out; cv.height = out;
+  cv.getContext('2d').drawImage(img, sx, sy, sSize, sSize, 0, 0, out, out);
+  return cv.toDataURL(type, quality);
 }
 
 async function pickJSONFile() {
@@ -3649,7 +4220,10 @@ function ListInput({ values, onChange, textarea, delim, ...rest }) {
 // The editable fields of a lore piece — shared by the inline card (scenario
 // editor) and the piece editor popout (chat options), so the two stay
 // identical. `set` applies a partial patch to the caller's piece/draft.
-function LorePieceFields({ piece, others, set }) {
+// Character-type pieces get the avatar field (a registered character is a
+// chat-local character card); onGenerateAvatar comes from Main like the
+// global editors (image generation off → no ✦ button).
+function LorePieceFields({ piece, others, set, onGenerateAvatar = null }) {
   return html`
     <div class="grid2">
       <label class="field"><span>Title</span>
@@ -3660,6 +4234,8 @@ function LorePieceFields({ piece, others, set }) {
           <option value="character">character</option>
         </select></label>
     </div>
+    ${piece.type === 'character' && html`
+      <${AvatarField} draft=${piece} set=${set} onGenerateAvatar=${onGenerateAvatar} />`}
     <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
       <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
     <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
@@ -3720,7 +4296,7 @@ function LorePieceFields({ piece, others, set }) {
         <//></label>`}`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null }) {
   const [open, setOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -3752,7 +4328,7 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
         <${GeneratorModal} title=${`Generate — ${piece.title || 'lore piece'}`} busy=${genBusy} error=${genError}
           onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
       ${open && html`
-        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} /></div>`}
+        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} /></div>`}
     </div>`;
 }
 
@@ -3779,7 +4355,7 @@ function RevisionRow({ rev, n }) {
 // piece is never a blind ✦ prompt — you see what it is before you edit or
 // generate. The generator's patch fills the local draft only; persistence
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
-function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
+function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -3801,7 +4377,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate 
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
-      <${LorePieceFields} piece=${draft} others=${others} set=${set} />
+      <${LorePieceFields} piece=${draft} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">
           <span>Change history (${piece.revisions.length})</span>
@@ -3890,7 +4466,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -3925,6 +4501,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
         <label class="field"><span>Tags (comma-separated)</span>
           <${ListInput} delim=',' values=${draft.tags} onChange=${(tags) => set({ tags })} /></label>
       </div>
+      <${AvatarField} draft=${draft} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       <label class="field"><span>Description — <b>metadata, not sent to the AI</b></span>
         <textarea rows=${2} value=${draft.description} onInput=${(e) => set({ description: e.target.value })} /></label>
       <label class="field"><span>Scenario instructions — sent to the AI, ranks above the platform prompt. {{user}} = persona name.</span>
@@ -3968,7 +4545,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
-            onGenerate=${onGenerate} />`)}
+            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
@@ -3979,7 +4556,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
 // ============================================================================
 // COMPONENTS: PERSONA MANAGER
 // ============================================================================
-function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaId, onSetDefault }) {
+function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaId, onSetDefault, onGenerateAvatar = null }) {
   const [editing, setEditing] = useState(null); // draft persona or null
   const [dirty, setDirty] = useState(false);
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
@@ -3995,6 +4572,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
       ${editing ? html`
         <label class="field"><span>Name — replaces {{user}} everywhere</span>
           <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
+        <${AvatarField} draft=${editing} set=${(patch) => edit({ ...editing, ...patch })} onGenerateAvatar=${onGenerateAvatar} />
         <label class="field"><span>Description — sent to the AI as "{{user}} is …"</span>
           <textarea rows=${5} value=${editing.description} onInput=${(e) => edit({ ...editing, description: e.target.value })} /></label>
         <div style=${{ display: 'flex', gap: '8px' }}>
@@ -4002,7 +4580,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
             onClick=${() => { onUpsert(editing.id, editing); setEditing(null); }}>Save</button>
           <button class="btn" onClick=${cancelEdit}>Cancel</button>
         </div>` : html`
-        <button class="btn" onClick=${() => startEdit({ id: uid(), name: '', description: '' })}>+ New persona</button>
+        <button class="btn" onClick=${() => startEdit({ id: uid(), name: '', description: '', avatar: '', avatarFull: '' })}>+ New persona</button>
         <div style=${{ marginTop: '10px' }}>
           ${list.length === 0 && html`<div class="hint">No personas yet. A persona feeds the {{user}} macro.</div>`}
           ${list.map(p => html`
@@ -4036,6 +4614,12 @@ const DEFAULT_PLATFORM_PROMPT =
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:8080',
   apiKey: '',
+  // Per-role connection overrides (Settings → Connection): blank fields
+  // inherit — the generator falls back through aux, everything ends at the
+  // main connection. Resolution: roleConn (50-api.js).
+  auxEndpoint: '', auxApiKey: '',     // memory, suggestions, /improve, /recap, impersonate, lore extraction
+  genEndpoint: '', genApiKey: '',     // ✦ generator buttons
+  embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
@@ -4071,6 +4655,7 @@ const DEFAULT_SETTINGS = {
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
   impersonate: true, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
+  avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
@@ -4094,12 +4679,23 @@ const DEFAULT_SETTINGS = {
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
+  avatarGenPrompt: '', // ✦ avatar button — card → portrait prompt for the image API; blank = DEFAULT_AVATAR_GEN_PROMPT
   genModel: '', // ✦ Generate model; blank = aux model (then chat model)
   genTemp: 0.9, // ✦ Generate temperature
   genMaxTokens: 3000, // ✦ Generate response cap (a full scenario JSON must fit)
+  imagesEnabled: false, // /image command + model-attached images (backend: imageBackend)
+  imageBackend: 'openai', // 'openai' (/v1/images/generations) | 'comfyui' (workflow graph via /prompt + /history)
+  imageEndpoint: '', // images API endpoint (Connection tab); empty = the main endpoint
+  imageApiKey: '', // empty = the main API key
+  imageModel: '', // some backends require a model on image calls (Models tab)
+  imageSize: '1024x1024',
+  imagePrefix: '', // style/quality tags prepended to every image prompt; blank = the bare prompt
+  imageNegative: '', // comfyui: negative prompt substituted into {{negative}}
+  imageWorkflow: '', // comfyui: API-format workflow JSON ("Save (API Format)" export) with {{prompt}} etc.
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
   toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
+  imagePrompt: '', // generate_image instructions, appended when image generation is on; blank = DEFAULT_IMAGE_PROMPT
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
   multiSpeaker: true, // model may reply for several characters per turn (split into per-speaker bubbles)
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
@@ -4169,7 +4765,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
 }
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
-                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft }) {
+                        storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft, initialTab }) {
   const [draft, setDraft] = useState(() => {
     // initialDraft restores the in-progress draft after the logit-bias detour.
     if (initialDraft) return initialDraft;
@@ -4179,7 +4775,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     d.lengthDirective ??= LENGTH_PRESETS[d.responseLength ?? 'medium']?.directive ?? '';
     return d;
   });
-  const [tab, setTab] = useState('appearance');
+  const [tab, setTab] = useState(initialTab ?? 'appearance'); // initialTab: test seam (SSR can't click tabs)
   const [dirty, setDirty] = useState(false);
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
@@ -4322,7 +4918,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="field"><span>Date format — message stamps, memories, chat names</span>
             <select value=${draft.dateFormat ?? 'dd/mm/yyyy'} onChange=${(e) => set({ dateFormat: e.target.value })}>
               ${Object.keys(DATE_FORMATS).map(f => html`<option key=${f} value=${f}>${f}</option>`)}
-            </select></label>`)}
+            </select></label>
+          <label class="check">
+            <input type="checkbox" checked=${draft.avatarsEnabled !== false} onChange=${(e) => set({ avatarsEnabled: e.target.checked })} />
+            Avatars beside chat bubbles (off = the chat spans the full pane width; images set on characters, scenarios, and personas)
+          </label>`)}
         ${section('Panes', html`
           <label class="check">
             <input type="checkbox" checked=${!!draft.sidebarArrows} onChange=${(e) => set({ sidebarArrows: e.target.checked })} />
@@ -4357,7 +4957,23 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
             ${testState && testState !== 'busy' && html`
               <span class=${testState.ok ? 'hint' : 'warn'}>${testState.msg}</span>`}
-          </div>`)}`}
+          </div>`)}
+        ${section('Role connections', html`
+          ${[['aux', 'Aux', 'Memory summaries, lore extraction, suggestions, /improve, /recap, impersonate.'],
+             ['gen', 'Generator', 'The ✦ generator buttons. Blank falls back through the aux connection.'],
+             ['embed', 'Embeddings', 'Semantic lore activation + smart memory recall.'],
+             ['image', 'Images', '/image, model-attached images, avatar renders.']]
+            .map(([k, label, hint]) => html`
+              <div class="grid2" key=${k}>
+                <label class="field"><span>${label} endpoint</span>
+                  <input type="text" value=${draft[`${k}Endpoint`] ?? ''} placeholder=${draft.endpoint || ''}
+                    onInput=${(e) => set({ [`${k}Endpoint`]: e.target.value })} />
+                  <span class="hint">${hint}</span></label>
+                <label class="field"><span>${label} API key</span>
+                  <input type="password" value=${draft[`${k}ApiKey`] ?? ''} placeholder="same as main key when empty"
+                    onInput=${(e) => set({ [`${k}ApiKey`]: e.target.value })} /></label>
+              </div>`)}`,
+          'Optional per-role endpoint + key overrides. Each blank field inherits separately (endpoint-only override → inherited key), ending at the main connection; "route via server" applies to all of them.')}`}
 
       ${tab === 'storage' && html`
         ${section('Storage', html`
@@ -4407,6 +5023,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <label class="field"><span>Generator model</span>
               <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
+            </label>
+          </div>
+          <div class="grid3">
+            <label class="field"><span>Image model</span>
+              <input type="text" list="fp-models" value=${draft.imageModel ?? ''} onInput=${(e) => set({ imageModel: e.target.value })} />
+              <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
           </div>`)}
         ${section('Embeddings', html`
@@ -4572,7 +5194,43 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
             Multi-speaker replies (model may answer as several characters; each part gets its own bubble)
+          </label>
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.imagesEnabled} onChange=${(e) => set({ imagesEnabled: e.target.checked })} />
+            Image generation — /image command and model-attached images (configure the backend below)
           </label>`)}
+        ${draft.imagesEnabled && section('Image generation', html`
+          <label class="field"><span>Backend</span>
+            <select value=${draft.imageBackend ?? 'openai'} onChange=${(e) => set({ imageBackend: e.target.value })}>
+              <option value="openai">OpenAI-compatible</option>
+              <option value="comfyui">ComfyUI</option>
+            </select>
+            <span class="hint">${draft.imageBackend === 'comfyui'
+              ? 'Workflow-graph backend. The endpoint is the ComfyUI base URL (Connection tab → Role connections).'
+              : 'OpenAI-compatible /v1/images/generations. Endpoint, key and model: Connection and Models tabs.'}</span></label>
+          <label class="field"><span>Size</span>
+            <input type="text" value=${draft.imageSize ?? '1024x1024'} placeholder="1024x1024"
+              onInput=${(e) => set({ imageSize: e.target.value })} />
+            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders.</span>`}</label>
+          <label class="field"><span>Prompt prefix</span>
+            <input type="text" value=${draft.imagePrefix ?? ''} placeholder="masterpiece, best quality, detailed …"
+              onInput=${(e) => set({ imagePrefix: e.target.value })} />
+            <span class="hint">Prepended to every image prompt — /image, model-attached images, and avatar generation.</span></label>
+          ${draft.imageBackend === 'comfyui' && html`
+            <label class="field"><span>Negative prompt</span>
+              <input type="text" value=${draft.imageNegative ?? ''} placeholder="worst quality, blurry, watermark …"
+                onInput=${(e) => set({ imageNegative: e.target.value })} />
+              <span class="hint">Substituted into the workflow's {{negative}} placeholder.</span></label>
+            <label class="field"><span>Workflow JSON</span>
+              <textarea rows=${8} value=${draft.imageWorkflow ?? ''} spellcheck=${false}
+                placeholder=${'{"3": {"class_type": "KSampler", "inputs": {"seed": "{{seed}}", …}}, …}'}
+                onInput=${(e) => set({ imageWorkflow: e.target.value })} />
+              <span class="hint">ComfyUI web UI → "Save (API Format)". Placeholders substituted per render:
+                {{prompt}}, {{negative}}, {{width}}, {{height}}, {{seed}} — numeric seed inputs are always
+                randomized so takes and re-rolls differ.</span></label>`}`,
+          draft.imageBackend === 'comfyui'
+            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note.'
+            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note.')}
         ${draft.suggestions && section('Response suggestions', html`
           <div class="grid2">
             <label class="field"><span>Number of suggestions (1–5)</span>
@@ -4652,6 +5310,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           ${draft.toolsEnabled !== false
             ? promptField('toolsPrompt', 'Tool protocol instructions — appended to the platform prompt; teaches the model the format. {{user}} works here.', TOOLS_PROMPT, 9)
             : html`<div class="hint">Tool protocol prompt hidden — tool calling is off (Features tab).</div>`}
+          ${draft.toolsEnabled !== false && draft.imagesEnabled
+            ? promptField('imagePrompt', 'Image generation instructions — appended to the platform prompt; teaches the model the generate_image block', DEFAULT_IMAGE_PROMPT, 8,
+              'Sent only while image generation is on (Features tab). The model attaches at most one image per reply, as the last block.')
+            : html`<div class="hint">Image generation prompt hidden — image generation is off (Features tab; it rides tool calling, which must stay on).</div>`}
           ${draft.multiSpeaker !== false
             ? promptField('speakerPrompt', 'Multi-speaker instructions — appended to the platform prompt.', SPEAKER_PROMPT, 4)
             : html`<div class="hint">Multi-speaker prompt hidden — multi-speaker is off (Features tab).</div>`}`)}
@@ -4674,7 +5336,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           ${promptField('characterGenPrompt', 'Character generator prompt — ✦ Generate in the character editor', DEFAULT_CHARACTER_GEN_PROMPT, 4,
             'The reply contract is one JSON object with name, content, keys and greeting.')}
           ${promptField('pieceGenPrompt', 'Lore piece generator prompt — ✦ on a lore piece (scenario or chat lore)', DEFAULT_PIECE_GEN_PROMPT, 4,
-            'The reply contract is one JSON object with type, title, content, keys and pinned.')}`)}`}
+            'The reply contract is one JSON object with type, title, content, keys and pinned.')}
+          ${promptField('avatarGenPrompt', 'Avatar image prompt — ✦ on the avatar field in the editors', DEFAULT_AVATAR_GEN_PROMPT, 3,
+            'Condenses the name + card into a square-portrait prompt for the image API; only used when image generation is enabled (Features tab).')}`)}`}
     <//>`;
 }
 // ============================================================================
@@ -4998,7 +5662,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -5080,7 +5744,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
             setPieces(editing.isNew ? [...pieces, draft] : pieces.map(q => q.id === draft.id ? draft : q));
             setEditing(null);
           }}
-          onClose=${() => setEditing(null)} onGenerate=${onGenerate} />`}
+          onClose=${() => setEditing(null)} onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`}
     </div>`;
 }
 
@@ -5251,7 +5915,88 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
+// Generated-image attachments on a swipe (v4.10): entries group into SLOTS —
+// one placement, one or more takes (per-image swipes). A slot renders once:
+// the active take (pending → shimmer, error/no src → dim note with the prompt
+// on the tooltip, else the image with click-to-zoom via onZoom), with a
+// ◀ n/m ▶⁺ navigator UNDER it whenever there is something to flip or re-roll
+// (count > 1 || canRegen) — mirroring the message swipe navigator; ▶⁺ on the
+// last take re-rolls JUST that image with the same prompt. A horizontal touch
+// swipe on the image itself flips takes too (left = next / ▶⁺ on the last,
+// right = back). WHERE a slot renders is MessageItem's call (the active
+// take's `pos` vs the speaker segments / visible text end): attached INSIDE
+// the reply bubble (head or end) or embedded between markdown blocks when
+// genuinely mid-text — free-standing only for a scene break between speaker
+// bubbles or an image-only swipe (nothing to attach to).
+function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen }) {
+  return html`${(slots ?? []).map((sv) => html`
+    <${SwipeImage} key=${sv.slot} sv=${sv} onZoom=${onZoom} generating=${generating}
+      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} />`)}`;
+}
+
+// One image slot: the active take plus its take navigator. Owns its touch
+// gesture (touch/pen, 70px horizontal-dominant, one action per gesture — the
+// message gestureHandlers pattern) on the wrapper: the pointerdown
+// stopPropagation keeps image-born gestures from arming the MESSAGE swipe
+// handlers on an ancestor bubble. A consumed gesture swallows the trailing
+// click (a >70px drag must not open the lightbox).
+function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }) {
+  const { take, activeIdx, count, hasPending } = sv;
+  const gestureRef = useRef(null);
+  const consumedRef = useRef(false);
+  const atLast = activeIdx >= count - 1;
+  const regen = () => { if (!generating && !hasPending && canRegen) onImgRegen?.(sv.slot); };
+  const gestureHandlers = {
+    onPointerDown: (e) => {
+      if (e.pointerType === 'mouse') return; // mouse never arms the message gesture either
+      e.stopPropagation(); // image-born gestures never trigger message swipes
+      consumedRef.current = false; // a stale flag must not eat this gesture's click
+      gestureRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    },
+    onPointerMove: (e) => {
+      const g = gestureRef.current;
+      if (!g || g.id !== e.pointerId) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
+        gestureRef.current = null; // one action per gesture
+        consumedRef.current = true; // swallow the click that follows the drag
+        if (generating) return; // buttons stand down mid-generation; the gesture matches
+        if (dx < 0) { // swipe left: next take, or ▶⁺ re-roll on the last one
+          if (!atLast) onImgSwipe?.(sv.slot, 1);
+          else regen();
+        } else if (activeIdx > 0) { // swipe right: back
+          onImgSwipe?.(sv.slot, -1);
+        }
+      }
+    },
+    onPointerUp: () => { gestureRef.current = null; },
+    onPointerCancel: () => { gestureRef.current = null; },
+  };
+  return html`
+    <div class="swipe-img-wrap" ...${gestureHandlers}>
+      ${take?.pending ? html`<div class="img-pending"></div>`
+        : take?.error || !take?.src
+          ? html`<div class="img-error" title=${take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
+          : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
+              onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take); }} />`}
+      ${(count > 1 || canRegen) && html`
+        <span class="swipes img-swipes">
+          <button class="btn small ghost" title="Previous take" disabled=${generating || activeIdx <= 0}
+            onClick=${() => onImgSwipe?.(sv.slot, -1)}>◀\uFE0E</button>
+          <span>${activeIdx + 1}/${count}</span>
+          ${!atLast
+            ? html`<button class="btn small ghost" title="Next take" disabled=${generating}
+                onClick=${() => onImgSwipe?.(sv.slot, 1)}>▶\uFE0E</button>`
+            : canRegen
+              ? html`<button class="btn small ghost gen" title="Generate a new take of this image — same prompt"
+                  disabled=${generating || hasPending} onClick=${regen}>▶\uFE0E⁺</button>`
+              : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
+        </span>`}
+    </div>`;
+}
+
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -5273,7 +6018,24 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
     return () => window.removeEventListener('pointerdown', onDown);
   }, [actionsOpen, metaOpen, toolsOpen, branchOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
+  const [lightbox, setLightbox] = useState(null); // { src, title } — avatar/image click-to-expand
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
+  // Generated-image attachments on the active swipe (v4.10): /image replies
+  // and model-attached images. Click expands via the same lightbox as
+  // avatars. Entries group into SLOTS (one placement, one or more takes);
+  // `swipe.imgUsed[slot]` picks the shown take. The active take carries `pos`
+  // (stripped-text offset of its tool block) and the slot renders where the
+  // model placed it — see the placement block below. Take handlers resolve
+  // the node's ACTIVE swipe at event time, like the message swipe handlers.
+  const imgs = Array.isArray(swipe.images) && swipe.images.length ? swipe.images : null;
+  const slots = imgs ? groupImageSlots(imgs, swipe.imgUsed).map(g => ({
+    slot: g.slot, take: g.active, activeIdx: g.activeIdx, count: g.takes.length,
+    hasPending: g.takes.some(t => t?.pending),
+  })) : null;
+  const canImgRegen = imagesEnabled && !!onImgRegen;
+  const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
+  const imgSlotRegen = (slot) => onImgRegen?.(node.id, slot);
+  const zoomImg = (im) => setLightbox({ src: im.src, title: im.caption || im.prompt || '' });
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
   // down one level at a time until it fits — each level drops one more detail
   // from the inline row, right to left (model, edited, gen time, date, #),
@@ -5310,7 +6072,10 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
-  const displayText = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
+  // Whitespace-only text (a pre-fix multi-tool reply keeps the newlines that
+  // separated its stripped blocks) renders exactly like an empty swipe.
+  const rawDisplay = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
+  const displayText = rawDisplay.trim() ? rawDisplay : '';
   const n = node.activeSwipe + 1, m = node.swipes.length;
   // Swipe nav on every assistant message: at the last swipe ▶⁺ generates a
   // new take THERE (mid-chain regen forks a branch — the continuation is
@@ -5373,20 +6138,98 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
   const multi = (segments?.length ?? 0) > 1;
+  // ---- positional image placement (v4.10) ----
+  // A swipe image entry may carry `pos`: the offset in the swipe's stripped
+  // text where its ```tool block began. pos indexes swipe.text; the segment
+  // offsets and the rendered markdown use the subUser'd text, so map pos
+  // through the same substitution before comparing (a removed block always
+  // leaves newline separation, so no {{user}} token can straddle pos).
+  const posInText = (p) => subUser(String(swipe.text ?? '').slice(0, p), personaName).length;
+  const probsShown = showProbs && hasProbs;
+  // Free-standing image group: no bubble chrome. It does NOT ride the
+  // message's swipe gesture — the image wrapper carries its own take-swipe
+  // gesture (a horizontal swipe here flips image takes, not message swipes).
+  const swipeImgs = (list, key = null) => html`
+    <${SwipeImages} key=${key} slots=${list} onZoom=${zoomImg} generating=${generating}
+      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} />`;
+  const freeImg = (list, key) => html`
+    <div key=${key} class="msg-img-free">${swipeImgs(list)}</div>`;
+  // Multi-speaker: an image hangs immediately AFTER the bubble of the last
+  // segment whose content starts at/before pos — a block sitting in the gap
+  // between two segments (their prefix/newline region) therefore lands after
+  // the earlier one; pos before the first segment renders ahead of it; no
+  // pos (legacy, /image) or past the last segment goes after the last bubble.
+  // Placement iterates SLOTS (pos read from the active take — identical
+  // across takes), so a multi-take placement renders once.
+  const imgGroups = new Map(); // segment index (-1 = before all) → slot views
+  if (multi && slots && !editing && !probsShown) {
+    for (const sv of slots) {
+      let place = segments.length - 1;
+      if (Number.isFinite(sv.take?.pos)) {
+        const p = posInText(sv.take.pos);
+        place = -1;
+        for (let si = 0; si < segments.length; si++)
+          if (segments[si].start <= p) place = si;
+      }
+      imgGroups.set(place, [...(imgGroups.get(place) ?? []), sv]);
+    }
+  }
+  // Single bubble: the image rides INSIDE the reply bubble — pos at/past the
+  // visible end (trailing whitespace allowed) or absent → attached at the end;
+  // pos at the very start → attached at the head; genuinely mid-text → EMBED
+  // by splitting the display text at pos into two markdown blocks (the block
+  // sat on a fenced line boundary, so the split lands on one too — no markdown
+  // construct needs healing across it). A trailing/leading image never floats
+  // free-standing next to the bubble — attached reads as part of the reply,
+  // not an orphan (the image-only swipe is the exception: nothing to attach).
+  let headImgs = null, endImgs = null, embeds = null, embedParts = null, freeImgs = null;
+  const imageOnly = !multi && !isUser && !editing && !probsShown && !displayText && !!slots;
+  if (!multi && !isUser && !isOOC && !probsShown && !editing && slots && displayText) {
+    const prefixLen = text.length - displayText.length; // stripSpeakerPrefix shift
+    const visibleEnd = displayText.trimEnd().length;
+    for (const sv of slots) {
+      const p = Number.isFinite(sv.take?.pos) ? posInText(sv.take.pos) - prefixLen : null;
+      if (p == null || p >= visibleEnd) (endImgs ??= []).push(sv);
+      else if (p <= 0) (headImgs ??= []).push(sv);
+      else (embeds ??= []).push({ p, sv });
+    }
+    if (embeds) {
+      embeds.sort((a, b) => a.p - b.p);
+      embedParts = [displayText.slice(0, embeds[0].p),
+        ...embeds.map((e, i) => displayText.slice(e.p, embeds[i + 1]?.p))];
+    }
+  } else if (imageOnly) {
+    freeImgs = slots; // image-only swipe: free-standing, no bubble at all
+  }
+  // Cases that keep the images inside the bubble at the end, as before:
+  // user messages, OOC, and the probs view (no markdown to embed into).
+  const tailImgs = !multi && slots ? ((isUser || isOOC || probsShown) ? slots : endImgs) : null;
+  // Nothing visible to put in a bubble (whitespace-only text — see above —
+  // and no in-bubble images; not streaming, editing, or showing probs): skip
+  // the shell entirely. The meta row stays — its ⚙ pill shows what happened.
+  const hideBubble = imageOnly || (!editing && !streaming && !probsShown && !displayText && !tailImgs);
   // Multi-speaker swipe: the header names everyone who spoke, in speaking
   // order (first appearance), each with its own colour.
   const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
+  // Column avatar (avatarsOn): the persona on user messages; on assistant
+  // replies the resolved speaker — a MULTI-speaker reply leaves this column
+  // bare instead (each segment row carries its own gutter avatar below).
+  // Map entries are { src, full }: the 256² thumb renders,
+  // the uncropped companion feeds the click-to-expand lightbox. A map miss
+  // renders a letter tile for a NAMED character only — an imageless user (no
+  // persona image) or the Narrator gets the bare .msg-av slot instead (an
+  // alignment spacer; the column itself always renders while avatarsOn).
+  const avName = isUser ? personaName : (multi ? (segments[0].speaker ?? 'Narrator') : (speaker ?? 'Narrator'));
+  const av = avatars?.[String(avName ?? '').toLowerCase()];
+  const avTile = !isUser && avName !== 'Narrator'; // tile fallback is named-character-only
   // #, date, gen time, edited, model collapse behind the › toggle on phones
   // (desktop shows them inline via .meta-details { display: contents }).
   const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
-  return html`
-    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''}" data-mid=${node.id}
-      onContextMenu=${(e) => {
-        // Keep the native menu when the user has text selected (copy etc.).
-        if (window.getSelection()?.toString()) return;
-        e.preventDefault();
-        setCtxMenu({ x: e.clientX, y: e.clientY });
-      }}>
+  // The row's content (meta row, bubbles, branch chip, context menu). With
+  // avatars on, it wraps in .msg-body beside the .msg-av column; otherwise it
+  // renders directly, exactly as before. The Fragment keeps it one child —
+  // a bare multi-root html`` array as a child would trip React's key warning.
+  const body = html`<${React.Fragment}>
       <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
@@ -5456,20 +6299,39 @@ ${showNav && html`
           </span>`}
 
       </div>
-      ${multi && !editing && !(showProbs && hasProbs) ? html`
+      ${multi && !editing && !probsShown ? html`
         ${thinkBubble}
-        ${segments.map((seg, si) => html`
-        <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
-          style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
-          ...${gestureHandlers}>
-          <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-            style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${seg.speaker ?? 'Narrator'}</div>
-          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
-        </div>`)}` : html`
+        ${imgGroups.get(-1) ? freeImg(imgGroups.get(-1), 'img-pre') : null}
+        ${segments.map((seg, si) => {
+          // Each segment is a mini-message: the speaker's avatar hangs in the
+          // gutter beside its own bubble (image / named-character tile / bare
+          // slot — the message-level column stays an empty spacer in this
+          // mode), the name chip above the bubble. Same per-character
+          // differentiation a single-speaker reply gets.
+          const segName = seg.speaker ?? 'Narrator';
+          const segAv = avatarsOn ? avatars?.[segName.toLowerCase()] : null;
+          return html`
+          <div key=${si} class="seg-row">
+            ${avatarsOn && html`<div class="msg-av">
+              ${(segAv?.src || seg.speaker) && html`<${Avatar} name=${segName} src=${segAv?.src ?? ''} size=${40}
+                onClick=${segAv?.src ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
+            </div>`}
+            <div class="seg-col">
+              <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
+                style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${segName}</div>
+              <div class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
+                style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
+                ...${gestureHandlers}>
+                <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
+              </div>
+            </div>
+          </div>
+          ${imgGroups.get(si) ? freeImg(imgGroups.get(si), `img-${si}`) : null}`;})}` : html`
       ${thinkBubble}
-      <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
+      ${!hideBubble && html`<div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
+        ${!editing && headImgs && swipeImgs(headImgs)}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
@@ -5480,12 +6342,24 @@ ${showNav && html`
             // Generating but no first token yet (slow backend waking up, model
             // loading, middleware holding the connection) — don't look dead.
             ? html`<div class="waiting" title="Waiting for the first token…"><span>●\uFE0E</span><span>●\uFE0E</span><span>●\uFE0E</span></div>` :
-          showProbs && hasProbs
+          probsShown
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
-            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`}
+            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>` :
+          embeds
+            // A mid-text image splits the markdown at its block's position —
+            // the fence sat on a line boundary, so both halves parse cleanly.
+            ? html`${embedParts.map((part, pi) => html`
+              ${pi > 0 ? swipeImgs([embeds[pi - 1].sv], `ei${pi}`) : null}
+              ${part ? html`<div key=${`ep${pi}`} class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${part} prose streaming=${streaming} /></div>` : null}`)}` :
+          // Only a user message with nothing but images renders no text block
+          // (an assistant image-only swipe skips the bubble entirely).
+          displayText || !imgs
+            ? html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`
+            : null}
+        ${!editing && tailImgs && swipeImgs(tailImgs)}
       </div>`}
+      ${freeImgs ? freeImg(freeImgs, 'img-post') : null}`}
       ${offPathKids.length > 0 && html`
         <div class="branch-chip-row">
           <button class="branch-chip" disabled=${generating}
@@ -5531,7 +6405,23 @@ ${showNav && html`
               { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
               { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true, disabled: generating },
             ] : []),
-          ]} />`}
+          ]} />`}<//>`;
+  return html`
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''} ${avatarsOn ? 'with-av' : ''}" data-mid=${node.id}
+      onContextMenu=${(e) => {
+        // Keep the native menu when the user has text selected (copy etc.).
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        setCtxMenu({ x: e.clientX, y: e.clientY });
+      }}>
+      ${avatarsOn && html`
+        <div class="msg-av">
+          ${!(multi && !editing && !probsShown) && (av?.src || avTile) && html`
+            <${Avatar} name=${avName ?? ''} src=${av?.src ?? ''} size=${40}
+              onClick=${av?.src ? () => setLightbox({ src: av.full, title: avName }) : null} />`}
+        </div>`}
+      ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
+      ${lightbox && html`<${Lightbox} src=${lightbox.src} title=${lightbox.title} onClose=${() => setLightbox(null)} />`}
     </div>`;
 }
 
@@ -5741,6 +6631,7 @@ const COMPOSER_COMMANDS = [
   ['/pov CHAR [TEXT]', 'reply from another character’s view'],
   ['/improve [TEXT]', 'rewrite your draft in persona voice'],
   ['/impersonate', 'draft your next message as you'],
+  ['/image [PROMPT]', 'generate an image into the chat'],
   ['/recap [N]', 'summarize the last N messages'],
   ['/memory [N]', 'save a memory from the last N messages'],
   ['/model [NAME]', 'set this chat’s model'],
@@ -5873,8 +6764,8 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
 
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
-function ChatPane({ chat, persona, characterNames, characterColors, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
+function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -6106,6 +6997,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
           <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
             selected=${node.id === selId}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
+            avatars=${avatars} avatarsOn=${avatarsOn}
             streaming=${generating?.nodeId === node.id}
             generating=${!!generating}
             auxBusy=${auxBusy.length > 0}
@@ -6114,6 +7006,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, generating, 
             branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
+            onImgSwipe=${actions.onImgSwipe} onImgRegen=${actions.onImgRegen} imagesEnabled=${imagesEnabled}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
           <//>`)}
@@ -6251,6 +7144,16 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
     lp.current = null;
   };
   const act = (e, id, action) => { e.stopPropagation(); onChatAction(id, action); };
+  // Chat row thumbnail: the scenario's avatar, else the first linked
+  // character's — letter tiles stay a chat-bubble thing, so no image = no icon.
+  const chatAvatarEl = (c) => {
+    const sc = scenarios[c.scenarioId];
+    const ch = sc?.avatar ? null
+      : [...(sc?.characterIds ?? []), ...(c.characterIds ?? [])]
+        .map(id => characters?.[id]).find(x => x?.avatar);
+    const a = sc?.avatar ? { name: sc.name, src: sc.avatar } : ch ? { name: ch.name, src: ch.avatar } : null;
+    return a && html`<${Avatar} name=${a.name} src=${a.src} size=${24} />`;
+  };
   const sectionTitle = (key, label, onAdd, addTitle) => html`
     <div class="title">
       <span class="t-toggle" onClick=${() => onToggleSection(key)}>
@@ -6273,6 +7176,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onScenarioContextMenu(s.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, s.id, onScenarioContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} />`}
               <span class="name">${s.name}</span>
               <span class="tools">
                 <span class="tools-full">
@@ -6300,6 +7204,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onCharacterContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id, onCharacterContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} />`}
               <span class="name">${c.name}</span>
               <span class="tools">
                 <span class="tools-full">
@@ -6336,6 +7241,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onChatContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
+              ${chatAvatarEl(c)}
               <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
               <span class="tools">
@@ -6442,6 +7348,7 @@ function ContextMenu({ x, y, items, onClose }) {
       ${items.map((it, i) => it === '-'
         ? html`<div key=${i} class="ctx-sep" />`
         : html`<button key=${i} class="ctx-item ${it.danger ? 'danger' : ''}" disabled=${!!it.disabled}
+            title=${it.title ?? null}
             onClick=${() => { if (it.disabled) return; onClose(); it.fn(); }}>${it.label}</button>`)}
     </div>`;
 }
@@ -6457,7 +7364,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -6469,13 +7376,14 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
         <${MemoryPanel} chat=${chat} onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap} />`}
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
-          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />`}
+          onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
+          onGenerateAvatar=${onGenerateAvatar} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -6486,7 +7394,8 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
+        onGenerateAvatar=${onGenerateAvatar} />
     <//>`;
 }
 
@@ -6500,7 +7409,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -6516,7 +7425,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
-        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches} />
+        settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
+        onGenerateAvatar=${onGenerateAvatar} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -6539,7 +7449,7 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate, onGenerateAvatar = null }) {
   const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -6576,6 +7486,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = n
             : html`<span class="hint">auto — pick a colour to override</span>`}
         </div>
       </div>
+      <${AvatarField} draft=${editing} set=${(patch) => edit({ ...editing, ...patch })} onGenerateAvatar=${onGenerateAvatar} />
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
         <textarea rows=${6} value=${editing.content} onInput=${(e) => edit({ ...editing, content: e.target.value })} /></label>
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>
@@ -6716,6 +7627,201 @@ function GeneratorModal({ title, busy, error, onGenerate, onClose }) {
     <//>`;
 }
 // ============================================================================
+// COMPONENTS: IMAGE UI — avatars everywhere (chat column, segment chips,
+// sidebar rows, editors), the click-to-expand lightbox, and the square-crop
+// editor behind Upload/Crop. Phase 2 of Images & avatars (v4.10).
+// ============================================================================
+
+// Round avatar: the image when `src` is set, otherwise a letter tile (first
+// letter of the name) with the same name-hashed hue the speaker name gets —
+// the tile keeps avatar columns aligned when someone has no image. Clickable
+// (button semantics + pointer) only when onClick is passed.
+function Avatar({ name = '', src = '', size = 40, onClick = null }) {
+  const px = `${size}px`;
+  const interactive = onClick ? {
+    role: 'button', tabIndex: 0, onClick,
+    onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } },
+  } : {};
+  if (src) return html`<img class="avatar ${onClick ? 'click' : ''}" src=${src} alt=${name}
+    style=${{ width: px, height: px }} ...${interactive} />`;
+  const letter = (String(name).trim()[0] ?? '?').toUpperCase();
+  return html`<span class="avatar avatar-tile ${onClick ? 'click' : ''}"
+    style=${{ width: px, height: px, fontSize: `${Math.max(10, Math.round(size * 0.45))}px`, '--speaker-h': hueForName(String(name)) }}
+    ...${interactive}>${letter}</span>`;
+}
+
+// Click-to-expand image view: a plain modal holding the image at natural size
+// (capped to the viewport by CSS), caption underneath. Stacking, topmost-only
+// Escape and mobile full-screen come from the existing modal CSS.
+function Lightbox({ src, title = '', onClose }) {
+  return html`
+    <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}>
+      <img class="lb-img" src=${src} alt=${title} />
+      ${title && html`<div class="lb-cap">${title}</div>`}
+    <//>`;
+}
+
+// Square-crop editor for avatars. The image sits in an overflow-hidden square
+// frame; pointer-drag pans, wheel + slider zoom (min zoom = the cover fit, so
+// the image can never leave a gap). The view state is { F, scale, dx, dy }:
+// F = the frame's CSS-px side, scale = displayed px per source px, dx/dy =
+// the image's top-left offset from the frame's top-left (always ≤ 0). Confirm
+// inverts that transform back to the source rect (sx = -dx/scale etc.) and
+// hands the cropped 256px data URL to onDone.
+function ImageCropper({ img, onDone, onClose }) {
+  const frameRef = useRef(null);
+  const dragRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const [view, setView] = useState(null); // null until the frame is measured
+  const natW = img.naturalWidth || 1, natH = img.naturalHeight || 1;
+  const minScaleFor = (F) => Math.max(F / natW, F / natH); // cover fit
+  // Clamp scale to [cover, 4×cover] and offsets so the image always covers F.
+  const clampView = (v) => {
+    const minScale = minScaleFor(v.F);
+    const scale = Math.min(Math.max(v.scale, minScale), minScale * 4);
+    return { ...v, scale,
+      dx: Math.min(0, Math.max(v.F - natW * scale, v.dx)),
+      dy: Math.min(0, Math.max(v.F - natH * scale, v.dy)) };
+  };
+  // Measure once mounted (F is a layout fact), centering the cover fit.
+  useLayoutEffect(() => {
+    const F = frameRef.current?.clientWidth ?? 320;
+    const s = minScaleFor(F);
+    setView({ F, scale: s, dx: (F - natW * s) / 2, dy: (F - natH * s) / 2 });
+  }, []);
+  // Zoom keeping the frame CENTER fixed: offsets scale around C = F/2.
+  const applyZoom = (v, target) => {
+    const minScale = minScaleFor(v.F);
+    const scale = Math.min(Math.max(target, minScale), minScale * 4);
+    const k = scale / v.scale; // the factor actually applied after clamping
+    const C = v.F / 2;
+    return clampView({ ...v, scale, dx: C - (C - v.dx) * k, dy: C - (C - v.dy) * k });
+  };
+  const zoomBy = (factor) => setView(v => v && applyZoom(v, v.scale * factor));
+  // React registers root wheel listeners as passive, so preventDefault needs a
+  // native non-passive listener (or the page scrolls while zooming).
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    const onWheel = (e) => { e.preventDefault(); zoomBy(Math.exp(-e.deltaY * 0.0015)); };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  const onPointerDown = (e) => {
+    dragRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    setDragging(true);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const onPointerMove = (e) => {
+    const d = dragRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    const mx = e.clientX - d.x, my = e.clientY - d.y;
+    d.x = e.clientX; d.y = e.clientY;
+    setView(v => v && clampView({ ...v, dx: v.dx + mx, dy: v.dy + my }));
+  };
+  const endDrag = () => { dragRef.current = null; setDragging(false); };
+  const confirm = () => {
+    if (!view) return;
+    const { F, scale, dx, dy } = view;
+    const sx = Math.max(0, -dx / scale), sy = Math.max(0, -dy / scale);
+    const sSize = Math.min(natW - sx, natH - sy, F / scale); // float-rounding guard
+    onDone(cropSquareToDataURL(img, sx, sy, sSize, 256));
+  };
+  const minScale = view ? minScaleFor(view.F) : 1;
+  return html`
+    <${Modal} title="Crop avatar" cls="img-crop" onClose=${onClose}
+      footer=${html`<button class="btn ghost" onClick=${onClose}>Cancel</button>
+        <button class="btn primary" disabled=${!view} onClick=${confirm}>Use crop</button>`}>
+      <div class="crop-frame ${dragging ? 'dragging' : ''}" ref=${frameRef}
+        onPointerDown=${onPointerDown} onPointerMove=${onPointerMove}
+        onPointerUp=${endDrag} onPointerCancel=${endDrag}>
+        ${view && html`<img src=${img.src} alt="" draggable=${false} style=${{
+          left: `${view.dx}px`, top: `${view.dy}px`,
+          width: `${natW * view.scale}px`, height: `${natH * view.scale}px` }} />`}
+      </div>
+      <div class="crop-zoom">
+        <span class="hint">Zoom</span>
+        <input type="range" disabled=${!view} min=${minScale} max=${minScale * 4}
+          step=${(minScale * 3) / 100} value=${view?.scale ?? minScale}
+          onInput=${(e) => setView(v => v && applyZoom(v, Number(e.target.value)))} />
+      </div>
+    <//>`;
+}
+
+// The avatar editor row shared by the character/scenario/persona editors and
+// character-type lore pieces (LorePieceFields): preview + Upload (file →
+// cropper) / Crop (re-crop the current image) / ✦ (AI generate) / Clear.
+// `set` applies a partial patch to the caller's
+// draft; persistence stays with each editor's own Save. The ✦ button renders
+// only when a caller passes onGenerateAvatar (Main: only while image
+// generation is on) — it's invoked with the CURRENT draft's { name, content }
+// (AvatarField owns draft freshness) and the resulting image opens in the
+// cropper, exactly like an upload. Errors are the host's job: it banners
+// them, we catch and only clear the busy state.
+function AvatarField({ draft, set, onGenerateAvatar = null }) {
+  // The image in the cropper plus the full-res companion its crop confirms
+  // into the draft: full = the ≤1024 uncropped source (Upload/✦ refresh
+  // avatarFull alongside the thumb); full = null on a re-crop — the stored
+  // full copy is unchanged, only the 256² thumb is rewritten.
+  const [cropImg, setCropImg] = useState(null); // { img, full } | null
+  const [genBusy, setGenBusy] = useState(false); // ✦ generation in flight
+  // Character/scenario/persona drafts carry `name`; a character-type lore
+  // piece's display name is its `title`.
+  const draftName = draft.name ?? draft.title ?? '';
+  const upload = async () => {
+    const file = await pickFile('image/*');
+    if (!file) return;
+    try {
+      const img = await loadImageFromFile(file);
+      // Work from a data-URL copy: the picker's object URL is revoked on load
+      // (the cropper couldn't re-display it), and a capped copy keeps the crop
+      // pipeline fast no matter how big the original is. The same ≤1024 copy
+      // lands on avatarFull at crop confirm — the uncropped expand-view source.
+      const src = downscaleImageToDataURL(img, 1024);
+      const work = new Image();
+      work.onload = () => setCropImg({ img: work, full: src });
+      work.onerror = () => console.warn('avatar: could not reload the working copy');
+      work.src = src;
+    } catch (e) { console.warn('avatar: could not decode image file', e); }
+  };
+  const recrop = () => {
+    const img = new Image();
+    img.onload = () => setCropImg({ img, full: null });
+    img.src = draft.avatarFull || draft.avatar; // re-crop from the full copy when one exists
+  };
+  // ✦: hand the host the live draft (a character card's .content; otherwise
+  // persona/scenario .description + scenario .backstory), then crop the
+  // generated portrait like an upload. The ≤1024 generation lands on
+  // avatarFull at crop confirm, exactly like an upload's working copy.
+  const generate = async () => {
+    setGenBusy(true);
+    try {
+      const content = draft.content ?? [draft.description, draft.backstory].filter(s => (s ?? '').trim()).join('\n\n');
+      const src = await onGenerateAvatar({ name: draftName, content });
+      const img = new Image();
+      img.onload = () => setCropImg({ img, full: src });
+      img.src = src;
+    } catch { /* the host banners the error */ }
+    finally { setGenBusy(false); }
+  };
+  return html`
+    <${React.Fragment}>
+    <div class="field"><span>Avatar — shown beside chat bubbles and in sidebar lists; square-cropped to 256px</span>
+      <div style=${{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <${Avatar} name=${draftName} src=${draft.avatar ?? ''} size=${48} />
+        <button class="btn small" onClick=${upload}>Upload</button>
+        ${draft.avatar && html`<button class="btn small" title="Re-crop the current image" onClick=${recrop}>Crop</button>`}
+        ${onGenerateAvatar && html`<button class="btn small" disabled=${genBusy}
+          title="Generate an avatar with the AI — the current draft becomes a portrait, then you crop it"
+          onClick=${generate}>${genBusy ? '…' : '✦'}</button>`}
+        ${draft.avatar && html`<button class="btn small" onClick=${() => set({ avatar: '', avatarFull: '' })}>Clear</button>`}
+      </div>
+    </div>
+    ${cropImg && html`<${ImageCropper} img=${cropImg.img} onClose=${() => setCropImg(null)}
+      onDone=${(dataURL) => { set(cropImg.full == null ? { avatar: dataURL } : { avatar: dataURL, avatarFull: cropImg.full }); setCropImg(null); }} />`}
+    <//>`;
+}
+// ============================================================================
 // APP — wires storage, collections, generation orchestration, and the panels.
 // ============================================================================
 // Chat factory. Scenario chats snapshot the scenario greeting; direct
@@ -6765,6 +7871,9 @@ function buildPlatformPrompt(st) {
     st.platformPrompt,
     ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
     ...(st.toolsEnabled !== false ? [(st.toolsPrompt ?? '').trim() || TOOLS_PROMPT] : []),
+    // generate_image rides the tool-call machinery (same parse/strip pass), so
+    // a tools-disabled chat never advertises it — and never parses it either.
+    ...(st.toolsEnabled !== false && st.imagesEnabled ? [(st.imagePrompt ?? '').trim() || DEFAULT_IMAGE_PROMPT] : []),
   ].filter(s => s?.trim()).join('\n\n');
 }
 
@@ -6776,6 +7885,14 @@ const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16, PAN
 function Main({ storage, storageKind, storageFailed }) {
   // Request-time endpoint rewrite ("route via server") — never persisted.
   const effEp = (st) => effectiveEndpoint(st, storageKind === 'server');
+  // Resolve a connection-role chain ('gen','aux' / 'aux' / 'embed' / 'image')
+  // to a ready-to-call { endpoint, apiKey }: roleConn picks the per-role
+  // override (blank fields inherit), effEp applies the route-via-server
+  // rewrite. roleApi(st) with no roles = the main connection.
+  const roleApi = (st, ...roles) => {
+    const c = roleConn(st, ...roles);
+    return { endpoint: effEp({ ...st, endpoint: c.endpoint }), apiKey: c.apiKey };
+  };
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
@@ -6836,6 +7953,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
+  const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
@@ -6875,7 +7993,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function runGen(kind, promptText, draft) {
     const st = ref.current.settings;
     const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
-    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const conn = roleApi(st, 'gen', 'aux'); // the connection chain mirrors the model chain
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
     // The RP length preset otherwise only reaches the chat assembler — aux
     // calls never see it, so pass the directive through as prose guidance
@@ -6889,7 +8008,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ? (({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned }))(draft)
         : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
     const out = await auxLogged('generate', {
-      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
         : kind === 'piece'
@@ -6910,6 +8029,45 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
     return isScenario ? sanitizeScenarioGen(obj) : kind === 'piece' ? sanitizePieceGen(obj) : sanitizeCharacterGen(obj);
   }
+
+  // ✦ avatar generation (the avatar field in the character/scenario/persona
+  // editors): step 1 condenses the card into a portrait prompt on the
+  // generator model chain — a 'generate' aux call, so Stop aborts it like any
+  // aux call; step 2 renders that prompt on the image connection (imgCtls —
+  // never blocks the composer). AvatarField passes the live draft's name +
+  // card at click time; errors rethrow to the caller.
+  async function generateAvatarFor({ name, content }) {
+    const st = ref.current.settings;
+    const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
+    const conn = roleApi(st, 'gen', 'aux');
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const prompt = (await auxLogged('generate', {
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
+      system: (st.avatarGenPrompt ?? '').trim() || DEFAULT_AVATAR_GEN_PROMPT,
+      user: `Name: ${name}\n\n${content}`,
+      maxTokens: st.genMaxTokens ?? 300, temperature: st.genTemp ?? 0.7,
+    })).trim();
+    const img = roleApi(st, 'image');
+    const ctl = new AbortController();
+    imgCtls.current.add(ctl);
+    try {
+      return await generateImage({
+        endpoint: img.endpoint, // image connection falls back to the main one
+        apiKey: img.apiKey, serverToken: st.serverToken,
+        model: st.imageModel, prompt, size: st.imageSize, prefix: st.imagePrefix,
+        backend: st.imageBackend, workflow: st.imageWorkflow, negative: st.imageNegative, signal: ctl.signal });
+    } finally {
+      imgCtls.current.delete(ctl);
+    }
+  }
+
+  // The thunk the editors get — Main passes it only while image generation is
+  // on, so the ✦ button stays hidden otherwise. Errors surface via the global
+  // banner; AvatarField catches the rethrow and just clears its busy state.
+  const generateAvatar = async (vals) => {
+    try { return await generateAvatarFor(vals); }
+    catch (e) { setError(describeApiError(e)); throw e; }
+  };
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
@@ -6990,6 +8148,38 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterColors = useMemo(() => Object.fromEntries(
     Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
       .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
+  // Avatar images: every global character card with one set, keyed by
+  // lowercase name, then the active chat's character-type lore pieces
+  // (tool-registered characters — chat pieces WIN a name collision), and
+  // finally the active chat's persona. Each entry is
+  // { src, full } — the 256² thumb for the column/chips, the uncropped ≤1024
+  // companion (avatarFull || avatar) for the click-to-expand lightbox. Same
+  // identity-stability care as characterColors (MessageItem's memo compares
+  // props by identity).
+  const characterAvatars = useMemo(() => {
+    const map = Object.fromEntries(
+      Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim())
+        .map(c => [c.name.trim().toLowerCase(), { src: c.avatar, full: c.avatarFull || c.avatar }]));
+    // Deliberately NOT scoped by pieceVisibleAt: a same-name piece on a
+    // hidden branch leaking its avatar is the only bleed vector, and such
+    // cross-branch name collisions are vanishingly rare.
+    for (const p of chat?.lorePieces ?? []) {
+      if (p?.type === 'character' && p.avatar && (p.title ?? '').trim())
+        map[p.title.trim().toLowerCase()] = { src: p.avatar, full: p.avatarFull || p.avatar };
+    }
+    if (persona?.avatar && persona.name?.trim())
+      map[persona.name.trim().toLowerCase()] = { src: persona.avatar, full: persona.avatarFull || persona.avatar };
+    return map;
+  }, [characters, chat?.lorePieces, persona]);
+  // The avatar column shows only when something this chat can speak as has an
+  // image: a linked character (scenario ∪ chat links), a chat-overlay
+  // character piece, or the active persona.
+  const chatHasAvatars = useMemo(() => {
+    if (persona?.avatar) return true;
+    if ((chat?.lorePieces ?? []).some(p => p?.type === 'character' && p.avatar)) return true;
+    return [...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]
+      .some(id => characters?.[id]?.avatar);
+  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
@@ -7214,7 +8404,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const every = st.memoryEvery ?? MEMORY_EVERY;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
@@ -7228,7 +8419,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const prior = priorTexts.length
       ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
     const out = await auxLogged('memory', {
-      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
       user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
       maxTokens: st.memoryMaxTokens ?? 400, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
@@ -7281,7 +8472,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
     const scen = sc[chatObj.scenarioId];
     const mode = scen?.emergentLore ?? 'queue';
-    if (mode === 'off' || !st.endpoint) return;
+    const conn = roleApi(st, 'aux');
+    if (mode === 'off' || !conn.endpoint) return;
     const model = st.auxModel || st.model;
     if (!model) return;
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
@@ -7304,7 +8496,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
       const out = await auxLogged('lore-extract', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
           .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 3))),
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
@@ -7393,6 +8585,135 @@ function Main({ storage, storageKind, storageFailed }) {
     }));
   }
 
+  // ---- avatar enrichment (settings.toolsEnrich + settings.imagesEnabled) ----
+  // Companion to maybeEnrichCharacters: a newly tool-registered character also
+  // gets a portrait, rendered from its registered card (the enrichment text
+  // pass races this one — whichever content the piece holds at fire time is
+  // fine). Same filter, same fire-and-forget concurrency, same silent
+  // degradation. No rollback stamps needed: the piece's own createdBy scope
+  // already hides it on other branches, and regenerate-prune removes the
+  // piece (the write then drops via the merge-on-write guard).
+  async function maybeEnrichAvatars(chatObj, nodeId, toolResults) {
+    const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
+      && String(r.note ?? '').startsWith('registered character'));
+    await Promise.all(fresh.map(async (r) => {
+      const name = String(r.args?.name ?? '').trim();
+      if (!name) return;
+      const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
+        && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
+      if (!piece || piece.avatar) return; // rewound/pruned meanwhile, or already has one
+      try {
+        const src = await generateAvatarFor({ name: piece.title, content: piece.content });
+        const thumb = downscaleImageToDataURL(await loadImage(src), 256);
+        // Merge-on-write: re-read at save time; drop the write if the chat or
+        // piece vanished (rewind, delete, regenerate-prune) or the piece
+        // already has an avatar (the user beat us to it) in between.
+        const cur = ref.current.chats[chatObj.id];
+        const live = (cur?.lorePieces ?? []).find(p => p.id === piece.id);
+        if (!live || live.avatar) return;
+        const next = { ...cur, lorePieces: cur.lorePieces.map(p =>
+          p.id === piece.id ? { ...p, avatar: thumb, avatarFull: src } : p) };
+        // touch:false — a background lore write shouldn't re-sort the sidebar
+        // (saveChat syncs ref.current.chats itself; see maybeEnrichCharacters).
+        saveChat(next, { touch: false });
+      } catch (e) { console.warn(`Avatar enrichment failed for "${name}":`, e); }
+    }));
+  }
+
+  // ---- image generation (/image command, v4.10 phase 3) ----
+  // One job fills one swipe's pending images entry, merge-on-write: the chat,
+  // node or swipe may have vanished (rewind, delete, regenerate) while the
+  // backend worked — then the write is dropped. Errors land on the entry as
+  // { error: true } (same shape healImageEntry produces for reload debris) —
+  // the bubble's failure note is the feedback, no banner.
+  // The pending entry is matched by `slot` (its placement id): two jobs on
+  // DIFFERENT slots of the same swipe may run concurrently and must not
+  // cross-patch.
+  async function runImageJob(chatId, nodeId, swipeIdx, { prompt, caption = '', slot }) {
+    const st = ref.current.settings;
+    const { endpoint: ep, apiKey: key } = roleApi(st, 'image');
+    const ctl = new AbortController();
+    imgCtls.current.add(ctl);
+    // patch: rebuild the chat with the pending entry at (nodeId, swipeIdx)
+    // replaced by `entry`; returns false when the target vanished.
+    const patch = (makeEntry) => {
+      const cur = ref.current.chats[chatId];
+      const node = cur?.messages?.[nodeId];
+      const swipe = node?.swipes?.[swipeIdx];
+      const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
+      if (!cur || !node || !swipe || !entry) return false;
+      const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
+      const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
+      saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
+      return true;
+    };
+    try {
+      const src = await generateImage({ endpoint: ep, apiKey: key, serverToken: st.serverToken,
+        model: st.imageModel, prompt, size: st.imageSize, prefix: st.imagePrefix,
+        backend: st.imageBackend, workflow: st.imageWorkflow, negative: st.imageNegative, signal: ctl.signal });
+      // keep the original `at` — and `pos` (where the model placed the block)
+      patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
+        ...(entry.pos !== undefined ? { pos: entry.pos } : {}) }));
+    } catch (e) {
+      console.warn(describeApiError(e));
+      patch((entry) => {
+        const out = {};
+        for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (entry[k] !== undefined) out[k] = entry[k];
+        out.error = true;
+        return out;
+      });
+    } finally {
+      imgCtls.current.delete(ctl);
+    }
+  }
+
+  // ▶⁺ on an image slot: re-roll JUST that image — same prompt (the slot's
+  // first take is the base; prompt/caption/pos are identical across takes), a
+  // new pending take appended. The reply text and message swipes are
+  // untouched. Refuses while any take of the slot is still pending.
+  function regenImage(chatId, nodeId, swipeIdx, slot) {
+    const st = ref.current.settings;
+    if (!st.imagesEnabled) return;
+    const c = ref.current.chats[chatId];
+    // Mid-stream the generation's commit() owns this chat's messages — the
+    // write would be clobbered (same rule as onSwipe).
+    if (!c || generating?.chatId === c.id) return;
+    const node = c?.messages?.[nodeId];
+    const swipe = node?.swipes?.[swipeIdx];
+    const g = Array.isArray(swipe?.images)
+      ? groupImageSlots(swipe.images, swipe.imgUsed).find(g => g.slot === slot) : null;
+    if (!g || g.takes.some(t => t?.pending)) return;
+    const { prompt, caption = '', pos } = g.takes[0] ?? {};
+    if (!prompt) return;
+    // Point imgUsed at the new take NOW: the shimmer shows immediately, and
+    // the job patches the entry in place, so the index stays correct.
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...node,
+      swipes: node.swipes.map((s, i) => i !== swipeIdx ? s : { ...s,
+        images: [...s.images, { pending: true, slot, prompt, caption, at: Date.now(),
+          ...(pos !== undefined ? { pos } : {}) }],
+        imgUsed: { ...(s.imgUsed ?? {}), [slot]: g.takes.length } }) } } }, { touch: false });
+    runImageJob(chatId, nodeId, swipeIdx, { prompt, caption, slot }).catch(() => {}); // handles its own errors
+  }
+
+  // ◀ ▶ on an image slot: pick another take of the placement. Pure state
+  // update on the ACTIVE swipe — touch:false, browsing takes changes no world
+  // state (same rule as message swipes).
+  function swipeImage(chatId, nodeId, slot, dir) {
+    const c = ref.current.chats[chatId];
+    if (!c || generating?.chatId === c.id) return; // mid-stream commit() owns this chat
+    const node = c?.messages?.[nodeId];
+    const swipeIdx = node?.activeSwipe;
+    const swipe = node?.swipes?.[swipeIdx];
+    if (!Array.isArray(swipe?.images)) return;
+    const g = groupImageSlots(swipe.images, swipe.imgUsed).find(g => g.slot === slot);
+    if (!g) return;
+    const next = Math.min(Math.max(g.activeIdx + dir, 0), g.takes.length - 1);
+    if (next === g.activeIdx) return;
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...node,
+      swipes: node.swipes.map((s, i) => i !== swipeIdx ? s : { ...s,
+        imgUsed: { ...(s.imgUsed ?? {}), [slot]: next } }) } } }, { touch: false });
+  }
+
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
@@ -7474,16 +8795,17 @@ function Main({ storage, storageKind, storageFailed }) {
       if (queryText.trim()) {
         // One query embedding serves both the lore and the memory pass; each
         // pass degrades independently (keyword-only lore / recency memories).
+        const emb = roleApi(st, 'embed');
         let queryVec = null;
         const queryVecOf = async () => {
-          if (!queryVec) [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
+          if (!queryVec) [queryVec] = await embed({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
           return queryVec;
         };
         if (smartPieces.length) {
           try {
             const qv = await queryVecOf();
             const vecs = await Promise.all(smartPieces.map(p =>
-              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+              embedCached({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
                 text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}`, signal: abort.signal })));
             preActivated = new Set();
             semanticReport = { threshold: semThreshold, scores: [] };
@@ -7501,7 +8823,7 @@ function Main({ storage, storageKind, storageFailed }) {
           try {
             const qv = await queryVecOf();
             const vecs = await Promise.all(recallMems.map(m =>
-              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+              embedCached({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
                 text: m.text.slice(0, 500), signal: abort.signal })));
             memScores = new Map();
             for (let i = 0; i < recallMems.length; i++) memScores.set(recallMems[i].id, cosine(qv, vecs[i]));
@@ -7728,6 +9050,9 @@ function Main({ storage, storageKind, storageFailed }) {
       // onto the stripped display text (attachProbs).
       let toolResults = null;
       let toolCallsRan = false;
+      // Set once a parsed generate_image call is accepted: { prompt, caption,
+      // raw } until the pending entry is stamped, then { prompt, caption, swipeIdx }.
+      let imageQueued = null;
       // All late writes funnel through commit(): the mutation is applied to a
       // merge of the CURRENT stored chat with the generation-owned message
       // tree, and the whole write is skipped when the chat was deleted
@@ -7766,27 +9091,102 @@ function Main({ storage, storageKind, storageFailed }) {
           // discard it — attachProbs falls back to plain alignment.
           if (probMap.text !== parsed.text) { probMap = null; rawAcc = null; }
           acc = baseText + parsed.text;
-          if (parsed.text) applyText(acc);
+          // Blocks leave their surrounding newlines: a reply of ONLY blocks
+          // strips to pure whitespace, which IS the empty case — collapse it
+          // so the toolOnly/discard/image-only decisions below see '' exactly.
+          if (!acc.trim()) acc = '';
+          if (parsed.text || !acc) applyText(acc);
         }
         if (parsed.calls.length) {
           toolCallsRan = true;
           const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
-          commit((c) => {
-            const applied = applyToolCalls(c, parsed.calls, {
+          // generate_image calls ride the tool machinery (a tools-disabled
+          // chat never advertises or parses them) but execute on the image
+          // pipeline, not the lore overlay — split them off before
+          // applyToolCalls. Their results join the same list that feeds
+          // man.toolCalls + the swipe's toolCalls stamp, so a refused call
+          // (disabled, prompt-less, over cap) surfaces in the ⚙ pill instead
+          // of silently vanishing.
+          const { imageCalls, loreCalls } = splitImageCalls(parsed.calls);
+          const imageToolsOn = st.toolsEnabled !== false && st.imagesEnabled;
+          const imageResults = imageCalls.map((call, i) => {
+            const prompt = String(call.args?.prompt ?? '').trim();
+            if (!imageToolsOn) return { name: call.name, args: call.args, ok: false, note: 'image generation disabled' };
+            if (i >= IMAGE_CALL_CAP) return { name: call.name, args: call.args, ok: false, note: 'call cap reached' };
+            if (!prompt) return { name: call.name, args: call.args, ok: false, note: 'missing prompt' };
+            imageQueued = { prompt, caption: String(call.args.caption ?? '').slice(0, 200), raw: call.raw, slot: uid() };
+            return { name: call.name, args: call.args, ok: true, note: 'queued' };
+          });
+          let loreResults = [];
+          if (loreCalls.length) commit((c) => {
+            const applied = applyToolCalls(c, loreCalls, {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
               atLen: getActivePath(c.messages, nodeId).length,
             }, mergedLorePieces(scen, c, gchars));
-            toolResults = applied.results;
+            loreResults = applied.results;
             return applied.chat;
           });
-          if (toolResults) {
+          toolResults = [...loreResults, ...imageResults];
+          if (imageQueued) {
+            // Stamp the pending image entry NOW, in the same commit batch as
+            // the tool results, so the shimmer is visible the moment
+            // generation ends. Race-free vs the final swipe stamp below: that
+            // stamp spreads swipes[activeSwipe] (it can only add
+            // speaker/genMs/toolCalls), so the images array survives; and
+            // commit() ref-syncs, so no later same-finally read rebuilds from
+            // the pre-image snapshot. For an image-only reply (text '') this
+            // is also the write that keeps the swipe from being discarded.
+            const { prompt, caption, slot } = imageQueued;
+            // pos: the offset in the stripped display text where this image's
+            // tool block began — the chat view renders the image where the
+            // model placed it. The accepted call is the first generate_image
+            // block (IMAGE_CALL_CAP is 1), so its raw JSON identifies the
+            // block: rescan the raw slice for the block whose trimmed body
+            // matches call.raw (first match wins — an identical earlier block
+            // would have been the accepted one). probMap's map is
+            // stripped→raw, strictly increasing, with no entry inside a
+            // removed block — so the kept-char count before the block's raw
+            // start is the first map index whose raw offset reaches it
+            // (map.length when the block ends the slice); + baseText.length
+            // shifts continuation slices into full-swipe coordinates. No map
+            // (drift guard) or no match → no pos → renders at the end.
+            let pos = null;
+            if (probMap) {
+              TOOL_BLOCK_RE.lastIndex = 0;
+              let bm;
+              while ((bm = TOOL_BLOCK_RE.exec(slice))) {
+                if (bm[1].trim() !== imageQueued.raw) continue;
+                const k = probMap.map.findIndex(v => v >= bm.index);
+                pos = (k === -1 ? probMap.map.length : k) + baseText.length;
+                break;
+              }
+            }
+            let swipeIdx = -1;
+            const stamped = commit((c) => {
+              const n = c.messages[nodeId];
+              swipeIdx = n?.activeSwipe ?? -1;
+              const sw = n?.swipes?.[swipeIdx];
+              if (!sw) return c;
+              const swipes = n.swipes.slice();
+              swipes[swipeIdx] = { ...sw,
+                images: [...(sw.images ?? []), { pending: true, slot, prompt, caption, at: Date.now(),
+                  ...(pos != null ? { pos } : {}) }] };
+              return { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes } } };
+            });
+            // Chat deleted mid-generation — don't fire a job whose
+            // merge-on-write could never land.
+            imageQueued = stamped && swipeIdx >= 0 ? { prompt, caption, slot, swipeIdx } : null;
+          }
+          if (toolResults.length) {
             man.toolCalls = toolResults.map(r => ({
               name: r.name, ok: r.ok, note: r.note, args: toPreview(JSON.stringify(r.args ?? {}), 200),
             }));
-            const capped = toolResults.filter(r => r.note === 'call cap reached').length;
+            const capped = loreResults.filter(r => r.note === 'call cap reached').length;
+            const imgCapped = imageResults.filter(r => r.note === 'call cap reached').length;
             const failed = toolResults.filter(r => !r.ok && r.note !== 'call cap reached').length;
             if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
+            if (imgCapped) man.warnings.push(`${imgCapped} image call(s) skipped — at most ${IMAGE_CALL_CAP} image per reply.`);
             if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
             if (ref.current.chats[chatObj.id]) setManifestFor(chatObj.id, { ...man }, messages);
           }
@@ -7797,15 +9197,23 @@ function Main({ storage, storageKind, storageFailed }) {
       // its pieces createdBy: nodeId (they must reference a live node), and
       // the user gets visible feedback that lore was added. Logprobs are
       // skipped: the tape covers the raw protocol text, so aligning it to a
-      // synthetic placeholder is meaningless.
-      const toolOnly = !acc && toolCallsRan;
+      // synthetic placeholder is meaningless. An IMAGE-only reply is not
+      // tool-only: no placeholder, no discard — the swipe stays text-empty
+      // and renders as a pure image bubble (pending entry stamped above).
+      // Whitespace-only is empty too (a blank reply with tools disabled never
+      // passed the strip path above).
+      if (!acc.trim()) acc = '';
+      const toolOnly = !acc && toolCallsRan && !imageQueued;
       if (toolOnly) { acc = '✦ Lore updated via tool call.'; applyText(acc); }
-      if (!acc) discardEmptySwipe();
+      if (!acc && !imageQueued) discardEmptySwipe();
       // Stream ended without a finish chunk and not by the user's Stop — the
       // connection dropped mid-generation. Partial text is kept, but flagged.
       const interrupted = !!acc && !sawDone && !abort.signal.aborted;
-      if (acc) {
-        if (!toolOnly) attachProbs();
+      // imageQueued with empty acc = image-only reply: still stamp the swipe
+      // (speaker/genMs/toolCalls) so the ⚙ pill works — only probs are tied
+      // to text (the tape covers protocol text, nothing to align).
+      if (acc || imageQueued) {
+        if (!toolOnly && acc) attachProbs();
         if (truncated) {
           man.warnings.push('Response truncated at max_tokens — raise Max tokens in Settings or /continue.');
           if (ref.current.chats[chatObj.id]) setManifestFor(chatObj.id, { ...man }, messages);
@@ -7837,6 +9245,9 @@ function Main({ storage, storageKind, storageFailed }) {
         // generation registered, via the ✦ generator. Fire-and-forget like
         // the passes above; merge-on-write at save time.
         if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
+        // Same for their avatars (also needs Image generation on): one
+        // fire-and-forget portrait render per newly registered character.
+        if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions) {
@@ -7846,6 +9257,13 @@ function Main({ storage, storageKind, storageFailed }) {
         }
       }
       storage.flush();
+      // Fire the image job only now, after the finally's state has settled —
+      // the pending entry is already on the swipe. runImageJob patches it
+      // merge-on-write when the backend answers and handles its own errors;
+      // it never blocks the composer (imgCtls, not auxBusy). Not awaited.
+      if (imageQueued)
+        runImageJob(work.id, nodeId, imageQueued.swipeIdx,
+          { prompt: imageQueued.prompt, caption: imageQueued.caption, slot: imageQueued.slot }).catch(() => {});
     }
   }
 
@@ -7862,7 +9280,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function fetchSuggestions(chatObj, nodeId) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) return;
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) return;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const count = Math.max(1, Math.min(5, st.suggestionsCount ?? 2));
     const words = Math.max(5, Math.min(60, st.suggestionsWords ?? 20));
@@ -7876,7 +9295,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setSuggestions({ ...key, loading: true, items: null });
     try {
       const out = await auxLogged('suggestions', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: sysPrompt,
         user: `Recent scene:\n\n${recent}\n\n${count === 1 ? 'One option' : `${count} options`} for ${pName}:`,
         maxTokens: Math.min(500, 60 + count * words * 2), temperature: st.suggestionsTemp ?? 0.9, stop: st.stopStrings,
@@ -7970,6 +9389,22 @@ function Main({ storage, storageKind, storageFailed }) {
         improveDraft(c, arg);
         return null;
       }
+      if (cmd === '/image') {
+        const st = ref.current.settings;
+        if (!st.imagesEnabled) return 'Image generation is off — enable it in Settings → Features.';
+        if (!arg) return 'Usage: /image [PROMPT]';
+        // The pending bubble is the feedback: no text generation fires — the
+        // image job patches this swipe's entry when the backend answers (or
+        // marks it failed). An image-only swipe survives pruneInterrupted.
+        const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '', st.imageModel || null);
+        const n1 = c1.messages[id];
+        const slot = uid();
+        const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
+          swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
+        upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+        runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
+        return null;
+      }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
       if (cmd === '/recap') {
         const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
@@ -7998,7 +9433,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
@@ -8008,7 +9443,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function improveDraft(c, draft) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pers = c.personaId ? pe[c.personaId] : null;
     const pName = pers?.name?.trim() || 'User';
     const personaDesc = pers?.description?.trim() ? ` (${subUser(pers.description, pName)})` : '';
@@ -8017,7 +9453,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     try {
       const out = await auxLogged('improve', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: subUser(st.improvePrompt || DEFAULT_IMPROVE_PROMPT, `${pName}${personaDesc}`),
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
         maxTokens: st.improveMaxTokens ?? 400, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
@@ -8036,7 +9472,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function impersonateDraft(c) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-(st.suggestionsDepth ?? 6))
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
@@ -8044,7 +9481,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to base a reply on yet.', nonce: Date.now() }); return; }
     try {
       const out = await auxLogged('impersonate', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: subUser(st.impersonatePrompt || DEFAULT_IMPERSONATE_PROMPT, pName),
         user: `Recent scene:\n\n${recent}\n\n${pName}'s next message:`,
         maxTokens: 400, temperature: st.suggestionsTemp ?? 0.7, stop: st.stopStrings,
@@ -8064,7 +9501,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function recapChat(c, n) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-n)
       .map(x => `${x.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(x), pName)}`)
@@ -8072,7 +9510,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
     try {
       const out = await auxLogged('recap', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 400)),
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
@@ -8161,6 +9599,15 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!n || generating?.chatId === c.id || idx < 0 || idx >= n.swipes.length || idx === n.activeSwipe) return;
     scrollTargetRef.current = { chatId: c.id, nodeId };
     saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
+  };
+  // Image takes (v4.10): ◀ ▶ flip between takes of one image placement, ▶⁺
+  // on the last take re-rolls JUST that image (same prompt, new roll) — the
+  // reply text and message swipes are untouched. Both resolve the node's
+  // ACTIVE swipe at event time, like the message handlers above.
+  const onImgSwipe = (nodeId, slot, dir) => swipeImage(ui.chatId, nodeId, slot, dir);
+  const onImgRegen = (nodeId, slot) => {
+    const n = ref.current.chats[ui.chatId]?.messages?.[nodeId];
+    if (n) regenImage(ui.chatId, nodeId, n.activeSwipe, slot);
   };
   // Jump to the branch running through nodeId (branch chip popover / Branches
   // tab). From another chat's panel modal: switches the active chat too.
@@ -8337,10 +9784,34 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // PNG card export: the avatar IS the card image — the full-res companion
+  // when one exists (avatarFull || avatar) — redrawn to PNG at natural size
+  // (long edge ≤1024), with the chara_card v2 JSON (character + its first
+  // linked scenario when one exists — buildCharacterCard tolerates null)
+  // embedded as a tEXt chunk (pure core). Importable by SillyTavern-style tools.
+  const onExportCharacterPng = async (character) => {
+    if (!character?.avatar)
+      return setError('Set an avatar first — the avatar becomes the card image.');
+    try {
+      const img = await loadImage(character.avatarFull || character.avatar);
+      const scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('the browser refused to encode the PNG');
+      const u8 = new Uint8Array(await blob.arrayBuffer());
+      const scenario = Object.values(scenarios ?? {})
+        .find(s => (s.characterIds ?? []).includes(character.id)) ?? null;
+      downloadBlob(new Blob([embedPngCardJson(u8, JSON.stringify(buildCharacterCard(scenario, character)))],
+        { type: 'image/png' }), `${character.name}.png`);
+    } catch (e) { setError(`PNG card export failed: ${e?.message ?? e}`); }
+  };
   const onImport = async () => {
     const file = await pickFile('.json,application/json,.png,image/png');
     if (!file) return;
-    let obj;
+    let obj, cardArt = null;
     try {
       if (file.type === 'image/png' || /\.png$/i.test(file.name ?? '')) {
         // Character-card PNG: the card JSON rides in a tEXt chunk (pure core).
@@ -8348,6 +9819,15 @@ function Main({ storage, storageKind, storageFailed }) {
         if (json == null)
           return setError('Import failed: that PNG embeds no character card (no "chara"/"ccv3" text chunk).');
         obj = JSON.parse(json);
+        // The PNG's own art becomes the imported character's avatar pair,
+        // decoded once: the 256px thumb and the uncropped ≤1024 avatarFull
+        // (aspect kept — the Avatar component's object-fit: cover crops). A
+        // decode failure never fails the import: the card data matters, not
+        // the art.
+        try {
+          const artImg = await loadImageFromFile(file);
+          cardArt = { avatar: downscaleImageToDataURL(artImg, 256), avatarFull: downscaleImageToDataURL(artImg, 1024) };
+        } catch (e) { console.warn('import: could not decode the card art', e); }
       } else {
         obj = JSON.parse(await file.text());
       }
@@ -8383,6 +9863,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const card = parseCharacterCard(obj);
       if (!card)
         return setError('Unrecognized JSON: expected a FictionPad scenario, character, chat or character card export. Full backups import via Settings → Storage.');
+      if (cardArt) Object.assign(card.character, cardArt); // a card PNG keeps its art as the avatar pair (256 thumb + ≤1024 full)
       upsertCharacter(card.character.id, normalizeCharacter(card.character));
       upsertScenario(card.scenario.id, card.scenario);
       setUi(u => ({ ...u, scenarioId: card.scenario.id, characterId: null }));
@@ -8583,6 +10064,9 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
           { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          { label: 'Export PNG card', fn: () => onExportCharacterPng(characters[id]),
+            disabled: !characters[id]?.avatar,
+            title: characters[id]?.avatar ? null : 'Set an avatar first — the avatar becomes the card image.' },
           '-',
           { label: 'Delete…', fn: () => onDeleteCharacter(id), danger: true },
         ] })}
@@ -8599,6 +10083,7 @@ function Main({ storage, storageKind, storageFailed }) {
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
+              avatars=${characterAvatars} avatarsOn=${settings.avatarsEnabled !== false && chatHasAvatars}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               genElsewhere=${!!generating && generating.chatId !== chat?.id}
@@ -8614,6 +10099,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
+              onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} imagesEnabled=${!!settings.imagesEnabled}
               onJump=${onJump} onOpenBranches=${onOpenBranches}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
@@ -8637,18 +10123,20 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
-        onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+        onUpsert=${upsertCharacter} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         defaultPersonaId=${settings.defaultPersonaId ?? ''}
         onSetDefault=${(id) => updateSettings({ defaultPersonaId: id })}
         onRemove=${(id) => {
@@ -8703,6 +10191,7 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}

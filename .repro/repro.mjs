@@ -17,10 +17,14 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, html, SettingsModal, DEFAULT_SETTINGS,
+  effectiveEndpoint, roleConn, html, SettingsModal, DEFAULT_SETTINGS,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
   LorePieceEditor, chatSearchText, matchExcerpt,
-  BranchPanel, appendMessage, activateBranch, getActivePath };`);
+  Avatar, Lightbox, AvatarField,
+  BranchPanel, appendMessage, activateBranch, getActivePath,
+  splitImageCalls, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
+  substituteComfyWorkflow, comfyHistoryResult, parseImageSize, comfyRandomSeed,
+  buildCharacterCard, embedPngCardJson, pngCrc32 };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -129,6 +133,30 @@ trial('settings modal renders tab bar + appearance tab (SSR smoke)', () => {
       onUpload=${async () => 0} onDownload=${async () => 0} />`);
   for (const label of ['Appearance', 'Connection', 'Models', 'Generation', 'Features', 'Prompts'])
     if (!out.includes(label)) throw new Error(`missing settings tab: ${label}`);
+});
+
+// Tab scoping regression: a section appended after a tab's html` close renders
+// on EVERY tab. Role connections must show only on Connection.
+trial('settings: Role connections section is scoped to the Connection tab', () => {
+  const render = (initialTab) => renderToStaticMarkup(html`
+    <${fp.SettingsModal} settings=${{ ...fp.DEFAULT_SETTINGS, imagesEnabled: true }} onSave=${() => {}} onClose=${() => {}}
+      theme="ctp-mocha" onThemeChange=${() => {}} accent="mauve" onAccentChange=${() => {}}
+      onOpenLogitBias=${() => {}} storageKind="local" initialTab=${initialTab}
+      onUpload=${async () => 0} onDownload=${async () => 0} />`);
+  const appearance = render('appearance');
+  if (appearance.includes('Role connections')) throw new Error('leaked onto the appearance tab');
+  if (appearance.includes('Test connection')) throw new Error('API connection leaked onto the appearance tab');
+  const connection = render('connection');
+  if (!connection.includes('Role connections')) throw new Error('missing on the connection tab');
+  if (!connection.includes('Aux endpoint') || !connection.includes('Images API key'))
+    throw new Error('role pairs missing on the connection tab');
+  const features = render('features');
+  if (features.includes('Role connections')) throw new Error('leaked onto the features tab');
+  if (!features.includes('Prompt prefix')) throw new Error('image section missing on the features tab');
+  if (features.includes('Image endpoint')) throw new Error('image endpoint should live in Connection, not Features');
+  const models = render('models');
+  if (models.includes('Role connections')) throw new Error('leaked onto the models tab');
+  if (!models.includes('Image model')) throw new Error('image model missing on the models tab');
 });
 
 // Smoke: the sidebar's Characters section, and collapsed sections pinning
@@ -287,6 +315,400 @@ trial('multi-speaker header lists all speakers in order', () => {
   const mi = meta.indexOf('>Mia<'), ni = meta.indexOf('>Narrator<'), si = meta.indexOf('>Samantha<');
   if (mi < 0 || ni < 0 || si < 0) throw new Error('header missing a speaker: ' + meta);
   if (!(mi < ni && ni < si)) throw new Error('speakers out of order: ' + meta);
+});
+
+// Avatars (v4.10 phase 2): the bubble column renders an <img> when the map
+// has the speaker, a letter tile only for a NAMED character on a miss — an
+// imageless user or Narrator gets the bare (empty) .msg-av slot, never a
+// tile; avatarsOn=false renders nothing.
+// Map entries are { src, full } — the column/chips render the 256² thumb
+// (src); the uncropped companion (full) feeds only the click lightbox.
+trial('avatars: column shows image avatar, letter tile on miss, nothing when off', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const img = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av1', null, 'assistant', 'Vex: "Hi."')}
+      isRoot=${false} personaName="Ari" characterNames=${['Vex']}
+      avatars=${{ vex: { src: 'data:image/webp;base64,AAAA', full: 'data:image/webp;base64,FFFF' } }} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!img.includes('with-av')) throw new Error('avatar column class missing: ' + img);
+  if (!img.includes('<img')) throw new Error('image avatar not rendered: ' + img);
+  // A full≠src entry still renders the THUMB in the column — the full copy is
+  // lightbox-only (SSR can't click, so the full URL must not appear at all).
+  if (!img.includes('src="data:image/webp;base64,AAAA"')) throw new Error('column should render the thumb src: ' + img);
+  if (img.includes('FFFF')) throw new Error('the full-res companion must stay out of the column markup: ' + img);
+  const tile = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av2', null, 'assistant', 'Vex: "Hi."')}
+      isRoot=${false} personaName="Ari" characterNames=${['Vex']}
+      avatars=${{}} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!tile.includes('avatar-tile') || !tile.includes('>V<')) throw new Error('letter tile not rendered: ' + tile);
+  const off = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av3', null, 'assistant', 'Vex: "Hi."')}
+      isRoot=${false} personaName="Ari" characterNames=${['Vex']}
+      avatars=${{ vex: { src: 'data:image/webp;base64,AAAA', full: 'data:image/webp;base64,AAAA' } }} avatarsOn=${false}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (off.includes('with-av') || off.includes('avatar')) throw new Error('avatarsOn=false must render no avatar markup: ' + off);
+  // User messages key the map off the persona name.
+  const user = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av4', null, 'user', 'Hello.')}
+      isRoot=${false} personaName="Ari" characterNames=${[]}
+      avatars=${{ ari: { src: 'data:image/webp;base64,BBBB', full: 'data:image/webp;base64,BBBB' } }} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!user.includes('<img')) throw new Error('persona avatar not rendered on user message: ' + user);
+  // No persona image → the column stays an empty slot, never a letter tile.
+  const userBare = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av4b', null, 'user', 'Hello.')}
+      isRoot=${false} personaName="Ari" characterNames=${[]}
+      avatars=${{}} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!userBare.includes('msg-av')) throw new Error('empty avatar slot missing on imageless user message: ' + userBare);
+  if (userBare.includes('avatar-tile') || userBare.includes('<img'))
+    throw new Error('imageless user message must not render a tile: ' + userBare);
+  // Same for an imageless Narrator (unnarrated assistant reply).
+  const narrBare = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av4c', null, 'assistant', '*The rain picks up.*')}
+      isRoot=${false} personaName="Ari" characterNames=${[]}
+      avatars=${{}} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!narrBare.includes('msg-av')) throw new Error('empty avatar slot missing on imageless Narrator reply: ' + narrBare);
+  if (narrBare.includes('avatar-tile') || narrBare.includes('<img'))
+    throw new Error('imageless Narrator reply must not render a tile: ' + narrBare);
+  // …but a map entry for the Narrator does render (a piece titled "Narrator").
+  const narrImg = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av4d', null, 'assistant', '*The rain picks up.*')}
+      isRoot=${false} personaName="Ari" characterNames=${[]}
+      avatars=${{ narrator: { src: 'data:image/webp;base64,NNNN', full: 'data:image/webp;base64,NNNN' } }} avatarsOn=${true}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!narrImg.includes('<img')) throw new Error('Narrator map hit should render the image: ' + narrImg);
+});
+
+// Multi-speaker: each segment row carries that speaker's avatar in the
+// message gutter (image / named-character tile / bare slot for an imageless
+// Narrator), exactly like a single-speaker reply — the message-level column
+// stays an empty spacer and the name chips carry no avatar.
+trial('avatars: multi-speaker segments carry gutter avatars', () => {
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('av5', null, 'assistant', 'Mia: "Hi."\n\nNarrator: *Rain starts.*\n\nSamantha: "Hey."')}
+      isRoot=${false} personaName="Ari" characterNames=${['Mia', 'Samantha']}
+      avatars=${{ mia: { src: 'data:image/webp;base64,CCCC', full: 'data:image/webp;base64,CCCC' } }} avatarsOn=${true}
+      streaming=${false} generating=${false}
+      onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
+      onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
+  const cols = out.match(/<div class="msg-av">[\s\S]*?<\/div>/g) ?? [];
+  if (cols.length !== 4) throw new Error('expected the message-level spacer + 3 segment gutters: ' + out);
+  if (cols[0].includes('<img') || cols[0].includes('avatar-tile'))
+    throw new Error('message-level column should stay a bare spacer on multi-speaker replies: ' + cols[0]);
+  if (!cols[1].includes('<img')) throw new Error("Mia's gutter should carry her image avatar: " + cols[1]);
+  if (cols[2].includes('<img') || cols[2].includes('avatar-tile'))
+    throw new Error('imageless Narrator gutter must render no avatar at all: ' + cols[2]);
+  if (!cols[3].includes('avatar-tile') || !cols[3].includes('>S<'))
+    throw new Error("Samantha's gutter should fall back to a letter tile: " + cols[3]);
+  const chips = out.match(/<div class="seg-who[^"]*"[\s\S]*?<\/div>/g) ?? [];
+  if (chips.length !== 3) throw new Error('expected 3 speaker chips: ' + out);
+  if (!chips[1].includes('Narrator')) throw new Error('Narrator chip missing: ' + chips[1]);
+  if (chips.some(c => c.includes('<img') || c.includes('avatar-tile')))
+    throw new Error('name chips no longer carry avatars: ' + chips.join(' | '));
+});
+
+// Sidebar thumbnails: scenario/character/chat rows show a 24px image avatar
+// when the entity has one — never a letter tile (chat rows fall back:
+// scenario avatar → first linked character's → nothing).
+trial('avatars: sidebar rows show image thumbnails only', () => {
+  const noop = () => {};
+  const characters = {
+    CH1: { id: 'CH1', name: 'Mira', content: 'x', keys: [], enabled: true, avatar: 'data:image/webp;base64,DDDD' },
+    CH2: { id: 'CH2', name: 'NoPic', content: 'x', keys: [], enabled: true },
+  };
+  const scenarios = {
+    S: { id: 'S', name: 'Veyra', characterIds: ['CH1', 'CH2'], lorePieces: [], avatar: 'data:image/webp;base64,EEEE' },
+    S2: { id: 'S2', name: 'Plain', characterIds: [], lorePieces: [] },
+  };
+  const chats = {
+    C1: { id: 'C1', scenarioId: 'S', name: 'Chat one', createdAt: 1 },
+    C2: { id: 'C2', scenarioId: 'S2', characterIds: ['CH1'], name: 'Chat two', createdAt: 2 },
+    C3: { id: 'C3', scenarioId: 'S2', characterIds: ['CH2'], name: 'Chat three', createdAt: 3 },
+  };
+  const out = renderToStaticMarkup(html`
+    <${fp.Sidebar} scenarios=${scenarios} chats=${chats} characters=${characters}
+      selectedScenarioId=${null} selectedCharacterId=${null} selectedChatId=${null}
+      onSelectScenario=${noop} onSelectCharacter=${noop} onSelectChat=${noop}
+      onNewScenario=${noop} onEditScenario=${noop} onDeleteScenario=${noop} onNewChat=${noop}
+      onNewCharacter=${noop} onEditCharacter=${noop} onDeleteCharacter=${noop} onNewCharacterChat=${noop}
+      onExportScenario=${noop} onExportCharacter=${noop} onImport=${noop}
+      onOpenPersonas=${noop} onOpenSettings=${noop} collapsed=${false} onToggleCollapse=${noop}
+      onDeleteChat=${noop} sideCollapsed=${{ scenarios: false, characters: false, chats: false }}
+      onToggleSection=${noop} storageKind="local" saveRetrying=${false}
+      width=${300} onDragStart=${noop} onResetWidth=${noop} onChatAction=${noop} onChatContextMenu=${noop} />`);
+  // 4 thumbnails: scenario Veyra, character Mira, chat one (scenario's), chat
+  // two (Mira's). Plain / NoPic / Chat three have none — and no letter tiles.
+  const imgs = out.match(/<img[^>]*class="avatar/g) ?? [];
+  if (imgs.length !== 4) throw new Error(`expected 4 sidebar avatar thumbnails, got ${imgs.length}: ` + out);
+  if (out.includes('avatar-tile')) throw new Error('sidebar must not render letter tiles: ' + out);
+});
+
+// Avatar + Lightbox components (SSR smoke): button semantics only with an
+// onClick; the lightbox wraps the image in a modal with the caption under it.
+trial('avatar + lightbox render (SSR smoke)', () => {
+  const img = renderToStaticMarkup(html`<${fp.Avatar} name="Vex" src="data:image/webp;base64,AAAA" size=${40} onClick=${() => {}} />`);
+  if (!img.includes('<img') || !img.includes('role="button"')) throw new Error('clickable image avatar broken: ' + img);
+  const tile = renderToStaticMarkup(html`<${fp.Avatar} name="vex" size=${24} />`);
+  if (!tile.includes('avatar-tile') || !tile.includes('>V<') || tile.includes('role="button"'))
+    throw new Error('plain letter tile broken: ' + tile);
+  const lb = renderToStaticMarkup(html`<${fp.Lightbox} src="data:image/webp;base64,AAAA" title="Vex" onClose=${() => {}} />`);
+  if (!lb.includes('lightbox') || !lb.includes('<img') || !lb.includes('lb-cap')) throw new Error('lightbox broken: ' + lb);
+});
+
+// In-bubble swipe images (v4.10 phase 3): a pending entry shimmers, a failed
+// one collapses to a dim note (prompt on the tooltip), a finished one renders
+// <img class="swipe-img"> with the caption as alt — and an image-only swipe
+// (/image) renders no empty markdown block.
+trial('swipe images: pending / error / src / image-only render', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const imgNode = (id, images, text = 'Look at this.') => ({
+    id, parentId: null, role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text, createdAt: 1, modelId: 'm', images }],
+  });
+  const render = (n) => renderToStaticMarkup(html`
+    <${MessageItem} node=${n} isRoot=${false} personaName="Ari" characterNames=${[]}
+      streaming=${false} generating=${false} ...${cb} />`);
+  const pending = render(imgNode('im1', [{ pending: true, prompt: 'a red door', at: 1 }]));
+  if (!pending.includes('img-pending')) throw new Error('pending shimmer missing: ' + pending);
+  if (pending.includes('<img class="swipe-img"')) throw new Error('pending must not render an <img>: ' + pending);
+  const failed = render(imgNode('im2', [{ error: true, prompt: 'a red door', at: 1 }]));
+  if (!failed.includes('img-error') || !failed.includes('image unavailable'))
+    throw new Error('error note missing: ' + failed);
+  if (!failed.includes('title="a red door"')) throw new Error('error tooltip lost the prompt: ' + failed);
+  const done = render(imgNode('im3', [{ src: 'data:image/jpeg;base64,AAAA', prompt: 'a red door', caption: 'The door', at: 1 }]));
+  if (!done.includes('<img class="swipe-img"')) throw new Error('swipe image missing: ' + done);
+  if (!done.includes('alt="The door"')) throw new Error('caption alt missing: ' + done);
+  if (!done.includes('class="md"')) throw new Error('text + image should keep the markdown block: ' + done);
+  const only = render(imgNode('im4', [{ src: 'data:image/jpeg;base64,AAAA', prompt: 'a red door', at: 1 }], ''));
+  if (!only.includes('swipe-img')) throw new Error('image-only swipe lost its image: ' + only);
+  if (only.includes('class="md"')) throw new Error('image-only swipe rendered an empty markdown block: ' + only);
+  if (only.includes('img-swipes')) throw new Error('single take without regen must not render a take navigator: ' + only);
+});
+
+// Image takes (v4.10): takes of one placement share a `slot`; swipe.imgUsed
+// picks the shown take (default last, clamped). The slot renders ONCE — the
+// active take plus a ◀ n/m ▶⁺ navigator under it; ▶⁺ (only with regen
+// available) re-rolls just that image.
+trial('image takes: slot renders the active take once, with a take navigator', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const takeNode = (images, imgUsed) => ({
+    id: 'tk1', parentId: null, role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text: 'Look at this.', createdAt: 1, modelId: 'm', images, ...(imgUsed ? { imgUsed } : {}) }],
+  });
+  const render = (n, extra = {}) => renderToStaticMarkup(html`
+    <${MessageItem} node=${n} isRoot=${false} personaName="Ari" characterNames=${[]}
+      streaming=${false} generating=${false} ...${cb} ...${extra} />`);
+  // Everything after the img-swipes class marker — the message's own swipe
+  // navigator sits BEFORE the bubble, so this slice holds only the take nav.
+  const nav = (out) => out.includes('img-swipes') ? out.slice(out.indexOf('img-swipes')) : '';
+  const takes = [
+    { src: 'data:image/jpeg;base64,AAAA', prompt: 'a door', caption: 'take one', at: 1, slot: 's1' },
+    { src: 'data:image/jpeg;base64,BBBB', prompt: 'a door', caption: 'take two', at: 2, slot: 's1' },
+  ];
+  // imgUsed → take 0: exactly one <img class="swipe-img">, take 0's src, counter 1/2.
+  const a = render(takeNode(takes, { s1: 0 }));
+  if ((a.match(/class="swipe-img"/g) ?? []).length !== 1 || !a.includes('AAAA') || a.includes('BBBB'))
+    throw new Error('expected exactly the imgUsed take rendered once: ' + a);
+  if (!nav(a).includes('1/2')) throw new Error('take counter missing: ' + a);
+  if (nav(a).includes('⁺')) throw new Error('browsing-only nav must not offer regen: ' + a);
+  // Default = last take; out-of-range imgUsed clamps into range.
+  const d = render(takeNode(takes));
+  if (!d.includes('BBBB') || d.includes('AAAA') || !nav(d).includes('2/2'))
+    throw new Error('default active take should be the last: ' + d);
+  const c = render(takeNode(takes, { s1: 99 }));
+  if (!c.includes('BBBB') || !nav(c).includes('2/2')) throw new Error('imgUsed should clamp into range: ' + c);
+  // ▶⁺ appears on the LAST take only when regen is available.
+  const r = render(takeNode(takes), { imagesEnabled: true, onImgRegen: () => {}, onImgSwipe: () => {} });
+  if (!nav(r).includes('▶\uFE0E⁺')) throw new Error('last-take nav should offer ▶⁺ regen: ' + r);
+  const r0 = render(takeNode(takes, { s1: 0 }), { imagesEnabled: true, onImgRegen: () => {}, onImgSwipe: () => {} });
+  if (nav(r0).includes('⁺')) throw new Error('mid-takes nav must show plain ▶, not ▶⁺: ' + r0);
+  // A single take with regen available still gets the nav row (the ▶⁺ entry).
+  const one = render(takeNode([{ src: 'data:image/jpeg;base64,CCCC', prompt: 'a door', at: 1, slot: 's9' }]),
+    { imagesEnabled: true, onImgRegen: () => {}, onImgSwipe: () => {} });
+  if (!nav(one).includes('1/1') || !nav(one).includes('▶\uFE0E⁺'))
+    throw new Error('single-take regen nav missing: ' + one);
+});
+
+// Model-attached images (v4.10 phase 4): the generate_image tool call is
+// recorded on the swipe (⚙ pill) alongside the pending shimmer the moment
+// generation ends — the runGeneration finally stamps both in one batch.
+trial('image tool call: gear pill + pending shimmer on a text-empty swipe', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const n = { id: 'im5', parentId: null, role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text: '', createdAt: 1, modelId: 'm', speaker: 'Narrator',
+      toolCalls: [{ name: 'generate_image', ok: true, note: 'queued', args: '{"prompt":"a red door"}' }],
+      images: [{ pending: true, prompt: 'a red door', caption: '', at: 1 }] }] };
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${n} isRoot=${false} personaName="Ari" characterNames=${[]}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (!out.includes('tools-toggle')) throw new Error('gear pill missing: ' + out);
+  if (!out.includes('img-pending')) throw new Error('pending shimmer missing: ' + out);
+  if (out.includes('class="md"')) throw new Error('text-empty image swipe rendered a markdown block: ' + out);
+});
+
+// A swipe whose text is all whitespace (a multi-tool reply stored before the
+// generation-side trim — the newlines BETWEEN stripped blocks survived) must
+// not render an empty bubble: the shell is skipped, the meta row's gear pill
+// stays as the record of what happened.
+trial('whitespace-only swipe: no bubble, gear pill remains', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const n = { id: 'ws1', parentId: null, role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text: '\n\n', createdAt: 1, modelId: 'm', speaker: 'Narrator',
+      toolCalls: [{ name: 'add_lore', ok: true, note: '', args: '{}' }] }] };
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${n} isRoot=${false} personaName="Ari" characterNames=${[]}
+      streaming=${false} generating=${false} ...${cb} />`);
+  if (out.includes('class="bubble')) throw new Error('whitespace-only swipe rendered a bubble: ' + out);
+  if (out.includes('class="md"')) throw new Error('whitespace-only swipe rendered a markdown block: ' + out);
+  if (!out.includes('tools-toggle')) throw new Error('gear pill missing on a whitespace-only tool swipe: ' + out);
+});
+
+// Positional images (v4.10): a swipe image entry's `pos` (offset in the
+// stripped text where its generate_image block began) drives placement —
+// attached INSIDE the bubble at its head/end, embedded only genuinely
+// mid-text, free-standing solely between speaker segments or on an
+// image-only swipe. Swiping swaps the shown image by construction: images
+// live on the swipe, and MessageItem renders node.swipes[activeSwipe].
+trial('positional images: multi-segment, single end, mid-text embed, swipe switch', () => {
+  const cb = { onEdit: () => {}, onRegenerate: () => {}, onSwipe: () => {},
+    onBranch: () => {}, onRewind: () => {}, onDelete: () => {}, onReply: () => {} };
+  const imgNode = (id, images, text, over = {}) => ({
+    id, parentId: null, role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text, createdAt: 1, modelId: 'm', images }], ...over,
+  });
+  const render = (n, names = []) => renderToStaticMarkup(html`
+    <${MessageItem} node=${n} isRoot=${false} personaName="Ari" characterNames=${names}
+      streaming=${false} generating=${false} ...${cb} />`);
+
+  // (a) multi-segment: pos in the gap between Narrator and Miku → the image
+  // renders FREE-STANDING between the two segment bubbles, no image bubble.
+  const segText = 'Narrator: *The door creaks open.*\n\nMiku: "Come in."';
+  const gapPos = 'Narrator: *The door creaks open.*\n'.length; // where the block sat
+  const a = render(imgNode('pa1', [{ src: 'data:image/jpeg;base64,AAAA', prompt: 'a door', at: 1, pos: gapPos }], segText), ['Miku']);
+  if (!a.includes('msg-img-free')) throw new Error('multi-segment image not free-standing: ' + a);
+  if ((a.match(/class="bubble/g) ?? []).length !== 2) throw new Error('expected exactly the 2 segment bubbles: ' + a);
+  if (!(a.indexOf('The door creaks open.') < a.indexOf('swipe-img') && a.indexOf('swipe-img') < a.indexOf('Come in')))
+    throw new Error('image not rendered between the two segment bubbles: ' + a);
+
+  // (b) single bubble, pos at the visible end → attached INSIDE the bubble at
+  // its end (a trailing image reads as part of the reply, never free-standing).
+  const b = render(imgNode('pb1', [{ src: 'data:image/jpeg;base64,BBBB', prompt: 'a door', at: 1, pos: 13 }], 'Look at this.'));
+  if (b.includes('msg-img-free')) throw new Error('end-pos image should ride inside the bubble: ' + b);
+  if ((b.match(/class="bubble/g) ?? []).length !== 1) throw new Error('expected exactly one bubble: ' + b);
+  if (!(b.indexOf('class="bubble') < b.indexOf('Look at this.') && b.indexOf('Look at this.') < b.indexOf('swipe-img')))
+    throw new Error('end-pos image should follow the text inside the bubble: ' + b);
+  if ((b.match(/class="md"/g) ?? []).length !== 1) throw new Error('end-pos image split the markdown: ' + b);
+
+  // (b2) pos at the very start → attached at the head of the same bubble.
+  const b2 = render(imgNode('pb2', [{ src: 'data:image/jpeg;base64,BBBB', prompt: 'a door', at: 1, pos: 0 }], 'Look at this.'));
+  if (b2.includes('msg-img-free')) throw new Error('head-pos image should ride inside the bubble: ' + b2);
+  if (!(b2.indexOf('class="bubble') < b2.indexOf('swipe-img') && b2.indexOf('swipe-img') < b2.indexOf('Look at this.')))
+    throw new Error('head-pos image should precede the text inside the bubble: ' + b2);
+
+  // (c) single bubble, genuinely mid-text → embedded: two markdown blocks
+  // with the image between them, inside the one bubble.
+  const c = render(imgNode('pc1', [{ src: 'data:image/jpeg;base64,CCCC', prompt: 'a door', at: 1, pos: 18 }], 'Before the image.\n\nAfter the image.'));
+  if (c.includes('msg-img-free')) throw new Error('mid-text image must embed, not free-stand: ' + c);
+  if ((c.match(/class="bubble/g) ?? []).length !== 1) throw new Error('expected one bubble: ' + c);
+  if ((c.match(/class="md"/g) ?? []).length !== 2) throw new Error('embed should split the markdown in two: ' + c);
+  if (!(c.indexOf('class="bubble') < c.indexOf('swipe-img'))) throw new Error('embedded image must sit inside the bubble: ' + c);
+  if (!(c.indexOf('Before the image') < c.indexOf('swipe-img') && c.indexOf('swipe-img') < c.indexOf('After the image')))
+    throw new Error('embedded image not between the text halves: ' + c);
+
+  // (d) images live on the swipe: activeSwipe=1 shows that swipe's image.
+  const dNode = { id: 'pd1', parentId: null, role: 'assistant', activeSwipe: 1, edited: false,
+    swipes: [
+      { text: 'take one', createdAt: 1, modelId: 'm', images: [{ src: 'data:image/jpeg;base64,AAAA', prompt: 'p1', at: 1 }] },
+      { text: 'take two', createdAt: 2, modelId: 'm', images: [{ src: 'data:image/jpeg;base64,DDDD', prompt: 'p2', at: 2, pos: 8 }] },
+    ] };
+  const d = render(dNode);
+  if (!d.includes('DDDD') || d.includes('AAAA')) throw new Error('activeSwipe=1 should show swipe 1 image only: ' + d);
+  const d0 = render({ ...dNode, activeSwipe: 0 });
+  if (!d0.includes('AAAA') || d0.includes('DDDD')) throw new Error('activeSwipe=0 should show swipe 0 image only: ' + d0);
+});
+
+// ComfyUI backend: workflow substitution + history polling are pure core.
+trial('comfy: substituteComfyWorkflow — placeholders, seed rule, purity', () => {
+  const graph = {
+    '3': { class_type: 'KSampler', inputs: { seed: 1234, steps: 20, noise_seed: 42,
+      positive: ['6', 0] } },
+    '5': { class_type: 'EmptyLatentImage', inputs: { width: '{{width}}', height: '{{height}}', batch_size: 1 } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}, cinematic' } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: '{{negative}}' } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'fp_{{seed}}' } },
+  };
+  const out = fp.substituteComfyWorkflow(graph, { prompt: 'a fox', negative: 'blurry', width: 832, height: 1216, seed: 777 });
+  // placeholders in strings substitute
+  if (out['6'].inputs.text !== 'a fox, cinematic') throw new Error('prompt placeholder: ' + out['6'].inputs.text);
+  if (out['7'].inputs.text !== 'blurry') throw new Error('negative placeholder: ' + out['7'].inputs.text);
+  if (out['5'].inputs.width !== '832' || out['5'].inputs.height !== '1216') throw new Error('size placeholders: ' + JSON.stringify(out['5'].inputs));
+  if (out['9'].inputs.filename_prefix !== 'fp_777') throw new Error('seed placeholder: ' + out['9'].inputs.filename_prefix);
+  // numeric seed/noise_seed keys randomize to the SAME seed as {{seed}}
+  if (out['3'].inputs.seed !== 777 || out['3'].inputs.noise_seed !== 777)
+    throw new Error('numeric seed keys not randomized: ' + JSON.stringify(out['3'].inputs));
+  // other numbers and non-string structures pass through untouched
+  if (out['3'].inputs.steps !== 20 || out['5'].inputs.batch_size !== 1) throw new Error('non-seed numbers touched');
+  if (JSON.stringify(out['3'].inputs.positive) !== '["6",0]') throw new Error('array link mangled');
+  // pure: the source graph is unmutated
+  if (graph['3'].inputs.seed !== 1234 || graph['6'].inputs.text !== '{{prompt}}, cinematic')
+    throw new Error('source graph mutated');
+  // absent seed → random per call (regen must differ)
+  const r1 = fp.substituteComfyWorkflow(graph, { prompt: 'a fox' });
+  const r2 = fp.substituteComfyWorkflow(graph, { prompt: 'a fox' });
+  if (!Number.isInteger(r1['3'].inputs.seed) || r1['3'].inputs.seed === 1234) throw new Error('seed not randomized');
+  if (r1['3'].inputs.seed === r2['3'].inputs.seed && r1['9'].inputs.filename_prefix === r2['9'].inputs.filename_prefix)
+    throw new Error('two renders drew the same seed (astronomically unlikely, or rng broken)');
+  if (fp.comfyRandomSeed(() => 0.999999) !== Math.floor(0.999999 * 2 ** 32)) throw new Error('comfyRandomSeed rng not honored');
+});
+
+trial('comfy: parseImageSize', () => {
+  const { parseImageSize } = fp;
+  const a = parseImageSize('832x1216');
+  if (a.width !== 832 || a.height !== 1216) throw new Error('basic parse: ' + JSON.stringify(a));
+  const b = parseImageSize(' 768 X 768 ');
+  if (b.width !== 768 || b.height !== 768) throw new Error('whitespace/case parse: ' + JSON.stringify(b));
+  for (const junk of ['', null, 'large', '1024', 'x1024', '1024x']) {
+    const d = parseImageSize(junk);
+    if (d.width !== 1024 || d.height !== 1024) throw new Error(`junk ${JSON.stringify(junk)} should fall back to 1024²: ` + JSON.stringify(d));
+  }
+});
+
+trial('comfy: comfyHistoryResult — pending, error, success, keying', () => {
+  const { comfyHistoryResult } = fp;
+  // queued/running: empty history → not done
+  if (comfyHistoryResult({}, 'p1').done) throw new Error('empty history should be pending');
+  // error status surfaces the message payload
+  const err = comfyHistoryResult({ p1: { status: { status_str: 'error', completed: false,
+    messages: [['execution_error', { node_id: '3' }, 'KSampler blew up']] } } }, 'p1');
+  if (!err.done || !err.error?.includes('KSampler blew up')) throw new Error('error status: ' + JSON.stringify(err));
+  // success: first output image across node outputs wins
+  const ok = comfyHistoryResult({ p1: { status: { status_str: 'success', completed: true },
+    outputs: { '5': { images: [] }, '9': { images: [{ filename: 'fp_00001_.png', subfolder: '', type: 'output' }] } } } }, 'p1');
+  if (!ok.done || ok.error || ok.image?.filename !== 'fp_00001_.png') throw new Error('success pick: ' + JSON.stringify(ok));
+  // completed:true without status_str also counts
+  if (!comfyHistoryResult({ p1: { status: { completed: true }, outputs: { '9': { images: [{ filename: 'x.png' }] } } } }, 'p1').done)
+    throw new Error('completed flag not honored');
+  // done but no image anywhere → explicit error
+  const none = comfyHistoryResult({ p1: { status: { status_str: 'success', completed: true }, outputs: {} } }, 'p1');
+  if (!none.done || !none.error) throw new Error('no-image run should error');
+  // multi-record history is keyed by prompt_id
+  const multi = comfyHistoryResult({
+    other: { status: { status_str: 'success', completed: true }, outputs: { '9': { images: [{ filename: 'wrong.png' }] } } },
+    mine: { status: { status_str: 'success', completed: true }, outputs: { '9': { images: [{ filename: 'right.png' }] } } },
+  }, 'mine');
+  if (multi.image?.filename !== 'right.png') throw new Error('prompt_id keying: ' + JSON.stringify(multi));
+  // unknown prompt_id falls back to the first record (older servers)
+  if (comfyHistoryResult({ only: { status: { status_str: 'success', completed: true },
+    outputs: { '9': { images: [{ filename: 'only.png' }] } } } }, 'nope').image?.filename !== 'only.png')
+    throw new Error('unkeyed fallback broken');
 });
 
 // RP prose formatting: quote pairing must survive inch marks, contractions,
@@ -764,6 +1186,32 @@ trial('effectiveEndpoint rewriting', () => {
   if (fp.effectiveEndpoint(s({}), false) !== 'http://llm.local:8080') throw new Error('server inactive → raw despite toggle');
   if (fp.effectiveEndpoint(s({ endpoint: '/proxy/http://x' }), true) !== '/proxy/http://x') throw new Error('already /proxy/ unchanged (no double-proxy)');
   if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
+});
+
+// roleConn: per-role endpoint/key overrides, per-field inheritance, chains.
+trial('roleConn: per-field inheritance + role chains', () => {
+  const base = { endpoint: 'http://main:8080', apiKey: 'MAIN' };
+  // no overrides → main, with or without roles
+  for (const roles of [[], ['aux'], ['gen', 'aux'], ['image']]) {
+    const c = fp.roleConn(base, ...roles);
+    if (c.endpoint !== 'http://main:8080' || c.apiKey !== 'MAIN') throw new Error(`blank should inherit main: ${JSON.stringify(c)}`);
+  }
+  // endpoint-only override inherits the key (the old image-connection rule)
+  const img = fp.roleConn({ ...base, imageEndpoint: 'http://img:8188' }, 'image');
+  if (img.endpoint !== 'http://img:8188' || img.apiKey !== 'MAIN') throw new Error('endpoint-only override: ' + JSON.stringify(img));
+  // key-only override keeps the main endpoint
+  const keyOnly = fp.roleConn({ ...base, auxApiKey: 'AUXKEY' }, 'aux');
+  if (keyOnly.endpoint !== 'http://main:8080' || keyOnly.apiKey !== 'AUXKEY') throw new Error('key-only override: ' + JSON.stringify(keyOnly));
+  // generator chain: gen set wins; blank gen falls through to aux; blank both → main
+  const genWins = fp.roleConn({ ...base, genEndpoint: 'http://gen:1', auxEndpoint: 'http://aux:2', genApiKey: 'G', auxApiKey: 'A' }, 'gen', 'aux');
+  if (genWins.endpoint !== 'http://gen:1' || genWins.apiKey !== 'G') throw new Error('gen should win: ' + JSON.stringify(genWins));
+  const genFalls = fp.roleConn({ ...base, auxEndpoint: 'http://aux:2', auxApiKey: 'A' }, 'gen', 'aux');
+  if (genFalls.endpoint !== 'http://aux:2' || genFalls.apiKey !== 'A') throw new Error('gen should fall to aux: ' + JSON.stringify(genFalls));
+  const auxDirect = fp.roleConn({ ...base, genEndpoint: 'http://gen:1' }, 'aux');
+  if (auxDirect.endpoint !== 'http://main:8080') throw new Error('aux must not see gen overrides: ' + JSON.stringify(auxDirect));
+  // whitespace-only counts as blank
+  const ws = fp.roleConn({ ...base, auxEndpoint: '   ' }, 'aux');
+  if (ws.endpoint !== 'http://main:8080') throw new Error('whitespace override should inherit');
 });
 
 // ---- BranchPanel (outline): the condensed view tracks the live tree ----

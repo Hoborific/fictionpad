@@ -67,6 +67,7 @@ function ContextMenu({ x, y, items, onClose }) {
       ${items.map((it, i) => it === '-'
         ? html`<div key=${i} class="ctx-sep" />`
         : html`<button key=${i} class="ctx-item ${it.danger ? 'danger' : ''}" disabled=${!!it.disabled}
+            title=${it.title ?? null}
             onClick=${() => { if (it.disabled) return; onClose(); it.fn(); }}>${it.label}</button>`)}
     </div>`;
 }

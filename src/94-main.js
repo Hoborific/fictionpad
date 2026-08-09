@@ -48,6 +48,9 @@ function buildPlatformPrompt(st) {
     st.platformPrompt,
     ...(st.multiSpeaker !== false ? [(st.speakerPrompt ?? '').trim() || SPEAKER_PROMPT] : []),
     ...(st.toolsEnabled !== false ? [(st.toolsPrompt ?? '').trim() || TOOLS_PROMPT] : []),
+    // generate_image rides the tool-call machinery (same parse/strip pass), so
+    // a tools-disabled chat never advertises it — and never parses it either.
+    ...(st.toolsEnabled !== false && st.imagesEnabled ? [(st.imagePrompt ?? '').trim() || DEFAULT_IMAGE_PROMPT] : []),
   ].filter(s => s?.trim()).join('\n\n');
 }
 
@@ -59,6 +62,14 @@ const PANE_MIN = 200, PANE_MAX_VW = 0.5, PANE_AUTO_MAX = 640, PANE_GAP = 16, PAN
 function Main({ storage, storageKind, storageFailed }) {
   // Request-time endpoint rewrite ("route via server") — never persisted.
   const effEp = (st) => effectiveEndpoint(st, storageKind === 'server');
+  // Resolve a connection-role chain ('gen','aux' / 'aux' / 'embed' / 'image')
+  // to a ready-to-call { endpoint, apiKey }: roleConn picks the per-role
+  // override (blank fields inherit), effEp applies the route-via-server
+  // rewrite. roleApi(st) with no roles = the main connection.
+  const roleApi = (st, ...roles) => {
+    const c = roleConn(st, ...roles);
+    return { endpoint: effEp({ ...st, endpoint: c.endpoint }), apiKey: c.apiKey };
+  };
   const [scenarios, upsertScenario, removeScenario] = useStoredMap(storage, 'Scenarios');
   const [personas, upsertPersona, removePersona] = useStoredMap(storage, 'Personas');
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
@@ -119,6 +130,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
+  const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort }
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
@@ -158,7 +170,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function runGen(kind, promptText, draft) {
     const st = ref.current.settings;
     const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
-    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const conn = roleApi(st, 'gen', 'aux'); // the connection chain mirrors the model chain
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const isScenario = kind === 'scenario';
     // The RP length preset otherwise only reaches the chat assembler — aux
     // calls never see it, so pass the directive through as prose guidance
@@ -172,7 +185,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ? (({ type, title, content, keys, pinned }) => ({ type, title, content, keys, pinned }))(draft)
         : { name: draft.name, content: draft.content, keys: draft.keys, greeting: draft.greeting });
     const out = await auxLogged('generate', {
-      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: isScenario
         ? st.scenarioGenPrompt || DEFAULT_SCENARIO_GEN_PROMPT
         : kind === 'piece'
@@ -193,6 +206,45 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!obj) throw new Error('The model did not return valid JSON — try again or rephrase the request.');
     return isScenario ? sanitizeScenarioGen(obj) : kind === 'piece' ? sanitizePieceGen(obj) : sanitizeCharacterGen(obj);
   }
+
+  // ✦ avatar generation (the avatar field in the character/scenario/persona
+  // editors): step 1 condenses the card into a portrait prompt on the
+  // generator model chain — a 'generate' aux call, so Stop aborts it like any
+  // aux call; step 2 renders that prompt on the image connection (imgCtls —
+  // never blocks the composer). AvatarField passes the live draft's name +
+  // card at click time; errors rethrow to the caller.
+  async function generateAvatarFor({ name, content }) {
+    const st = ref.current.settings;
+    const model = st.genModel || st.auxModel || st.model; // generator override → aux → chat
+    const conn = roleApi(st, 'gen', 'aux');
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const prompt = (await auxLogged('generate', {
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
+      system: (st.avatarGenPrompt ?? '').trim() || DEFAULT_AVATAR_GEN_PROMPT,
+      user: `Name: ${name}\n\n${content}`,
+      maxTokens: st.genMaxTokens ?? 300, temperature: st.genTemp ?? 0.7,
+    })).trim();
+    const img = roleApi(st, 'image');
+    const ctl = new AbortController();
+    imgCtls.current.add(ctl);
+    try {
+      return await generateImage({
+        endpoint: img.endpoint, // image connection falls back to the main one
+        apiKey: img.apiKey, serverToken: st.serverToken,
+        model: st.imageModel, prompt, size: st.imageSize, prefix: st.imagePrefix,
+        backend: st.imageBackend, workflow: st.imageWorkflow, negative: st.imageNegative, signal: ctl.signal });
+    } finally {
+      imgCtls.current.delete(ctl);
+    }
+  }
+
+  // The thunk the editors get — Main passes it only while image generation is
+  // on, so the ✦ button stays hidden otherwise. Errors surface via the global
+  // banner; AvatarField catches the rethrow and just clears its busy state.
+  const generateAvatar = async (vals) => {
+    try { return await generateAvatarFor(vals); }
+    catch (e) { setError(describeApiError(e)); throw e; }
+  };
 
   // Always-fresh refs for async generation loops (avoid stale closures).
   const ref = useRef({});
@@ -273,6 +325,38 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterColors = useMemo(() => Object.fromEntries(
     Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
       .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
+  // Avatar images: every global character card with one set, keyed by
+  // lowercase name, then the active chat's character-type lore pieces
+  // (tool-registered characters — chat pieces WIN a name collision), and
+  // finally the active chat's persona. Each entry is
+  // { src, full } — the 256² thumb for the column/chips, the uncropped ≤1024
+  // companion (avatarFull || avatar) for the click-to-expand lightbox. Same
+  // identity-stability care as characterColors (MessageItem's memo compares
+  // props by identity).
+  const characterAvatars = useMemo(() => {
+    const map = Object.fromEntries(
+      Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim())
+        .map(c => [c.name.trim().toLowerCase(), { src: c.avatar, full: c.avatarFull || c.avatar }]));
+    // Deliberately NOT scoped by pieceVisibleAt: a same-name piece on a
+    // hidden branch leaking its avatar is the only bleed vector, and such
+    // cross-branch name collisions are vanishingly rare.
+    for (const p of chat?.lorePieces ?? []) {
+      if (p?.type === 'character' && p.avatar && (p.title ?? '').trim())
+        map[p.title.trim().toLowerCase()] = { src: p.avatar, full: p.avatarFull || p.avatar };
+    }
+    if (persona?.avatar && persona.name?.trim())
+      map[persona.name.trim().toLowerCase()] = { src: persona.avatar, full: persona.avatarFull || persona.avatar };
+    return map;
+  }, [characters, chat?.lorePieces, persona]);
+  // The avatar column shows only when something this chat can speak as has an
+  // image: a linked character (scenario ∪ chat links), a chat-overlay
+  // character piece, or the active persona.
+  const chatHasAvatars = useMemo(() => {
+    if (persona?.avatar) return true;
+    if ((chat?.lorePieces ?? []).some(p => p?.type === 'character' && p.avatar)) return true;
+    return [...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]
+      .some(id => characters?.[id]?.avatar);
+  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
@@ -497,7 +581,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function generateMemory(chatObj, messageCount = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) throw new Error('Configure an endpoint and model in Settings first.');
     const every = st.memoryEvery ?? MEMORY_EVERY;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
@@ -511,7 +596,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const prior = priorTexts.length
       ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
     const out = await auxLogged('memory', {
-      endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+      endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
       user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
       maxTokens: st.memoryMaxTokens ?? 400, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
@@ -564,7 +649,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
     const scen = sc[chatObj.scenarioId];
     const mode = scen?.emergentLore ?? 'queue';
-    if (mode === 'off' || !st.endpoint) return;
+    const conn = roleApi(st, 'aux');
+    if (mode === 'off' || !conn.endpoint) return;
     const model = st.auxModel || st.model;
     if (!model) return;
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
@@ -587,7 +673,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
     try {
       const out = await auxLogged('lore-extract', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
           .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 3))),
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
@@ -676,6 +762,135 @@ function Main({ storage, storageKind, storageFailed }) {
     }));
   }
 
+  // ---- avatar enrichment (settings.toolsEnrich + settings.imagesEnabled) ----
+  // Companion to maybeEnrichCharacters: a newly tool-registered character also
+  // gets a portrait, rendered from its registered card (the enrichment text
+  // pass races this one — whichever content the piece holds at fire time is
+  // fine). Same filter, same fire-and-forget concurrency, same silent
+  // degradation. No rollback stamps needed: the piece's own createdBy scope
+  // already hides it on other branches, and regenerate-prune removes the
+  // piece (the write then drops via the merge-on-write guard).
+  async function maybeEnrichAvatars(chatObj, nodeId, toolResults) {
+    const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
+      && String(r.note ?? '').startsWith('registered character'));
+    await Promise.all(fresh.map(async (r) => {
+      const name = String(r.args?.name ?? '').trim();
+      if (!name) return;
+      const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
+        && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
+      if (!piece || piece.avatar) return; // rewound/pruned meanwhile, or already has one
+      try {
+        const src = await generateAvatarFor({ name: piece.title, content: piece.content });
+        const thumb = downscaleImageToDataURL(await loadImage(src), 256);
+        // Merge-on-write: re-read at save time; drop the write if the chat or
+        // piece vanished (rewind, delete, regenerate-prune) or the piece
+        // already has an avatar (the user beat us to it) in between.
+        const cur = ref.current.chats[chatObj.id];
+        const live = (cur?.lorePieces ?? []).find(p => p.id === piece.id);
+        if (!live || live.avatar) return;
+        const next = { ...cur, lorePieces: cur.lorePieces.map(p =>
+          p.id === piece.id ? { ...p, avatar: thumb, avatarFull: src } : p) };
+        // touch:false — a background lore write shouldn't re-sort the sidebar
+        // (saveChat syncs ref.current.chats itself; see maybeEnrichCharacters).
+        saveChat(next, { touch: false });
+      } catch (e) { console.warn(`Avatar enrichment failed for "${name}":`, e); }
+    }));
+  }
+
+  // ---- image generation (/image command, v4.10 phase 3) ----
+  // One job fills one swipe's pending images entry, merge-on-write: the chat,
+  // node or swipe may have vanished (rewind, delete, regenerate) while the
+  // backend worked — then the write is dropped. Errors land on the entry as
+  // { error: true } (same shape healImageEntry produces for reload debris) —
+  // the bubble's failure note is the feedback, no banner.
+  // The pending entry is matched by `slot` (its placement id): two jobs on
+  // DIFFERENT slots of the same swipe may run concurrently and must not
+  // cross-patch.
+  async function runImageJob(chatId, nodeId, swipeIdx, { prompt, caption = '', slot }) {
+    const st = ref.current.settings;
+    const { endpoint: ep, apiKey: key } = roleApi(st, 'image');
+    const ctl = new AbortController();
+    imgCtls.current.add(ctl);
+    // patch: rebuild the chat with the pending entry at (nodeId, swipeIdx)
+    // replaced by `entry`; returns false when the target vanished.
+    const patch = (makeEntry) => {
+      const cur = ref.current.chats[chatId];
+      const node = cur?.messages?.[nodeId];
+      const swipe = node?.swipes?.[swipeIdx];
+      const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
+      if (!cur || !node || !swipe || !entry) return false;
+      const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
+      const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
+      saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
+      return true;
+    };
+    try {
+      const src = await generateImage({ endpoint: ep, apiKey: key, serverToken: st.serverToken,
+        model: st.imageModel, prompt, size: st.imageSize, prefix: st.imagePrefix,
+        backend: st.imageBackend, workflow: st.imageWorkflow, negative: st.imageNegative, signal: ctl.signal });
+      // keep the original `at` — and `pos` (where the model placed the block)
+      patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
+        ...(entry.pos !== undefined ? { pos: entry.pos } : {}) }));
+    } catch (e) {
+      console.warn(describeApiError(e));
+      patch((entry) => {
+        const out = {};
+        for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (entry[k] !== undefined) out[k] = entry[k];
+        out.error = true;
+        return out;
+      });
+    } finally {
+      imgCtls.current.delete(ctl);
+    }
+  }
+
+  // ▶⁺ on an image slot: re-roll JUST that image — same prompt (the slot's
+  // first take is the base; prompt/caption/pos are identical across takes), a
+  // new pending take appended. The reply text and message swipes are
+  // untouched. Refuses while any take of the slot is still pending.
+  function regenImage(chatId, nodeId, swipeIdx, slot) {
+    const st = ref.current.settings;
+    if (!st.imagesEnabled) return;
+    const c = ref.current.chats[chatId];
+    // Mid-stream the generation's commit() owns this chat's messages — the
+    // write would be clobbered (same rule as onSwipe).
+    if (!c || generating?.chatId === c.id) return;
+    const node = c?.messages?.[nodeId];
+    const swipe = node?.swipes?.[swipeIdx];
+    const g = Array.isArray(swipe?.images)
+      ? groupImageSlots(swipe.images, swipe.imgUsed).find(g => g.slot === slot) : null;
+    if (!g || g.takes.some(t => t?.pending)) return;
+    const { prompt, caption = '', pos } = g.takes[0] ?? {};
+    if (!prompt) return;
+    // Point imgUsed at the new take NOW: the shimmer shows immediately, and
+    // the job patches the entry in place, so the index stays correct.
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...node,
+      swipes: node.swipes.map((s, i) => i !== swipeIdx ? s : { ...s,
+        images: [...s.images, { pending: true, slot, prompt, caption, at: Date.now(),
+          ...(pos !== undefined ? { pos } : {}) }],
+        imgUsed: { ...(s.imgUsed ?? {}), [slot]: g.takes.length } }) } } }, { touch: false });
+    runImageJob(chatId, nodeId, swipeIdx, { prompt, caption, slot }).catch(() => {}); // handles its own errors
+  }
+
+  // ◀ ▶ on an image slot: pick another take of the placement. Pure state
+  // update on the ACTIVE swipe — touch:false, browsing takes changes no world
+  // state (same rule as message swipes).
+  function swipeImage(chatId, nodeId, slot, dir) {
+    const c = ref.current.chats[chatId];
+    if (!c || generating?.chatId === c.id) return; // mid-stream commit() owns this chat
+    const node = c?.messages?.[nodeId];
+    const swipeIdx = node?.activeSwipe;
+    const swipe = node?.swipes?.[swipeIdx];
+    if (!Array.isArray(swipe?.images)) return;
+    const g = groupImageSlots(swipe.images, swipe.imgUsed).find(g => g.slot === slot);
+    if (!g) return;
+    const next = Math.min(Math.max(g.activeIdx + dir, 0), g.takes.length - 1);
+    if (next === g.activeIdx) return;
+    saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...node,
+      swipes: node.swipes.map((s, i) => i !== swipeIdx ? s : { ...s,
+        imgUsed: { ...(s.imgUsed ?? {}), [slot]: next } }) } } }, { touch: false });
+  }
+
   // ---- generation ----
   async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
@@ -757,16 +972,17 @@ function Main({ storage, storageKind, storageFailed }) {
       if (queryText.trim()) {
         // One query embedding serves both the lore and the memory pass; each
         // pass degrades independently (keyword-only lore / recency memories).
+        const emb = roleApi(st, 'embed');
         let queryVec = null;
         const queryVecOf = async () => {
-          if (!queryVec) [queryVec] = await embed({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
+          if (!queryVec) [queryVec] = await embed({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel, inputs: [queryText], signal: abort.signal });
           return queryVec;
         };
         if (smartPieces.length) {
           try {
             const qv = await queryVecOf();
             const vecs = await Promise.all(smartPieces.map(p =>
-              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+              embedCached({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
                 text: `${p.title ?? ''}\n${(p.content ?? '').slice(0, 500)}`, signal: abort.signal })));
             preActivated = new Set();
             semanticReport = { threshold: semThreshold, scores: [] };
@@ -784,7 +1000,7 @@ function Main({ storage, storageKind, storageFailed }) {
           try {
             const qv = await queryVecOf();
             const vecs = await Promise.all(recallMems.map(m =>
-              embedCached({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
+              embedCached({ endpoint: emb.endpoint, apiKey: emb.apiKey, serverToken: st.serverToken, model: st.embeddingModel,
                 text: m.text.slice(0, 500), signal: abort.signal })));
             memScores = new Map();
             for (let i = 0; i < recallMems.length; i++) memScores.set(recallMems[i].id, cosine(qv, vecs[i]));
@@ -1011,6 +1227,9 @@ function Main({ storage, storageKind, storageFailed }) {
       // onto the stripped display text (attachProbs).
       let toolResults = null;
       let toolCallsRan = false;
+      // Set once a parsed generate_image call is accepted: { prompt, caption,
+      // raw } until the pending entry is stamped, then { prompt, caption, swipeIdx }.
+      let imageQueued = null;
       // All late writes funnel through commit(): the mutation is applied to a
       // merge of the CURRENT stored chat with the generation-owned message
       // tree, and the whole write is skipped when the chat was deleted
@@ -1049,27 +1268,102 @@ function Main({ storage, storageKind, storageFailed }) {
           // discard it — attachProbs falls back to plain alignment.
           if (probMap.text !== parsed.text) { probMap = null; rawAcc = null; }
           acc = baseText + parsed.text;
-          if (parsed.text) applyText(acc);
+          // Blocks leave their surrounding newlines: a reply of ONLY blocks
+          // strips to pure whitespace, which IS the empty case — collapse it
+          // so the toolOnly/discard/image-only decisions below see '' exactly.
+          if (!acc.trim()) acc = '';
+          if (parsed.text || !acc) applyText(acc);
         }
         if (parsed.calls.length) {
           toolCallsRan = true;
           const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
-          commit((c) => {
-            const applied = applyToolCalls(c, parsed.calls, {
+          // generate_image calls ride the tool machinery (a tools-disabled
+          // chat never advertises or parses them) but execute on the image
+          // pipeline, not the lore overlay — split them off before
+          // applyToolCalls. Their results join the same list that feeds
+          // man.toolCalls + the swipe's toolCalls stamp, so a refused call
+          // (disabled, prompt-less, over cap) surfaces in the ⚙ pill instead
+          // of silently vanishing.
+          const { imageCalls, loreCalls } = splitImageCalls(parsed.calls);
+          const imageToolsOn = st.toolsEnabled !== false && st.imagesEnabled;
+          const imageResults = imageCalls.map((call, i) => {
+            const prompt = String(call.args?.prompt ?? '').trim();
+            if (!imageToolsOn) return { name: call.name, args: call.args, ok: false, note: 'image generation disabled' };
+            if (i >= IMAGE_CALL_CAP) return { name: call.name, args: call.args, ok: false, note: 'call cap reached' };
+            if (!prompt) return { name: call.name, args: call.args, ok: false, note: 'missing prompt' };
+            imageQueued = { prompt, caption: String(call.args.caption ?? '').slice(0, 200), raw: call.raw, slot: uid() };
+            return { name: call.name, args: call.args, ok: true, note: 'queued' };
+          });
+          let loreResults = [];
+          if (loreCalls.length) commit((c) => {
+            const applied = applyToolCalls(c, loreCalls, {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
               atLen: getActivePath(c.messages, nodeId).length,
             }, mergedLorePieces(scen, c, gchars));
-            toolResults = applied.results;
+            loreResults = applied.results;
             return applied.chat;
           });
-          if (toolResults) {
+          toolResults = [...loreResults, ...imageResults];
+          if (imageQueued) {
+            // Stamp the pending image entry NOW, in the same commit batch as
+            // the tool results, so the shimmer is visible the moment
+            // generation ends. Race-free vs the final swipe stamp below: that
+            // stamp spreads swipes[activeSwipe] (it can only add
+            // speaker/genMs/toolCalls), so the images array survives; and
+            // commit() ref-syncs, so no later same-finally read rebuilds from
+            // the pre-image snapshot. For an image-only reply (text '') this
+            // is also the write that keeps the swipe from being discarded.
+            const { prompt, caption, slot } = imageQueued;
+            // pos: the offset in the stripped display text where this image's
+            // tool block began — the chat view renders the image where the
+            // model placed it. The accepted call is the first generate_image
+            // block (IMAGE_CALL_CAP is 1), so its raw JSON identifies the
+            // block: rescan the raw slice for the block whose trimmed body
+            // matches call.raw (first match wins — an identical earlier block
+            // would have been the accepted one). probMap's map is
+            // stripped→raw, strictly increasing, with no entry inside a
+            // removed block — so the kept-char count before the block's raw
+            // start is the first map index whose raw offset reaches it
+            // (map.length when the block ends the slice); + baseText.length
+            // shifts continuation slices into full-swipe coordinates. No map
+            // (drift guard) or no match → no pos → renders at the end.
+            let pos = null;
+            if (probMap) {
+              TOOL_BLOCK_RE.lastIndex = 0;
+              let bm;
+              while ((bm = TOOL_BLOCK_RE.exec(slice))) {
+                if (bm[1].trim() !== imageQueued.raw) continue;
+                const k = probMap.map.findIndex(v => v >= bm.index);
+                pos = (k === -1 ? probMap.map.length : k) + baseText.length;
+                break;
+              }
+            }
+            let swipeIdx = -1;
+            const stamped = commit((c) => {
+              const n = c.messages[nodeId];
+              swipeIdx = n?.activeSwipe ?? -1;
+              const sw = n?.swipes?.[swipeIdx];
+              if (!sw) return c;
+              const swipes = n.swipes.slice();
+              swipes[swipeIdx] = { ...sw,
+                images: [...(sw.images ?? []), { pending: true, slot, prompt, caption, at: Date.now(),
+                  ...(pos != null ? { pos } : {}) }] };
+              return { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes } } };
+            });
+            // Chat deleted mid-generation — don't fire a job whose
+            // merge-on-write could never land.
+            imageQueued = stamped && swipeIdx >= 0 ? { prompt, caption, slot, swipeIdx } : null;
+          }
+          if (toolResults.length) {
             man.toolCalls = toolResults.map(r => ({
               name: r.name, ok: r.ok, note: r.note, args: toPreview(JSON.stringify(r.args ?? {}), 200),
             }));
-            const capped = toolResults.filter(r => r.note === 'call cap reached').length;
+            const capped = loreResults.filter(r => r.note === 'call cap reached').length;
+            const imgCapped = imageResults.filter(r => r.note === 'call cap reached').length;
             const failed = toolResults.filter(r => !r.ok && r.note !== 'call cap reached').length;
             if (capped) man.warnings.push(`${capped} tool call(s) skipped — per-generation cap is ${callCap}.`);
+            if (imgCapped) man.warnings.push(`${imgCapped} image call(s) skipped — at most ${IMAGE_CALL_CAP} image per reply.`);
             if (failed) man.warnings.push(`${failed} tool call(s) failed — details in the inspector.`);
             if (ref.current.chats[chatObj.id]) setManifestFor(chatObj.id, { ...man }, messages);
           }
@@ -1080,15 +1374,23 @@ function Main({ storage, storageKind, storageFailed }) {
       // its pieces createdBy: nodeId (they must reference a live node), and
       // the user gets visible feedback that lore was added. Logprobs are
       // skipped: the tape covers the raw protocol text, so aligning it to a
-      // synthetic placeholder is meaningless.
-      const toolOnly = !acc && toolCallsRan;
+      // synthetic placeholder is meaningless. An IMAGE-only reply is not
+      // tool-only: no placeholder, no discard — the swipe stays text-empty
+      // and renders as a pure image bubble (pending entry stamped above).
+      // Whitespace-only is empty too (a blank reply with tools disabled never
+      // passed the strip path above).
+      if (!acc.trim()) acc = '';
+      const toolOnly = !acc && toolCallsRan && !imageQueued;
       if (toolOnly) { acc = '✦ Lore updated via tool call.'; applyText(acc); }
-      if (!acc) discardEmptySwipe();
+      if (!acc && !imageQueued) discardEmptySwipe();
       // Stream ended without a finish chunk and not by the user's Stop — the
       // connection dropped mid-generation. Partial text is kept, but flagged.
       const interrupted = !!acc && !sawDone && !abort.signal.aborted;
-      if (acc) {
-        if (!toolOnly) attachProbs();
+      // imageQueued with empty acc = image-only reply: still stamp the swipe
+      // (speaker/genMs/toolCalls) so the ⚙ pill works — only probs are tied
+      // to text (the tape covers protocol text, nothing to align).
+      if (acc || imageQueued) {
+        if (!toolOnly && acc) attachProbs();
         if (truncated) {
           man.warnings.push('Response truncated at max_tokens — raise Max tokens in Settings or /continue.');
           if (ref.current.chats[chatObj.id]) setManifestFor(chatObj.id, { ...man }, messages);
@@ -1120,6 +1422,9 @@ function Main({ storage, storageKind, storageFailed }) {
         // generation registered, via the ✦ generator. Fire-and-forget like
         // the passes above; merge-on-write at save time.
         if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
+        // Same for their avatars (also needs Image generation on): one
+        // fire-and-forget portrait render per newly registered character.
+        if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
         // Response suggestions: only after a full generation/regeneration —
         // never mid-stream, never after /continue, never for OOC exchanges.
         if (!continuation && st.suggestions) {
@@ -1129,6 +1434,13 @@ function Main({ storage, storageKind, storageFailed }) {
         }
       }
       storage.flush();
+      // Fire the image job only now, after the finally's state has settled —
+      // the pending entry is already on the swipe. runImageJob patches it
+      // merge-on-write when the backend answers and handles its own errors;
+      // it never blocks the composer (imgCtls, not auxBusy). Not awaited.
+      if (imageQueued)
+        runImageJob(work.id, nodeId, imageQueued.swipeIdx,
+          { prompt: imageQueued.prompt, caption: imageQueued.caption, slot: imageQueued.slot }).catch(() => {});
     }
   }
 
@@ -1145,7 +1457,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function fetchSuggestions(chatObj, nodeId) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) return;
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) return;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const count = Math.max(1, Math.min(5, st.suggestionsCount ?? 2));
     const words = Math.max(5, Math.min(60, st.suggestionsWords ?? 20));
@@ -1159,7 +1472,7 @@ function Main({ storage, storageKind, storageFailed }) {
     setSuggestions({ ...key, loading: true, items: null });
     try {
       const out = await auxLogged('suggestions', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: sysPrompt,
         user: `Recent scene:\n\n${recent}\n\n${count === 1 ? 'One option' : `${count} options`} for ${pName}:`,
         maxTokens: Math.min(500, 60 + count * words * 2), temperature: st.suggestionsTemp ?? 0.9, stop: st.stopStrings,
@@ -1253,6 +1566,22 @@ function Main({ storage, storageKind, storageFailed }) {
         improveDraft(c, arg);
         return null;
       }
+      if (cmd === '/image') {
+        const st = ref.current.settings;
+        if (!st.imagesEnabled) return 'Image generation is off — enable it in Settings → Features.';
+        if (!arg) return 'Usage: /image [PROMPT]';
+        // The pending bubble is the feedback: no text generation fires — the
+        // image job patches this swipe's entry when the backend answers (or
+        // marks it failed). An image-only swipe survives pruneInterrupted.
+        const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '', st.imageModel || null);
+        const n1 = c1.messages[id];
+        const slot = uid();
+        const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
+          swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
+        upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+        runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
+        return null;
+      }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
       if (cmd === '/recap') {
         const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
@@ -1281,7 +1610,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME`;
     }
     sendUserMessage(c, raw);
     return null;
@@ -1291,7 +1620,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function improveDraft(c, draft) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pers = c.personaId ? pe[c.personaId] : null;
     const pName = pers?.name?.trim() || 'User';
     const personaDesc = pers?.description?.trim() ? ` (${subUser(pers.description, pName)})` : '';
@@ -1300,7 +1630,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     try {
       const out = await auxLogged('improve', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: subUser(st.improvePrompt || DEFAULT_IMPROVE_PROMPT, `${pName}${personaDesc}`),
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
         maxTokens: st.improveMaxTokens ?? 400, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
@@ -1319,7 +1649,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function impersonateDraft(c) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-(st.suggestionsDepth ?? 6))
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
@@ -1327,7 +1658,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to base a reply on yet.', nonce: Date.now() }); return; }
     try {
       const out = await auxLogged('impersonate', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: subUser(st.impersonatePrompt || DEFAULT_IMPERSONATE_PROMPT, pName),
         user: `Recent scene:\n\n${recent}\n\n${pName}'s next message:`,
         maxTokens: 400, temperature: st.suggestionsTemp ?? 0.7, stop: st.stopStrings,
@@ -1347,7 +1678,8 @@ function Main({ storage, storageKind, storageFailed }) {
   async function recapChat(c, n) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
-    if (!st.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
+    const conn = roleApi(st, 'aux');
+    if (!conn.endpoint || !model) { setError('Configure an endpoint and model in Settings first.'); return; }
     const pName = (c.personaId && pe[c.personaId]?.name?.trim()) || 'User';
     const recent = getActivePath(c.messages, c.activeLeafId).slice(-n)
       .map(x => `${x.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(x), pName)}`)
@@ -1355,7 +1687,7 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!recent.trim()) { setComposerInject({ chatId: c.id, hint: 'Nothing to recap yet.', nonce: Date.now() }); return; }
     try {
       const out = await auxLogged('recap', {
-        endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
+        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 400)),
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
         maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
@@ -1444,6 +1776,15 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!n || generating?.chatId === c.id || idx < 0 || idx >= n.swipes.length || idx === n.activeSwipe) return;
     scrollTargetRef.current = { chatId: c.id, nodeId };
     saveChat(activateBranch({ ...c, messages: { ...c.messages, [nodeId]: { ...n, activeSwipe: idx } } }, nodeId, { keepPath: true, snapStart: false }), { touch: false });
+  };
+  // Image takes (v4.10): ◀ ▶ flip between takes of one image placement, ▶⁺
+  // on the last take re-rolls JUST that image (same prompt, new roll) — the
+  // reply text and message swipes are untouched. Both resolve the node's
+  // ACTIVE swipe at event time, like the message handlers above.
+  const onImgSwipe = (nodeId, slot, dir) => swipeImage(ui.chatId, nodeId, slot, dir);
+  const onImgRegen = (nodeId, slot) => {
+    const n = ref.current.chats[ui.chatId]?.messages?.[nodeId];
+    if (n) regenImage(ui.chatId, nodeId, n.activeSwipe, slot);
   };
   // Jump to the branch running through nodeId (branch chip popover / Branches
   // tab). From another chat's panel modal: switches the active chat too.
@@ -1620,10 +1961,34 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // PNG card export: the avatar IS the card image — the full-res companion
+  // when one exists (avatarFull || avatar) — redrawn to PNG at natural size
+  // (long edge ≤1024), with the chara_card v2 JSON (character + its first
+  // linked scenario when one exists — buildCharacterCard tolerates null)
+  // embedded as a tEXt chunk (pure core). Importable by SillyTavern-style tools.
+  const onExportCharacterPng = async (character) => {
+    if (!character?.avatar)
+      return setError('Set an avatar first — the avatar becomes the card image.');
+    try {
+      const img = await loadImage(character.avatarFull || character.avatar);
+      const scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('the browser refused to encode the PNG');
+      const u8 = new Uint8Array(await blob.arrayBuffer());
+      const scenario = Object.values(scenarios ?? {})
+        .find(s => (s.characterIds ?? []).includes(character.id)) ?? null;
+      downloadBlob(new Blob([embedPngCardJson(u8, JSON.stringify(buildCharacterCard(scenario, character)))],
+        { type: 'image/png' }), `${character.name}.png`);
+    } catch (e) { setError(`PNG card export failed: ${e?.message ?? e}`); }
+  };
   const onImport = async () => {
     const file = await pickFile('.json,application/json,.png,image/png');
     if (!file) return;
-    let obj;
+    let obj, cardArt = null;
     try {
       if (file.type === 'image/png' || /\.png$/i.test(file.name ?? '')) {
         // Character-card PNG: the card JSON rides in a tEXt chunk (pure core).
@@ -1631,6 +1996,15 @@ function Main({ storage, storageKind, storageFailed }) {
         if (json == null)
           return setError('Import failed: that PNG embeds no character card (no "chara"/"ccv3" text chunk).');
         obj = JSON.parse(json);
+        // The PNG's own art becomes the imported character's avatar pair,
+        // decoded once: the 256px thumb and the uncropped ≤1024 avatarFull
+        // (aspect kept — the Avatar component's object-fit: cover crops). A
+        // decode failure never fails the import: the card data matters, not
+        // the art.
+        try {
+          const artImg = await loadImageFromFile(file);
+          cardArt = { avatar: downscaleImageToDataURL(artImg, 256), avatarFull: downscaleImageToDataURL(artImg, 1024) };
+        } catch (e) { console.warn('import: could not decode the card art', e); }
       } else {
         obj = JSON.parse(await file.text());
       }
@@ -1666,6 +2040,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const card = parseCharacterCard(obj);
       if (!card)
         return setError('Unrecognized JSON: expected a FictionPad scenario, character, chat or character card export. Full backups import via Settings → Storage.');
+      if (cardArt) Object.assign(card.character, cardArt); // a card PNG keeps its art as the avatar pair (256 thumb + ≤1024 full)
       upsertCharacter(card.character.id, normalizeCharacter(card.character));
       upsertScenario(card.scenario.id, card.scenario);
       setUi(u => ({ ...u, scenarioId: card.scenario.id, characterId: null }));
@@ -1866,6 +2241,9 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
           { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          { label: 'Export PNG card', fn: () => onExportCharacterPng(characters[id]),
+            disabled: !characters[id]?.avatar,
+            title: characters[id]?.avatar ? null : 'Set an avatar first — the avatar becomes the card image.' },
           '-',
           { label: 'Delete…', fn: () => onDeleteCharacter(id), danger: true },
         ] })}
@@ -1882,6 +2260,7 @@ function Main({ storage, storageKind, storageFailed }) {
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
+              avatars=${characterAvatars} avatarsOn=${settings.avatarsEnabled !== false && chatHasAvatars}
               dateFormat=${settings.dateFormat} showThinking=${settings.showThinking !== false}
               generating=${generating?.chatId === chat?.id ? generating : null}
               genElsewhere=${!!generating && generating.chatId !== chat?.id}
@@ -1897,6 +2276,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
+              onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} imagesEnabled=${!!settings.imagesEnabled}
               onJump=${onJump} onOpenBranches=${onOpenBranches}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
@@ -1920,18 +2300,20 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
-        onUpsert=${upsertCharacter} onGenerate=${runGen} onClose=${() => setModal(null)} /><//>`}
+        onUpsert=${upsertCharacter} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'personas' && html`
       <${ErrorBoundary} name="personas"><${PersonaManager} personas=${personas} onUpsert=${upsertPersona}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         defaultPersonaId=${settings.defaultPersonaId ?? ''}
         onSetDefault=${(id) => updateSettings({ defaultPersonaId: id })}
         onRemove=${(id) => {
@@ -1986,6 +2368,7 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}

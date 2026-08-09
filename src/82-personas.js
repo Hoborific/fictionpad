@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: PERSONA MANAGER
 // ============================================================================
-function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaId, onSetDefault }) {
+function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaId, onSetDefault, onGenerateAvatar = null }) {
   const [editing, setEditing] = useState(null); // draft persona or null
   const [dirty, setDirty] = useState(false);
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
@@ -17,6 +17,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
       ${editing ? html`
         <label class="field"><span>Name — replaces {{user}} everywhere</span>
           <input type="text" value=${editing.name} onInput=${(e) => edit({ ...editing, name: e.target.value })} /></label>
+        <${AvatarField} draft=${editing} set=${(patch) => edit({ ...editing, ...patch })} onGenerateAvatar=${onGenerateAvatar} />
         <label class="field"><span>Description — sent to the AI as "{{user}} is …"</span>
           <textarea rows=${5} value=${editing.description} onInput=${(e) => edit({ ...editing, description: e.target.value })} /></label>
         <div style=${{ display: 'flex', gap: '8px' }}>
@@ -24,7 +25,7 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
             onClick=${() => { onUpsert(editing.id, editing); setEditing(null); }}>Save</button>
           <button class="btn" onClick=${cancelEdit}>Cancel</button>
         </div>` : html`
-        <button class="btn" onClick=${() => startEdit({ id: uid(), name: '', description: '' })}>+ New persona</button>
+        <button class="btn" onClick=${() => startEdit({ id: uid(), name: '', description: '', avatar: '', avatarFull: '' })}>+ New persona</button>
         <div style=${{ marginTop: '10px' }}>
           ${list.length === 0 && html`<div class="hint">No personas yet. A persona feeds the {{user}} macro.</div>`}
           ${list.map(p => html`

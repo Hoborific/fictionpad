@@ -55,7 +55,88 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
+// Generated-image attachments on a swipe (v4.10): entries group into SLOTS —
+// one placement, one or more takes (per-image swipes). A slot renders once:
+// the active take (pending → shimmer, error/no src → dim note with the prompt
+// on the tooltip, else the image with click-to-zoom via onZoom), with a
+// ◀ n/m ▶⁺ navigator UNDER it whenever there is something to flip or re-roll
+// (count > 1 || canRegen) — mirroring the message swipe navigator; ▶⁺ on the
+// last take re-rolls JUST that image with the same prompt. A horizontal touch
+// swipe on the image itself flips takes too (left = next / ▶⁺ on the last,
+// right = back). WHERE a slot renders is MessageItem's call (the active
+// take's `pos` vs the speaker segments / visible text end): attached INSIDE
+// the reply bubble (head or end) or embedded between markdown blocks when
+// genuinely mid-text — free-standing only for a scene break between speaker
+// bubbles or an image-only swipe (nothing to attach to).
+function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen }) {
+  return html`${(slots ?? []).map((sv) => html`
+    <${SwipeImage} key=${sv.slot} sv=${sv} onZoom=${onZoom} generating=${generating}
+      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} />`)}`;
+}
+
+// One image slot: the active take plus its take navigator. Owns its touch
+// gesture (touch/pen, 70px horizontal-dominant, one action per gesture — the
+// message gestureHandlers pattern) on the wrapper: the pointerdown
+// stopPropagation keeps image-born gestures from arming the MESSAGE swipe
+// handlers on an ancestor bubble. A consumed gesture swallows the trailing
+// click (a >70px drag must not open the lightbox).
+function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }) {
+  const { take, activeIdx, count, hasPending } = sv;
+  const gestureRef = useRef(null);
+  const consumedRef = useRef(false);
+  const atLast = activeIdx >= count - 1;
+  const regen = () => { if (!generating && !hasPending && canRegen) onImgRegen?.(sv.slot); };
+  const gestureHandlers = {
+    onPointerDown: (e) => {
+      if (e.pointerType === 'mouse') return; // mouse never arms the message gesture either
+      e.stopPropagation(); // image-born gestures never trigger message swipes
+      consumedRef.current = false; // a stale flag must not eat this gesture's click
+      gestureRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    },
+    onPointerMove: (e) => {
+      const g = gestureRef.current;
+      if (!g || g.id !== e.pointerId) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) {
+        gestureRef.current = null; // one action per gesture
+        consumedRef.current = true; // swallow the click that follows the drag
+        if (generating) return; // buttons stand down mid-generation; the gesture matches
+        if (dx < 0) { // swipe left: next take, or ▶⁺ re-roll on the last one
+          if (!atLast) onImgSwipe?.(sv.slot, 1);
+          else regen();
+        } else if (activeIdx > 0) { // swipe right: back
+          onImgSwipe?.(sv.slot, -1);
+        }
+      }
+    },
+    onPointerUp: () => { gestureRef.current = null; },
+    onPointerCancel: () => { gestureRef.current = null; },
+  };
+  return html`
+    <div class="swipe-img-wrap" ...${gestureHandlers}>
+      ${take?.pending ? html`<div class="img-pending"></div>`
+        : take?.error || !take?.src
+          ? html`<div class="img-error" title=${take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
+          : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
+              onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take); }} />`}
+      ${(count > 1 || canRegen) && html`
+        <span class="swipes img-swipes">
+          <button class="btn small ghost" title="Previous take" disabled=${generating || activeIdx <= 0}
+            onClick=${() => onImgSwipe?.(sv.slot, -1)}>◀\uFE0E</button>
+          <span>${activeIdx + 1}/${count}</span>
+          ${!atLast
+            ? html`<button class="btn small ghost" title="Next take" disabled=${generating}
+                onClick=${() => onImgSwipe?.(sv.slot, 1)}>▶\uFE0E</button>`
+            : canRegen
+              ? html`<button class="btn small ghost gen" title="Generate a new take of this image — same prompt"
+                  disabled=${generating || hasPending} onClick=${regen}>▶\uFE0E⁺</button>`
+              : html`<button class="btn small ghost" disabled>▶\uFE0E</button>`}
+        </span>`}
+    </div>`;
+}
+
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -77,7 +158,24 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
     return () => window.removeEventListener('pointerdown', onDown);
   }, [actionsOpen, metaOpen, toolsOpen, branchOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
+  const [lightbox, setLightbox] = useState(null); // { src, title } — avatar/image click-to-expand
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
+  // Generated-image attachments on the active swipe (v4.10): /image replies
+  // and model-attached images. Click expands via the same lightbox as
+  // avatars. Entries group into SLOTS (one placement, one or more takes);
+  // `swipe.imgUsed[slot]` picks the shown take. The active take carries `pos`
+  // (stripped-text offset of its tool block) and the slot renders where the
+  // model placed it — see the placement block below. Take handlers resolve
+  // the node's ACTIVE swipe at event time, like the message swipe handlers.
+  const imgs = Array.isArray(swipe.images) && swipe.images.length ? swipe.images : null;
+  const slots = imgs ? groupImageSlots(imgs, swipe.imgUsed).map(g => ({
+    slot: g.slot, take: g.active, activeIdx: g.activeIdx, count: g.takes.length,
+    hasPending: g.takes.some(t => t?.pending),
+  })) : null;
+  const canImgRegen = imagesEnabled && !!onImgRegen;
+  const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
+  const imgSlotRegen = (slot) => onImgRegen?.(node.id, slot);
+  const zoomImg = (im) => setLightbox({ src: im.src, title: im.caption || im.prompt || '' });
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
   // down one level at a time until it fits — each level drops one more detail
   // from the inline row, right to left (model, edited, gen time, date, #),
@@ -114,7 +212,10 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
-  const displayText = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
+  // Whitespace-only text (a pre-fix multi-tool reply keeps the newlines that
+  // separated its stripped blocks) renders exactly like an empty swipe.
+  const rawDisplay = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
+  const displayText = rawDisplay.trim() ? rawDisplay : '';
   const n = node.activeSwipe + 1, m = node.swipes.length;
   // Swipe nav on every assistant message: at the last swipe ▶⁺ generates a
   // new take THERE (mid-chain regen forks a branch — the continuation is
@@ -177,20 +278,98 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // bubble per part. Rendering only; storage/swipes/probs are untouched.
   const segments = (isUser || isOOC) ? null : splitSpeakerSegments(text, characterNames);
   const multi = (segments?.length ?? 0) > 1;
+  // ---- positional image placement (v4.10) ----
+  // A swipe image entry may carry `pos`: the offset in the swipe's stripped
+  // text where its ```tool block began. pos indexes swipe.text; the segment
+  // offsets and the rendered markdown use the subUser'd text, so map pos
+  // through the same substitution before comparing (a removed block always
+  // leaves newline separation, so no {{user}} token can straddle pos).
+  const posInText = (p) => subUser(String(swipe.text ?? '').slice(0, p), personaName).length;
+  const probsShown = showProbs && hasProbs;
+  // Free-standing image group: no bubble chrome. It does NOT ride the
+  // message's swipe gesture — the image wrapper carries its own take-swipe
+  // gesture (a horizontal swipe here flips image takes, not message swipes).
+  const swipeImgs = (list, key = null) => html`
+    <${SwipeImages} key=${key} slots=${list} onZoom=${zoomImg} generating=${generating}
+      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} />`;
+  const freeImg = (list, key) => html`
+    <div key=${key} class="msg-img-free">${swipeImgs(list)}</div>`;
+  // Multi-speaker: an image hangs immediately AFTER the bubble of the last
+  // segment whose content starts at/before pos — a block sitting in the gap
+  // between two segments (their prefix/newline region) therefore lands after
+  // the earlier one; pos before the first segment renders ahead of it; no
+  // pos (legacy, /image) or past the last segment goes after the last bubble.
+  // Placement iterates SLOTS (pos read from the active take — identical
+  // across takes), so a multi-take placement renders once.
+  const imgGroups = new Map(); // segment index (-1 = before all) → slot views
+  if (multi && slots && !editing && !probsShown) {
+    for (const sv of slots) {
+      let place = segments.length - 1;
+      if (Number.isFinite(sv.take?.pos)) {
+        const p = posInText(sv.take.pos);
+        place = -1;
+        for (let si = 0; si < segments.length; si++)
+          if (segments[si].start <= p) place = si;
+      }
+      imgGroups.set(place, [...(imgGroups.get(place) ?? []), sv]);
+    }
+  }
+  // Single bubble: the image rides INSIDE the reply bubble — pos at/past the
+  // visible end (trailing whitespace allowed) or absent → attached at the end;
+  // pos at the very start → attached at the head; genuinely mid-text → EMBED
+  // by splitting the display text at pos into two markdown blocks (the block
+  // sat on a fenced line boundary, so the split lands on one too — no markdown
+  // construct needs healing across it). A trailing/leading image never floats
+  // free-standing next to the bubble — attached reads as part of the reply,
+  // not an orphan (the image-only swipe is the exception: nothing to attach).
+  let headImgs = null, endImgs = null, embeds = null, embedParts = null, freeImgs = null;
+  const imageOnly = !multi && !isUser && !editing && !probsShown && !displayText && !!slots;
+  if (!multi && !isUser && !isOOC && !probsShown && !editing && slots && displayText) {
+    const prefixLen = text.length - displayText.length; // stripSpeakerPrefix shift
+    const visibleEnd = displayText.trimEnd().length;
+    for (const sv of slots) {
+      const p = Number.isFinite(sv.take?.pos) ? posInText(sv.take.pos) - prefixLen : null;
+      if (p == null || p >= visibleEnd) (endImgs ??= []).push(sv);
+      else if (p <= 0) (headImgs ??= []).push(sv);
+      else (embeds ??= []).push({ p, sv });
+    }
+    if (embeds) {
+      embeds.sort((a, b) => a.p - b.p);
+      embedParts = [displayText.slice(0, embeds[0].p),
+        ...embeds.map((e, i) => displayText.slice(e.p, embeds[i + 1]?.p))];
+    }
+  } else if (imageOnly) {
+    freeImgs = slots; // image-only swipe: free-standing, no bubble at all
+  }
+  // Cases that keep the images inside the bubble at the end, as before:
+  // user messages, OOC, and the probs view (no markdown to embed into).
+  const tailImgs = !multi && slots ? ((isUser || isOOC || probsShown) ? slots : endImgs) : null;
+  // Nothing visible to put in a bubble (whitespace-only text — see above —
+  // and no in-bubble images; not streaming, editing, or showing probs): skip
+  // the shell entirely. The meta row stays — its ⚙ pill shows what happened.
+  const hideBubble = imageOnly || (!editing && !streaming && !probsShown && !displayText && !tailImgs);
   // Multi-speaker swipe: the header names everyone who spoke, in speaking
   // order (first appearance), each with its own colour.
   const multiSpeakers = multi ? [...new Set(segments.map((s) => s.speaker ?? 'Narrator'))] : null;
+  // Column avatar (avatarsOn): the persona on user messages; on assistant
+  // replies the resolved speaker — a MULTI-speaker reply leaves this column
+  // bare instead (each segment row carries its own gutter avatar below).
+  // Map entries are { src, full }: the 256² thumb renders,
+  // the uncropped companion feeds the click-to-expand lightbox. A map miss
+  // renders a letter tile for a NAMED character only — an imageless user (no
+  // persona image) or the Narrator gets the bare .msg-av slot instead (an
+  // alignment spacer; the column itself always renders while avatarsOn).
+  const avName = isUser ? personaName : (multi ? (segments[0].speaker ?? 'Narrator') : (speaker ?? 'Narrator'));
+  const av = avatars?.[String(avName ?? '').toLowerCase()];
+  const avTile = !isUser && avName !== 'Narrator'; // tile fallback is named-character-only
   // #, date, gen time, edited, model collapse behind the › toggle on phones
   // (desktop shows them inline via .meta-details { display: contents }).
   const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
-  return html`
-    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''}" data-mid=${node.id}
-      onContextMenu=${(e) => {
-        // Keep the native menu when the user has text selected (copy etc.).
-        if (window.getSelection()?.toString()) return;
-        e.preventDefault();
-        setCtxMenu({ x: e.clientX, y: e.clientY });
-      }}>
+  // The row's content (meta row, bubbles, branch chip, context menu). With
+  // avatars on, it wraps in .msg-body beside the .msg-av column; otherwise it
+  // renders directly, exactly as before. The Fragment keeps it one child —
+  // a bare multi-root html`` array as a child would trip React's key warning.
+  const body = html`<${React.Fragment}>
       <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
@@ -260,20 +439,39 @@ ${showNav && html`
           </span>`}
 
       </div>
-      ${multi && !editing && !(showProbs && hasProbs) ? html`
+      ${multi && !editing && !probsShown ? html`
         ${thinkBubble}
-        ${segments.map((seg, si) => html`
-        <div key=${si} class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
-          style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
-          ...${gestureHandlers}>
-          <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-            style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${seg.speaker ?? 'Narrator'}</div>
-          <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
-        </div>`)}` : html`
+        ${imgGroups.get(-1) ? freeImg(imgGroups.get(-1), 'img-pre') : null}
+        ${segments.map((seg, si) => {
+          // Each segment is a mini-message: the speaker's avatar hangs in the
+          // gutter beside its own bubble (image / named-character tile / bare
+          // slot — the message-level column stays an empty spacer in this
+          // mode), the name chip above the bubble. Same per-character
+          // differentiation a single-speaker reply gets.
+          const segName = seg.speaker ?? 'Narrator';
+          const segAv = avatarsOn ? avatars?.[segName.toLowerCase()] : null;
+          return html`
+          <div key=${si} class="seg-row">
+            ${avatarsOn && html`<div class="msg-av">
+              ${(segAv?.src || seg.speaker) && html`<${Avatar} name=${segName} src=${segAv?.src ?? ''} size=${40}
+                onClick=${segAv?.src ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
+            </div>`}
+            <div class="seg-col">
+              <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
+                style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${segName}</div>
+              <div class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
+                style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
+                ...${gestureHandlers}>
+                <div class=${streaming && si === segments.length - 1 ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${seg.text} prose streaming=${streaming && si === segments.length - 1} /></div>
+              </div>
+            </div>
+          </div>
+          ${imgGroups.get(si) ? freeImg(imgGroups.get(si), `img-${si}`) : null}`;})}` : html`
       ${thinkBubble}
-      <div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
+      ${!hideBubble && html`<div class="bubble ${dragX !== 0 ? 'dragging' : ''}"
         style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
         ...${gestureHandlers}>
+        ${!editing && headImgs && swipeImgs(headImgs)}
         ${editing ? html`
           <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
@@ -284,12 +482,24 @@ ${showNav && html`
             // Generating but no first token yet (slow backend waking up, model
             // loading, middleware holding the connection) — don't look dead.
             ? html`<div class="waiting" title="Waiting for the first token…"><span>●\uFE0E</span><span>●\uFE0E</span><span>●\uFE0E</span></div>` :
-          showProbs && hasProbs
+          probsShown
             ? html`<${ProbsView} tokens=${swipe.tokens} onPick=${(i, alt) => onRegenFromToken(node.id, i, alt)} />` :
           isOOC
-            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>`
-            : html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`}
+            ? html`<div class="plain ${streaming ? 'streaming-cursor' : ''}">${displayText}</div>` :
+          embeds
+            // A mid-text image splits the markdown at its block's position —
+            // the fence sat on a line boundary, so both halves parse cleanly.
+            ? html`${embedParts.map((part, pi) => html`
+              ${pi > 0 ? swipeImgs([embeds[pi - 1].sv], `ei${pi}`) : null}
+              ${part ? html`<div key=${`ep${pi}`} class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${part} prose streaming=${streaming} /></div>` : null}`)}` :
+          // Only a user message with nothing but images renders no text block
+          // (an assistant image-only swipe skips the bubble entirely).
+          displayText || !imgs
+            ? html`<div class=${streaming ? 'streaming-cursor' : ''}><${ThrottledMarkdown} text=${displayText} prose streaming=${streaming} /></div>`
+            : null}
+        ${!editing && tailImgs && swipeImgs(tailImgs)}
       </div>`}
+      ${freeImgs ? freeImg(freeImgs, 'img-post') : null}`}
       ${offPathKids.length > 0 && html`
         <div class="branch-chip-row">
           <button class="branch-chip" disabled=${generating}
@@ -335,7 +545,23 @@ ${showNav && html`
               { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
               { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true, disabled: generating },
             ] : []),
-          ]} />`}
+          ]} />`}<//>`;
+  return html`
+    <div class="msg ${isUser ? 'user' : 'assistant'} ${isOOC ? 'ooc' : ''} ${selected ? 'kbdsel' : ''} ${avatarsOn ? 'with-av' : ''}" data-mid=${node.id}
+      onContextMenu=${(e) => {
+        // Keep the native menu when the user has text selected (copy etc.).
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        setCtxMenu({ x: e.clientX, y: e.clientY });
+      }}>
+      ${avatarsOn && html`
+        <div class="msg-av">
+          ${!(multi && !editing && !probsShown) && (av?.src || avTile) && html`
+            <${Avatar} name=${avName ?? ''} src=${av?.src ?? ''} size=${40}
+              onClick=${av?.src ? () => setLightbox({ src: av.full, title: avName }) : null} />`}
+        </div>`}
+      ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
+      ${lightbox && html`<${Lightbox} src=${lightbox.src} title=${lightbox.title} onClose=${() => setLightbox(null)} />`}
     </div>`;
 }
 

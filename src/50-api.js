@@ -11,6 +11,11 @@ function normalizeEndpoint(url) {
 }
 const chatCompletionsURL = (ep) => `${normalizeEndpoint(ep)}/v1/chat/completions`;
 const modelsURL = (ep) => `${normalizeEndpoint(ep)}/v1/models`;
+const imagesURL = (ep) => `${normalizeEndpoint(ep)}/v1/images/generations`;
+// ComfyUI REST (backend 'comfyui'): queue → poll → download.
+const comfyPromptURL = (ep) => `${normalizeEndpoint(ep)}/prompt`;
+const comfyHistoryURL = (ep, id) => `${normalizeEndpoint(ep)}/history/${encodeURIComponent(id)}`;
+const comfyViewURL = (ep, img) => `${normalizeEndpoint(ep)}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder ?? '')}&type=${encodeURIComponent(img.type ?? 'output')}`;
 // True when the endpoint goes through OUR server's /proxy/ (same-origin).
 // Relative '/proxy/…' is same-origin by construction; absolute URLs must match.
 function isServerProxy(endpoint) {
@@ -30,6 +35,25 @@ function effectiveEndpoint(settings, serverStorageActive) {
   const ep = String(settings?.endpoint ?? '');
   if (!ep || ep.startsWith('/proxy/')) return ep;
   return serverStorageActive && settings?.routeViaServer !== false ? `/proxy/${ep}` : ep;
+}
+
+// Per-role connection overrides (Settings → Connection → Role connections):
+// each role may carry its own endpoint+key pair ('aux'/'gen'/'embed'/'image'
+// → <role>Endpoint/<role>ApiKey). Resolution walks the role chain and takes
+// the first non-blank value PER FIELD, ending at the main connection — an
+// endpoint-only override inherits the key, exactly like the long-standing
+// image connection. Chains mirror the model fallbacks: the generator resolves
+// ('gen','aux') → main, aux roles ('aux') → main, embeddings/images their own
+// role → main; no roles = the main connection verbatim.
+function roleConn(st, ...roles) {
+  const pick = (suffix, main) => {
+    for (const r of roles) {
+      const v = String(st?.[`${r}${suffix}`] ?? '').trim();
+      if (v) return v;
+    }
+    return String(main ?? '');
+  };
+  return { endpoint: pick('Endpoint', st?.endpoint), apiKey: pick('ApiKey', st?.apiKey) };
 }
 
 // LLM credential header. Through our own (possibly Basic-authed) proxy the
@@ -472,5 +496,136 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
   const json = await res.json();
   if (json?.error?.message) throw new Error(json.error.message);
   return String(json.choices?.[0]?.message?.content ?? '').trim();
+}
+
+// ---- /images/generations (OpenAI-compatible; /image command) ----
+// One image per call, always returned as a JPEG data URL capped at 1024px.
+// b64_json is the primary shape; a url response is fetched and converted
+// (through our own /proxy when the request went through it, so an absolute
+// image URL on a CORS-less host still loads). The LLM key is never sent on
+// the url fetch — image CDNs don't need it and it must not leak off-origin.
+async function generateImage({ endpoint, apiKey, serverToken, model, prompt, size, signal, prefix = '', backend = 'openai', workflow = '', negative = '' }) {
+  if (backend === 'comfyui')
+    return generateComfyImage({ endpoint, apiKey, serverToken, workflow, prompt, negative, size, signal, prefix });
+  const res = await fetchAPI(endpoint, imagesURL(endpoint), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({
+      prompt: imagePromptWithPrefix(prefix, prompt),
+      ...(model ? { model } : {}),
+      ...(size ? { size } : {}),
+      response_format: 'b64_json',
+    }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      msg = json?.error?.message ?? json?.message ?? msg;
+    } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const json = await res.json();
+  if (json?.error?.message) throw new Error(json.error.message);
+  const item = json?.data?.[0];
+  let dataURL;
+  if (item?.b64_json) {
+    dataURL = `data:image/png;base64,${item.b64_json}`;
+  } else if (item?.url) {
+    // The proxy target is the part after /proxy/; the image fetch reuses that
+    // shape with the image URL as the target (server.mjs decodes it whole).
+    const u = String(item.url);
+    const proxied = isServerProxy(endpoint) && /^https?:\/\//i.test(u) ? `/proxy/${u}` : u;
+    const imgRes = await fetchAPI(endpoint, proxied, {
+      headers: { ...(serverToken && isServerProxy(endpoint) ? { 'Authorization': `Bearer ${serverToken}` } : {}) },
+      ...(signal ? { signal } : {}),
+    });
+    if (!imgRes.ok) {
+      const err = new Error(`image fetch failed (HTTP ${imgRes.status})`);
+      err.status = imgRes.status;
+      throw err;
+    }
+    const blob = await imgRes.blob();
+    dataURL = await blobToDataURL(blob);
+  } else {
+    throw new Error('Malformed images response — no b64_json or url in data[0]');
+  }
+  const img = await loadImage(dataURL);
+  return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+}
+
+const blobToDataURL = (blob) => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(String(fr.result));
+  fr.onerror = () => reject(new Error('could not read the image response'));
+  fr.readAsDataURL(blob);
+});
+
+// ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
+// Queue the substituted workflow, poll /history until the run lands, then
+// download the first output image from /view. Same JPEG-data-URL contract as
+// the OpenAI path. ComfyUI answers identical graphs from its cache, so the
+// history is checked BEFORE the first sleep — a cached run returns at once.
+// The workflow comes from settings.imageWorkflow (web UI "Save (API Format)"
+// export); substitution + seed rules live in substituteComfyWorkflow (core).
+async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, prompt, negative, size, signal, prefix = '', timeoutMs = 300000 }) {
+  let graph;
+  try { graph = JSON.parse(String(workflow ?? '')); } catch {
+    throw new Error('The ComfyUI workflow in Settings is not valid JSON — paste the "Save (API Format)" export.');
+  }
+  const { width, height } = parseImageSize(size);
+  const payload = substituteComfyWorkflow(graph, {
+    prompt: imagePromptWithPrefix(prefix, prompt), negative, width, height });
+  const headers = { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) };
+  const res = await fetchAPI(endpoint, comfyPromptURL(endpoint), {
+    method: 'POST', headers, ...(signal ? { signal } : {}),
+    body: JSON.stringify({ prompt: payload }),
+  });
+  if (!res.ok) {
+    // ComfyUI rejects a bad graph as { error: { type, message }, node_errors }
+    let msg = `HTTP ${res.status}`;
+    try { const json = await res.json(); msg = json?.error?.message ?? json?.message ?? msg; } catch {}
+    const err = new Error(String(msg));
+    err.status = res.status;
+    throw err;
+  }
+  const queued = await res.json();
+  const promptId = queued?.prompt_id;
+  if (!promptId) throw new Error('ComfyUI did not return a prompt_id — is this a ComfyUI server?');
+  const deadline = Date.now() + timeoutMs;
+  const sleep = (ms) => new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason ?? new Error('aborted')); }, { once: true });
+  });
+  for (;;) {
+    const hRes = await fetchAPI(endpoint, comfyHistoryURL(endpoint, promptId), {
+      headers: { ...authHeaders(apiKey, endpoint, serverToken) }, ...(signal ? { signal } : {}) });
+    if (!hRes.ok) {
+      const err = new Error(`HTTP ${hRes.status}`);
+      err.status = hRes.status;
+      throw err;
+    }
+    const result = comfyHistoryResult(await hRes.json(), promptId);
+    if (result.error) throw new Error(result.error);
+    if (result.done && result.image) {
+      // /view authenticates exactly like /prompt above (the configured image
+      // key belongs to this host; through our proxy it maps as usual).
+      const imgRes = await fetchAPI(endpoint, comfyViewURL(endpoint, result.image), {
+        headers: { ...authHeaders(apiKey, endpoint, serverToken) }, ...(signal ? { signal } : {}) });
+      if (!imgRes.ok) {
+        const err = new Error(`image fetch failed (HTTP ${imgRes.status})`);
+        err.status = imgRes.status;
+        throw err;
+      }
+      const dataURL = await blobToDataURL(await imgRes.blob());
+      const img = await loadImage(dataURL);
+      return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+    }
+    if (Date.now() > deadline) throw new Error('ComfyUI timed out — the run never landed in history');
+    await sleep(1500);
+  }
 }
 

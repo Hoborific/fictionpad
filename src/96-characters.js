@@ -15,7 +15,7 @@ function newCharacter() {
   };
 }
 
-function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate }) {
+function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = null, onUpsert, onClose, onGenerate, onGenerateAvatar = null }) {
   const [editing, setEditing] = useState(() => character ? normalizeCharacter(deepClone(character)) : newCharacter());
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -52,6 +52,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = n
             : html`<span class="hint">auto — pick a colour to override</span>`}
         </div>
       </div>
+      <${AvatarField} draft=${editing} set=${(patch) => edit({ ...editing, ...patch })} onGenerateAvatar=${onGenerateAvatar} />
       <label class="field"><span>Character card — sent to the AI when active. {{user}} works here.</span>
         <textarea rows=${6} value=${editing.content} onInput=${(e) => edit({ ...editing, content: e.target.value })} /></label>
       <label class="field"><span>Trigger keys — one per line, regex; blank = the character's name</span>

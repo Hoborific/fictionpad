@@ -49,7 +49,10 @@ function ListInput({ values, onChange, textarea, delim, ...rest }) {
 // The editable fields of a lore piece — shared by the inline card (scenario
 // editor) and the piece editor popout (chat options), so the two stay
 // identical. `set` applies a partial patch to the caller's piece/draft.
-function LorePieceFields({ piece, others, set }) {
+// Character-type pieces get the avatar field (a registered character is a
+// chat-local character card); onGenerateAvatar comes from Main like the
+// global editors (image generation off → no ✦ button).
+function LorePieceFields({ piece, others, set, onGenerateAvatar = null }) {
   return html`
     <div class="grid2">
       <label class="field"><span>Title</span>
@@ -60,6 +63,8 @@ function LorePieceFields({ piece, others, set }) {
           <option value="character">character</option>
         </select></label>
     </div>
+    ${piece.type === 'character' && html`
+      <${AvatarField} draft=${piece} set=${set} onGenerateAvatar=${onGenerateAvatar} />`}
     <label class="field"><span>Content — sent to the AI when active. {{user}} works here.</span>
       <textarea rows=${4} value=${piece.content} onInput=${(e) => set({ content: e.target.value })} /></label>
     <label class="field"><span>Trigger keys — one per line, regex; keys under 2 chars never fire</span>
@@ -120,7 +125,7 @@ function LorePieceFields({ piece, others, set }) {
         <//></label>`}`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null }) {
   const [open, setOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -152,7 +157,7 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate }) {
         <${GeneratorModal} title=${`Generate — ${piece.title || 'lore piece'}`} busy=${genBusy} error=${genError}
           onGenerate=${runGenerate} onClose=${() => setGenOpen(false)} />`}
       ${open && html`
-        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} /></div>`}
+        <div class="lc-body"><${LorePieceFields} piece=${piece} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} /></div>`}
     </div>`;
 }
 
@@ -179,7 +184,7 @@ function RevisionRow({ rev, n }) {
 // piece is never a blind ✦ prompt — you see what it is before you edit or
 // generate. The generator's patch fills the local draft only; persistence
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
-function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate }) {
+function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
@@ -201,7 +206,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate 
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
         <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
-      <${LorePieceFields} piece=${draft} others=${others} set=${set} />
+      <${LorePieceFields} piece=${draft} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">
           <span>Change history (${piece.revisions.length})</span>
@@ -290,7 +295,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -325,6 +330,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
         <label class="field"><span>Tags (comma-separated)</span>
           <${ListInput} delim=',' values=${draft.tags} onChange=${(tags) => set({ tags })} /></label>
       </div>
+      <${AvatarField} draft=${draft} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       <label class="field"><span>Description — <b>metadata, not sent to the AI</b></span>
         <textarea rows=${2} value=${draft.description} onInput=${(e) => set({ description: e.target.value })} /></label>
       <label class="field"><span>Scenario instructions — sent to the AI, ranks above the platform prompt. {{user}} = persona name.</span>
@@ -368,7 +374,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
-            onGenerate=${onGenerate} />`)}
+            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}

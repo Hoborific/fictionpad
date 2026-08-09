@@ -1,13 +1,16 @@
 // ============================================================================
 // HELPERS — export/import, misc UI utilities.
 // ============================================================================
-function downloadJSON(filename, obj) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function downloadJSON(filename, obj) {
+  downloadBlob(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), filename);
 }
 
 function pickFile(accept) {
@@ -21,6 +24,48 @@ function pickFile(accept) {
     input.oncancel = () => resolve(null);
     input.click();
   });
+}
+
+// Decode an image source URL (data:, blob:, http(s)) into an
+// HTMLImageElement. Rejects on decode failure.
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('could not decode image'));
+    img.src = src;
+  });
+}
+
+// Decode an image file into an HTMLImageElement via an object URL (revoked
+// once the load settles). Rejects on decode failure.
+function loadImageFromFile(file) {
+  const url = URL.createObjectURL(file);
+  return loadImage(url).then(
+    (img) => { URL.revokeObjectURL(url); return img; },
+    () => { URL.revokeObjectURL(url); throw new Error('could not decode image file'); });
+}
+
+// Draw `img` scaled so its longest edge is at most maxEdge (aspect kept,
+// never upscaled) and return a data URL. Browsers without WebP encode
+// silently return PNG from toDataURL — acceptable.
+function downscaleImageToDataURL(img, maxEdge, type = 'image/webp', quality = 0.85) {
+  const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(img, 0, 0, w, h);
+  return cv.toDataURL(type, quality);
+}
+
+// Crop the square source rect (sx, sy, sSize) out of `img` and return it as
+// an out×out data URL (avatar pipeline). Same WebP→PNG fallback note.
+function cropSquareToDataURL(img, sx, sy, sSize, out = 256, type = 'image/webp', quality = 0.85) {
+  const cv = document.createElement('canvas');
+  cv.width = out; cv.height = out;
+  cv.getContext('2d').drawImage(img, sx, sy, sSize, sSize, 0, 0, out, out);
+  return cv.toDataURL(type, quality);
 }
 
 async function pickJSONFile() {

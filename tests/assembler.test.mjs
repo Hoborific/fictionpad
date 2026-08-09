@@ -18,11 +18,12 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
-  dedupeSpeakerPrefixes,
+  dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
+  healImageEntry, groupImageSlots,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
-  parseCharacterCard, extractPngCardJson };`;
+  parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32 };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -31,11 +32,12 @@ const {
   normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
-  dedupeSpeakerPrefixes,
+  dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
+  healImageEntry, groupImageSlots,
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
-  parseCharacterCard, extractPngCardJson,
+  parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -524,6 +526,67 @@ section('speaker segments');
       'assembler strips duplicate speaker prefixes from fed-back history');
     const user = messages.find(m => m.role === 'user' && m.content.includes('twice'));
     ok(user && user.content === 'Vex: I say Vex: things twice', 'user messages stay verbatim');
+  }
+}
+
+// ---- segment start/end offsets (v4.10 positional images) ----
+// Offsets index the INPUT text and delimit each segment's visible content
+// (after the stripped speaker prefix), so a generated image's `pos` can be
+// placed between segment bubbles. Additive: text/speaker are unchanged.
+section('speaker segment offsets');
+{
+  const names = ['Vex', 'Mira'];
+  {
+    const input = 'The door opens.\nVex: hi there\n**Mira:** *nods*\nNarrator: Silence falls.';
+    const s = splitSpeakerSegments(input, names);
+    ok(s.length === 4 && s.every(seg => Number.isInteger(seg.start) && Number.isInteger(seg.end)),
+      'every segment carries integer start/end');
+    ok(s.every(seg => input.slice(seg.start, seg.end).includes(seg.text)),
+      'slice(start, end) contains the segment text');
+    ok(s.every((seg, i) => i === 0 || seg.start >= s[i - 1].end),
+      'offsets are ordered and non-overlapping');
+    ok(s[0].start === 0 && s[3].end === input.length, 'first/last segment reach the input ends');
+    ok(s[1].start === input.indexOf('hi there') && s[3].start === input.indexOf('Silence falls.'),
+      'speaker/Narrator segments start after their prefixes');
+  }
+  {
+    // The image-placement case: a gap (blank line + next prefix) sits between
+    // two segments' content regions — a pos in it belongs to the EARLIER one.
+    const input = 'Narrator: *The door creaks open.*\n\nMira: "Come in."';
+    const s = splitSpeakerSegments(input, names);
+    ok(s.length === 2 && s[0].speaker === null && s[1].speaker === 'Mira',
+      'Narrator + speaker split (offsets variant)');
+    ok(input.slice(s[0].start, s[0].end) === '*The door creaks open.*', 'narration region is exact');
+    ok(s[0].end < s[1].start && input.slice(s[0].end, s[1].start) === '\n\nMira: ',
+      'the gap between segments is the newline + prefix region');
+    ok(input.slice(s[1].start, s[1].end) === '"Come in."', 'speaker region starts after the prefix');
+  }
+  {
+    // Multi-line segments: interior blank lines stay inside the region.
+    const input = 'Vex: line one\n\nline three\nMira: yo';
+    const s = splitSpeakerSegments(input, names);
+    ok(s.length === 2 && input.slice(s[0].start, s[0].end) === 'line one\n\nline three',
+      'multi-line segment region spans the blank line');
+  }
+  {
+    // Dedupe dropped a repeat prefix: the segment's slice keeps the dropped
+    // chars (offsets stay INPUT-relative), so assert the first line instead
+    // of the full text — the documented approximation.
+    const input = 'Vex: first\nVex: second';
+    const s = splitSpeakerSegments(input, names);
+    ok(s.length === 1 && s[0].text === 'first\nsecond', 'dedupe still merges repeat prefixes');
+    ok(s[0].start === input.indexOf('first') && s[0].end === input.length,
+      'deduped segment offsets map back to the input');
+    ok(input.slice(s[0].start, s[0].end).includes(s[0].text.split('\n')[0]),
+      'deduped slice contains the first content line');
+  }
+  {
+    // Fallbacks stay well-formed.
+    ok(splitSpeakerSegments('plain text', null)[0].start === 0
+      && splitSpeakerSegments('plain text', null)[0].end === 'plain text'.length,
+      'no-names fallback spans the input');
+    const s = splitSpeakerSegments('', names);
+    ok(s.length === 1 && s[0].start === 0 && s[0].end === 0, 'empty input → zero offsets');
   }
 }
 
@@ -1868,6 +1931,283 @@ section('branch-visible world state');
     ok(hidden !== p && hidden.content === 'orig', 'latest revision off-path → last visible revision content');
     ok(hidden.revisions.length === 2, 'revision log itself is never trimmed by the view');
   }
+}
+
+// ---- image takes: slot grouping + active-take resolution (v4.10) ----
+section('groupImageSlots');
+{
+  // Slotless (legacy) entries → singleton slots, in array order.
+  const leg = [{ src: 'a' }, { src: 'b' }];
+  const gl = groupImageSlots(leg, null);
+  ok(gl.length === 2 && gl[0].slot === '_0' && gl[1].slot === '_1'
+    && gl[0].takes.length === 1 && gl[0].active === leg[0] && gl[0].activeIdx === 0,
+    'slotless entries group into singleton slots in order');
+  // Multi-take slots group by first occurrence; interleaving keeps takes together.
+  const multi = [
+    { src: 's1t0', slot: 's1' }, { src: 's2t0', slot: 's2' }, { src: 's1t1', slot: 's1' },
+  ];
+  const gm = groupImageSlots(multi, null);
+  ok(gm.length === 2 && gm[0].slot === 's1' && gm[1].slot === 's2'
+    && gm[0].takes.length === 2 && gm[0].takes[0] === multi[0] && gm[0].takes[1] === multi[2],
+    'takes group by slot in first-occurrence order');
+  ok(gm[0].active === multi[2] && gm[0].activeIdx === 1 && gm[1].activeIdx === 0,
+    'active take defaults to the LAST take');
+  const gw = groupImageSlots(multi, { s1: 0 });
+  ok(gw[0].active === multi[0] && gw[0].activeIdx === 0, 'imgUsed override picks the shown take');
+  const gc = groupImageSlots(multi, { s1: 99 });
+  ok(gc[0].activeIdx === 1 && gc[0].active === multi[2], 'out-of-range imgUsed clamps high');
+  const gc2 = groupImageSlots(multi, { s1: -5 });
+  ok(gc2[0].activeIdx === 0 && gc2[0].active === multi[0], 'out-of-range imgUsed clamps low');
+  const garbage = groupImageSlots(multi, { s1: 'soon' });
+  ok(garbage[0].activeIdx === 1, 'non-numeric imgUsed falls back to the last take');
+  ok(multi.length === 3 && multi[0].slot === 's1' && !('activeIdx' in (multi[0] ?? {})),
+    'input array and entries are not mutated');
+  ok(groupImageSlots(null, null).length === 0 && groupImageSlots(undefined, {}).length === 0,
+    'missing images array groups to nothing');
+}
+
+// ---- swipe image attachments: prune keep + pending heal (v4.10) ----
+section('pruneInterrupted images');
+{
+  let chat = baseChat;
+  chat = appendMessage(chat, 'root', 'user', 'hi').chat;
+  const u1 = chat.activeLeafId;
+  chat = appendMessage(chat, u1, 'assistant', '').chat; // empty text — would be pruned…
+  const a1 = chat.activeLeafId;
+  const a1node = chat.messages[a1];
+  // …but the swipe carries a generated image (image-only message)
+  const imgSwipe = { text: '', createdAt: 3, modelId: null,
+    images: [{ src: 'data:image/webp;base64,xx', prompt: 'a dragon', caption: 'A dragon', at: 3 }] };
+  chat = { ...chat, messages: { ...chat.messages, [a1]: { ...a1node, swipes: [imgSwipe] } } };
+  const pruned = pruneInterrupted(chat);
+  ok(pruned.messages[a1] && pruned.messages[a1].swipes.length === 1,
+    'empty-text swipe with images survives the prune');
+  ok(pruned.messages[a1].swipes[0] === imgSwipe, 'clean image swipe kept by reference');
+  ok(pruneInterrupted(pruned) === pruned, 'settled image chat passes through by reference');
+
+  // pending image entries heal to error (pending dropped) on a kept swipe
+  const pendSwipe = { text: 'Here it is.', createdAt: 4, modelId: null,
+    images: [{ prompt: 'a dragon', caption: 'A dragon', at: 4, pending: true }, { src: 'data:x', at: 4 }] };
+  const chat2 = { ...chat, messages: { ...chat.messages, [a1]: { ...a1node, swipes: [pendSwipe] } } };
+  const healed = pruneInterrupted(chat2);
+  const he = healed.messages[a1].swipes[0].images;
+  ok(healed !== chat2 && he.length === 2, 'pending heal clones the chat');
+  ok(he[0].error === true && !('pending' in he[0]) && he[0].prompt === 'a dragon' && he[0].caption === 'A dragon' && he[0].at === 4,
+    'pending entry heals to error, pending dropped, other fields kept');
+  ok(he[1].src === 'data:x' && he[1].error === undefined, 'non-pending entry untouched');
+
+  // healing also applies to the root greeting swipe (root is never dropped)
+  const rootPend = { ...baseChat, messages: { root: { ...baseChat.messages.root,
+    swipes: [{ text: 'Welcome.', createdAt: 1, modelId: null, images: [{ prompt: 'x', pending: true }] }] } } };
+  const rootHealed = pruneInterrupted(rootPend);
+  ok(rootHealed !== rootPend && rootHealed.messages.root.swipes[0].images[0].error === true
+    && !('pending' in rootHealed.messages.root.swipes[0].images[0]),
+    'pending image heals even on the root greeting swipe');
+
+  // healImageEntry keeps `pos` (the image's placement in the reply) through
+  // the pending → error rebuild; a missing pos is not invented.
+  const healedPos = healImageEntry({ pending: true, prompt: 'a door', caption: 'Door', at: 5, pos: 42 });
+  ok(healedPos.error === true && healedPos.pos === 42 && !('pending' in healedPos)
+    && healedPos.prompt === 'a door' && healedPos.caption === 'Door' && healedPos.at === 5,
+    'heal keeps pos (and the other fields), drops pending');
+  const healedNoPos = healImageEntry({ pending: true, prompt: 'x', at: 5 });
+  ok(healedNoPos.error === true && !('pos' in healedNoPos), 'heal does not invent pos');
+  const settled = { src: 'data:x', at: 1, pos: 7 };
+  ok(healImageEntry(settled) === settled, 'settled entry returns by reference (pos untouched)');
+  // `slot` (the take's placement id) survives the pending → error rebuild too.
+  const healedSlot = healImageEntry({ pending: true, prompt: 'a door', at: 5, slot: 's1' });
+  ok(healedSlot.error === true && healedSlot.slot === 's1' && !('pending' in healedSlot),
+    'heal keeps slot, drops pending');
+  const settledSlot = { src: 'data:x', at: 1, slot: 's1' };
+  ok(healImageEntry(settledSlot) === settledSlot, 'settled entry with slot returns by reference');
+}
+
+// ---- shown images leave a cheap marker in fed-back history (v4.10) ----
+section('image history markers');
+{
+  const imgChat = (u1images, a1images) => ({
+    ...baseChat,
+    messages: {
+      root: node('root', null, 'assistant', 'Welcome to Veyra, {{user}}.', 1),
+      u1: { ...node('u1', 'root', 'user', 'hi', 2), fromSwipe: 0,
+        swipes: [{ text: 'hi', createdAt: 2, modelId: null, ...(u1images ? { images: u1images } : {}) }] },
+      a1: { ...node('a1', 'u1', 'assistant', 'Look at this.', 3), fromSwipe: 0,
+        swipes: [{ text: 'Look at this.', createdAt: 3, modelId: null, ...(a1images ? { images: a1images } : {}) }] },
+    },
+    activeLeafId: 'a1',
+  });
+  const find1 = (r, frag) => r.messages.find(m => m.content.includes(frag));
+  const r1 = assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat(null, [{ src: 'data:image/webp;base64,xx', caption: 'A dragon over Veyra', prompt: 'dragon prompt', at: 3 }]) });
+  ok(find1(r1, 'Look at this.').content.includes('\n\n[Image shown: A dragon over Veyra]'),
+    'shown image leaves a caption marker in fed-back history');
+  const r2 = assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat(null, [{ src: 'data:x', prompt: 'dragon prompt', at: 3 }]) });
+  ok(find1(r2, 'Look at this.').content.includes('[Image shown: dragon prompt]'),
+    'marker falls back to the prompt when no caption');
+  const r3 = assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat(null, [{ error: true, prompt: 'lost image', at: 3 }, { pending: true, prompt: 'pending image', at: 3 }]) });
+  ok(!r3.messages.some(m => m.content.includes('[Image shown:')),
+    'error/pending entries (no src) leave no marker');
+  const r4 = assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat([{ src: 'data:y', caption: 'User sketch', at: 2 }], null) });
+  ok(r4.messages.find(m => m.role === 'user').content.includes('[Image shown: User sketch]'),
+    'marker applies to user messages too');
+  const r5 = assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat(null, [{ src: 'data:z', caption: 'x'.repeat(300), at: 3 }]) });
+  ok(find1(r5, 'Look at this.').content.includes(`[Image shown: ${'x'.repeat(200)}]`),
+    'marker text is capped at 200 chars');
+  // Multi-take slots (image takes): ONE marker per slot, from the active
+  // take — default the last take, or the imgUsed pick.
+  const takes = [
+    { src: 'data:t0', caption: 'First take', prompt: 'p', at: 3, slot: 's1' },
+    { src: 'data:t1', caption: 'Second take', prompt: 'p', at: 4, slot: 's1' },
+  ];
+  const m6 = find1(assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: imgChat(null, takes) }), 'Look at this.').content;
+  ok((m6.match(/\[Image shown:/g) ?? []).length === 1 && m6.includes('[Image shown: Second take]'),
+    'a multi-take slot leaves exactly one marker, from the last take by default');
+  const c7 = imgChat(null, takes);
+  c7.messages = { ...c7.messages, a1: { ...c7.messages.a1,
+    swipes: [{ ...c7.messages.a1.swipes[0], imgUsed: { s1: 0 } }] } };
+  const m7 = find1(assemblePrompt({ scenario: baseScenario, persona, settings,
+    chat: c7 }), 'Look at this.').content;
+  ok((m7.match(/\[Image shown:/g) ?? []).length === 1 && m7.includes('[Image shown: First take]'),
+    'imgUsed picks the take the marker describes');
+}
+
+// ---- splitImageCalls (v4.10) ----
+section('splitImageCalls');
+{
+  const img = { name: 'generate_image', args: { prompt: 'a dragon' }, error: null, raw: '{}' };
+  const loreCall = { name: 'add_lore', args: {}, error: null, raw: '{}' };
+  const bad = { name: '', args: {}, error: 'malformed JSON', raw: '…' };
+  const unknown = { name: 'explode', args: {}, error: null, raw: '{}' };
+  const errImg = { name: 'generate_image', args: {}, error: 'malformed JSON', raw: '…' };
+  const { imageCalls, loreCalls } = splitImageCalls([img, loreCall, bad, unknown, errImg]);
+  ok(imageCalls.length === 1 && imageCalls[0] === img, 'generate_image call partitioned out');
+  ok(loreCalls.length === 4 && loreCalls[0] === loreCall && loreCalls.includes(bad)
+    && loreCalls.includes(unknown) && loreCalls.includes(errImg),
+    'lore/malformed/unknown/error calls all stay in loreCalls');
+  const empty = splitImageCalls(undefined);
+  ok(empty.imageCalls.length === 0 && empty.loreCalls.length === 0, 'missing input partitions to empty lists');
+  ok(IMAGE_CALL_CAP === 1 && DEFAULT_IMAGE_PROMPT.includes('generate_image') && DEFAULT_AVATAR_GEN_PROMPT.length > 0,
+    'image call cap + default prompts present');
+}
+
+// ---- image prompt prefix (v4.10) ----
+section('image prompt prefix');
+{
+  ok(imagePromptWithPrefix('masterpiece, best quality', 'a dragon') === 'masterpiece, best quality, a dragon',
+    'non-empty prefix comma-joins ahead of the prompt');
+  ok(imagePromptWithPrefix('', 'a dragon') === 'a dragon', 'empty prefix passes the prompt through');
+  ok(imagePromptWithPrefix('   ', 'a dragon') === 'a dragon', 'blank prefix passes the prompt through');
+  ok(imagePromptWithPrefix('  detailed  ', 'a dragon') === 'detailed, a dragon', 'prefix is trimmed before joining');
+}
+
+// ---- character card export + PNG embed (v4.10) ----
+section('character card export');
+{
+  const src3 = normalizeScenario({
+    id: 'S1', name: 'Mia Voss', description: 'A teaser line.', tags: ['scifi'],
+    backstory: 'The docks of Veyra.', greeting: 'Mia Voss: "Well, look who it is."',
+    scenarioInstructions: 'Stay in character.', alternateGreetings: ['Alt one.'],
+  });
+  const char3 = normalizeCharacter({
+    id: 'C1', name: 'Mia Voss', content: 'A smuggler. Quick-witted.',
+    greeting: 'Mia Voss: "Well, look who it is."', alternateGreetings: ['Alt one.'],
+  });
+  const card = buildCharacterCard(src3, char3);
+  ok(card.spec === 'chara_card_v2' && card.spec_version === '2.0' && card.data.name === 'Mia Voss',
+    'builds a chara_card v2 object');
+  const rt = parseCharacterCard(card);
+  ok(rt && rt.character.name === 'Mia Voss' && rt.scenario.name === 'Mia Voss', 'round-trip: name');
+  ok(rt.character.content === char3.content, 'round-trip: description → character content');
+  ok(rt.scenario.description === src3.description, 'round-trip: description → creator_notes → scenario metadata');
+  ok(rt.character.greeting === char3.greeting && rt.scenario.greeting === src3.greeting,
+    'round-trip: first_mes → both greetings');
+  ok(rt.scenario.backstory === src3.backstory, 'round-trip: backstory → scenario field');
+  ok(rt.scenario.scenarioInstructions === src3.scenarioInstructions, 'round-trip: scenarioInstructions → system_prompt');
+  ok(rt.scenario.tags.join(',') === 'scifi', 'round-trip: tags');
+  ok(rt.character.alternateGreetings.length === 1 && rt.character.alternateGreetings[0] === 'Alt one.'
+    && rt.scenario.alternateGreetings[0] === 'Alt one.', 'round-trip: alternateGreetings');
+  // Character-only export (character linked nowhere): a null scenario still
+  // builds a valid card — character fields carry it, scenario fields empty.
+  const solo = buildCharacterCard(null, char3);
+  ok(solo.data.name === 'Mia Voss' && solo.data.scenario === '' && solo.data.creator_notes === ''
+    && solo.data.system_prompt === '' && solo.data.tags.length === 0 && solo.data.first_mes === char3.greeting,
+    'null scenario → character-only card');
+  const rtSolo = parseCharacterCard(solo);
+  ok(rtSolo && rtSolo.character.name === 'Mia Voss' && rtSolo.character.content === char3.content
+    && rtSolo.character.greeting === char3.greeting && rtSolo.scenario.backstory === '',
+    'null-scenario card round-trips the character');
+}
+section('PNG card embed');
+{
+  // Minimal PNG the extractor accepts: signature + one IHDR + IEND (chunk
+  // contents/CRCs are not validated by the extractor).
+  const minimalPng = () => {
+    const ihdr = Buffer.alloc(8 + 13 + 4);
+    ihdr.writeUInt32BE(13, 0);
+    ihdr.write('IHDR', 4, 'latin1');
+    const iend = Buffer.alloc(8 + 4);
+    iend.writeUInt32BE(0, 0);
+    iend.write('IEND', 4, 'latin1');
+    return new Uint8Array(Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), ihdr, iend]));
+  };
+  const json = JSON.stringify({ spec: 'chara_card_v2', data: { name: 'Mia "☁" Voss', note: 'héllo' } });
+  const src = minimalPng();
+  const embedded = embedPngCardJson(src, json);
+  ok(extractPngCardJson(embedded) === json, 'embed → extract round-trips the JSON exactly (UTF-8 + base64)');
+  ok(src.length === 8 + 25 + 12 && extractPngCardJson(src) === null, 'input bytes untouched (still cardless)');
+  // chunk structure: inserted right after IHDR, length/type/CRC well-formed
+  const off = 8 + 25; // signature + IHDR chunk
+  const be32 = (a, o) => (((a[o] << 24) | (a[o + 1] << 16) | (a[o + 2] << 8) | a[o + 3]) >>> 0);
+  const u8type = (a, o) => String.fromCharCode(a[o + 4], a[o + 5], a[o + 6], a[o + 7]);
+  const len = be32(embedded, off);
+  ok(u8type(embedded, off) === 'tEXt' && len === ('chara\0'.length + Buffer.from(json, 'utf8').toString('base64').length),
+    'tEXt chunk inserted before IEND with the chara payload length');
+  ok(be32(embedded, off + 8 + len) === pngCrc32(embedded.subarray(off + 4, off + 8 + len)),
+    'embedded chunk CRC32 validates');
+  ok(be32(embedded, off + 8 + len + 4 + 0) === 0 && u8type(embedded, off + 8 + len + 4) === 'IEND',
+    'IEND follows the inserted chunk');
+  let threw = false;
+  try { embedPngCardJson(new Uint8Array([1, 2, 3, 4]), '{}'); } catch { threw = true; }
+  ok(threw, 'non-PNG input throws');
+  threw = false;
+  try { embedPngCardJson(new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), '{}'); } catch { threw = true; }
+  ok(threw, 'PNG without IEND throws');
+}
+
+// ---- avatar field import healing (v4.10) ----
+section('avatar normalization');
+{
+  ok(normalizeCharacter({ name: 'Z' }).avatar === '', 'character missing avatar heals to empty string');
+  ok(normalizeCharacter({ name: 'Z', avatar: 42 }).avatar === '', 'character non-string avatar heals to empty string');
+  ok(normalizeCharacter({ name: 'Z', avatar: 'data:image/webp;base64,xx' }).avatar === 'data:image/webp;base64,xx',
+    'character avatar string kept');
+  ok(normalizeScenario({ name: 'X' }).avatar === '', 'scenario missing avatar heals to empty string');
+  ok(normalizeScenario({ name: 'X', avatar: null }).avatar === '', 'scenario non-string avatar heals to empty string');
+  ok(normalizeScenario({ name: 'X', avatar: 'data:image/png;base64,yy' }).avatar === 'data:image/png;base64,yy',
+    'scenario avatar string kept');
+  ok(normalizeCharacter({ name: 'Z' }).avatarFull === '', 'character missing avatarFull heals to empty string');
+  ok(normalizeCharacter({ name: 'Z', avatarFull: 42 }).avatarFull === '', 'character non-string avatarFull heals to empty string');
+  ok(normalizeCharacter({ name: 'Z', avatarFull: 'data:image/webp;base64,xx' }).avatarFull === 'data:image/webp;base64,xx',
+    'character avatarFull string kept');
+  ok(normalizeScenario({ name: 'X' }).avatarFull === '', 'scenario missing avatarFull heals to empty string');
+  ok(normalizeScenario({ name: 'X', avatarFull: null }).avatarFull === '', 'scenario non-string avatarFull heals to empty string');
+  ok(normalizeScenario({ name: 'X', avatarFull: 'data:image/png;base64,yy' }).avatarFull === 'data:image/png;base64,yy',
+    'scenario avatarFull string kept');
+  // Character-type lore pieces (tool-registered characters) carry avatars too.
+  ok(normalizeLorePiece({ title: 'T' }).avatar === '', 'lore piece missing avatar heals to empty string');
+  ok(normalizeLorePiece({ title: 'T', avatar: 42 }).avatar === '', 'lore piece non-string avatar heals to empty string');
+  ok(normalizeLorePiece({ title: 'T', avatar: 'data:image/webp;base64,xx' }).avatar === 'data:image/webp;base64,xx',
+    'lore piece avatar string kept');
+  ok(normalizeLorePiece({ title: 'T' }).avatarFull === '', 'lore piece missing avatarFull heals to empty string');
+  ok(normalizeLorePiece({ title: 'T', avatarFull: null }).avatarFull === '', 'lore piece non-string avatarFull heals to empty string');
+  ok(normalizeLorePiece({ title: 'T', avatarFull: 'data:image/webp;base64,xx' }).avatarFull === 'data:image/webp;base64,xx',
+    'lore piece avatarFull string kept');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);
