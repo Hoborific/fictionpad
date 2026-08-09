@@ -1342,8 +1342,11 @@ function Main({ storage, storageKind, storageFailed }) {
             imageQueued = stamped && swipeIdx >= 0 ? { prompt, caption, slot, swipeIdx } : null;
           }
           if (toolResults.length) {
+            // Full args are recorded (pretty-printed JSON) — truncation to a
+            // one-line preview is display-only, at render time in the
+            // inspector and the gear popover.
             man.toolCalls = toolResults.map(r => ({
-              name: r.name, ok: r.ok, note: r.note, args: toPreview(JSON.stringify(r.args ?? {}), 200),
+              name: r.name, ok: r.ok, note: r.note, args: JSON.stringify(r.args ?? {}, null, 2),
             }));
             const capped = loreResults.filter(r => r.note === 'call cap reached').length;
             const imgCapped = imageResults.filter(r => r.note === 'call cap reached').length;
@@ -1389,9 +1392,10 @@ function Main({ storage, storageKind, storageFailed }) {
           const swipes = n.swipes.slice();
           swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart,
             ...(interrupted ? { interrupted: true } : {}),
-            // Persisted on the swipe so the gear popover can show them after the fact.
+            // Persisted on the swipe (full args) so the gear popover can show
+            // them after the fact — the popover truncates for display only.
             ...(toolResults ? { toolCalls: toolResults.map(({ name, ok, note, args }) => ({
-              name, ok, note, args: toPreview(JSON.stringify(args ?? {}), 200),
+              name, ok, note, args: JSON.stringify(args ?? {}, null, 2),
             })) } : {}) };
           const messages = { ...work.messages, [nodeId]: { ...n, swipes } };
           const cur = ref.current.chats[work.id];

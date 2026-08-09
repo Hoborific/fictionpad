@@ -545,7 +545,9 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .msg .tools-note { color: var(--c-dim); font-weight: 400; }
 .msg .tools-args {
   color: var(--c-faint); font-size: 11.5px; white-space: pre-wrap; word-break: break-word;
+  cursor: pointer;
 }
+.msg .tools-args:hover { color: var(--c-dim); }
 /* Branch chip + popover: a dashed pill under any message with continuations
    off the active path (the fork point, visible in the flow); the popover
    lists every child branch. */

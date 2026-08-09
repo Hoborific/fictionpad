@@ -199,7 +199,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
             <${InspectorRow} key=${i} dimmed=${!t.ok}
               pills=${[{ text: t.ok ? 'ok' : 'failed', cls: t.ok ? 'ok' : 'pinned' }]}
               title=${t.name || '(unparsed)'} meta=${t.note}
-              preview=${t.args} content=${t.args} />`)}
+              preview=${toPreview(t.args, 140)} content=${t.args} />`)}
         <//>`}
       ${hasChat && html`<button class="btn" style=${{ marginTop: '8px' }} onClick=${() => onPreview()}>Re-run assembler on current chat</button>`}
     </div>`;

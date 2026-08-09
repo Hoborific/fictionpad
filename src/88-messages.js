@@ -55,6 +55,20 @@ function ThinkBox({ text, streaming }) {
     </div>`;
 }
 
+// One recorded tool call in the gear popover: ✓/✕ + name + note, and the
+// args as a one-line preview that expands to the full JSON on click — the
+// swipe stores the untruncated args, truncation is display-only here.
+function ToolCallRow({ t }) {
+  const [open, setOpen] = useState(false);
+  const hasArgs = t.args && t.args !== '{}';
+  return html`
+    <span class="tools-row ${t.ok ? '' : 'failed'}">
+      <span>${t.ok ? '✓' : '✕'} <b>${t.name || '(unparsed)'}</b>${t.note ? html`<span class="tools-note"> — ${t.note}</span>` : null}</span>
+      ${hasArgs && html`<span class="tools-args" title=${open ? null : 'Click to view the full arguments'}
+        onClick=${() => setOpen(!open)}>${open ? t.args : toPreview(t.args, 140)}</span>`}
+    </span>`;
+}
+
 // Generated-image attachments on a swipe (v4.10): entries group into SLOTS —
 // one placement, one or more takes (per-image swipes). A slot renders once:
 // the active take (pending → shimmer, error/no src → dim note with the prompt
@@ -383,11 +397,7 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
             onClick=${() => setToolsOpen(!toolsOpen)}>⚙\uFE0E ${swipe.toolCalls.length}</button>
           ${toolsOpen && html`
             <span class="tools-pop">
-              ${swipe.toolCalls.map((t, i) => html`
-                <span key=${i} class="tools-row ${t.ok ? '' : 'failed'}">
-                  <span>${t.ok ? '✓' : '✕'} <b>${t.name || '(unparsed)'}</b>${t.note ? html`<span class="tools-note"> — ${t.note}</span>` : null}</span>
-                  ${t.args && t.args !== '{}' && html`<span class="tools-args">${t.args}</span>`}
-                </span>`)}
+              ${swipe.toolCalls.map((t, i) => html`<${ToolCallRow} key=${i} t=${t} />`)}
             </span>`}`}
         ${memCount > 0 && html`
           <button class="pill memory" title=${`${memCount} ${memCount === 1 ? 'memory' : 'memories'} recorded at this point in the chat — open the Memory tab`}

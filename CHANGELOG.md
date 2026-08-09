@@ -1150,3 +1150,9 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Changed**
 
 - Rewind (`Rewind to here`) and fork no longer trim memory stores, lore revision logs, or the lore review queue — only the summary/extraction cadence cursors roll back, so those passes still re-fire from the rewind point.
+
+### v4.10.2
+
+**Fixed**
+
+- Tool-call records now keep the FULL arguments: both the inspector's "Tool calls" section and the per-message ⚙ pill used to store the args pre-truncated to 200 characters, so a long `generate_image` prompt (or any sizable tool call) was cut off with no way to read it. The swipe and manifest now persist the complete pretty-printed JSON; the inspector row shows a one-line preview that expands to the full args on click, and the ⚙ popover's args line does the same.
