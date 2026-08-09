@@ -1800,4 +1800,121 @@ function buildCharacterCard(scenario, character) {
     },
   };
 }
+// ---- image externalization (used by the storage layer, 40-storage.js) ----
+// Persisted entities carry `imgref:<id>` sentinels in place of `data:image/…`
+// data URLs; image payloads live in a separate Images store (one row per
+// distinct image) and are rehydrated back into entities on load. The app data
+// model never sees a sentinel — extraction/rehydration happen only at the
+// persistence boundary. Ids are content hashes, so forks/copies/takes that
+// share a data URL share ONE stored image (dedupe by construction).
+const IMGREF_PREFIX = 'imgref:';
+const IMGREF_RE = /^imgref:([0-9a-f]{16}(?:-[0-9]+)?)$/;
+// cyrb53-style 64-bit string hash — sync, no crypto dependency, avalanche is
+// ample for content dedupe (not a security boundary).
+function hashImageId(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
+}
+// Replace every data:image/ string in `value` with its imgref sentinel.
+// `known` (id → dataUrl) = images already stored: a hit with identical
+// content is dedupe (no row re-written); a hit with different content is a
+// hash collision and the id is salted (-2, -3…). Structural sharing:
+// unchanged subtrees are returned by reference, input is never mutated.
+function extractImages(value, known = new Map()) {
+  const images = [];
+  const assigned = new Map(); // id -> dataUrl, this pass (catches in-entity collisions)
+  const byUrl = new Map();    // dataUrl -> id, this pass
+  const walk = (v) => {
+    if (typeof v === 'string') {
+      if (!v.startsWith('data:image/')) return v;
+      let id = byUrl.get(v);
+      if (!id) {
+        const base = hashImageId(v);
+        id = base;
+        for (let n = 2; ; n++) {
+          const owner = assigned.has(id) ? assigned.get(id) : known.get(id);
+          if (owner === undefined || owner === v) break;
+          id = `${base}-${n}`;
+        }
+        assigned.set(id, v);
+        byUrl.set(v, id);
+        if (!known.has(id)) images.push([id, v]);
+      }
+      return IMGREF_PREFIX + id;
+    }
+    if (Array.isArray(v)) {
+      let out = null;
+      for (let i = 0; i < v.length; i++) {
+        const w = walk(v[i]);
+        if (w !== v[i] && !out) out = v.slice();
+        if (out) out[i] = w;
+      }
+      return out ?? v;
+    }
+    if (v && typeof v === 'object') {
+      let out = null;
+      for (const k of Object.keys(v)) {
+        const w = walk(v[k]);
+        if (w !== v[k] && !out) out = { ...v };
+        if (out) out[k] = w;
+      }
+      return out ?? v;
+    }
+    return v;
+  };
+  return { entity: walk(value), images };
+}
+// Reverse of extractImages: sentinels whose id exists in `images` (id →
+// dataUrl) are replaced by the stored data URL (shared string instance);
+// unknown refs and ref-shaped user text pass through untouched.
+function rehydrateImages(value, images = new Map()) {
+  const walk = (v) => {
+    if (typeof v === 'string') {
+      if (!v.startsWith(IMGREF_PREFIX)) return v;
+      const m = IMGREF_RE.exec(v);
+      if (!m) return v;
+      const hit = images.get(m[1]);
+      return hit !== undefined ? hit : v;
+    }
+    if (Array.isArray(v)) {
+      let out = null;
+      for (let i = 0; i < v.length; i++) {
+        const w = walk(v[i]);
+        if (w !== v[i] && !out) out = v.slice();
+        if (out) out[i] = w;
+      }
+      return out ?? v;
+    }
+    if (v && typeof v === 'object') {
+      let out = null;
+      for (const k of Object.keys(v)) {
+        const w = walk(v[k]);
+        if (w !== v[k] && !out) out = { ...v };
+        if (out) out[k] = w;
+      }
+      return out ?? v;
+    }
+    return v;
+  };
+  return walk(value);
+}
+// GC reference scan: collect every data:image/ string reachable in `value`
+// (references into a Set, no copies). The storage layer compares rows by URL
+// — NOT by re-hashing — so salted collision ids stay exact.
+function collectImageUrls(value, into = new Set()) {
+  const walk = (v) => {
+    if (typeof v === 'string') { if (v.startsWith('data:image/')) into.add(v); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+    if (v && typeof v === 'object') for (const k of Object.keys(v)) walk(v[k]);
+  };
+  walk(value);
+  return into;
+}
 // === PURE CORE END ===

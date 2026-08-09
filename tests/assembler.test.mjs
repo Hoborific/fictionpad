@@ -23,7 +23,8 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
-  parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32 };`;
+  parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
+  hashImageId, extractImages, rehydrateImages, collectImageUrls };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -38,6 +39,7 @@ const {
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
+  hashImageId, extractImages, rehydrateImages, collectImageUrls,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -2247,6 +2249,56 @@ section('avatar normalization');
   ok(normalizeLorePiece({ title: 'T', avatarFull: null }).avatarFull === '', 'lore piece non-string avatarFull heals to empty string');
   ok(normalizeLorePiece({ title: 'T', avatarFull: 'data:image/webp;base64,xx' }).avatarFull === 'data:image/webp;base64,xx',
     'lore piece avatarFull string kept');
+}
+
+section('image externalization (extractImages / rehydrateImages)');
+{
+  const A = 'data:image/webp;base64,AAAA';
+  const B = 'data:image/png;base64,BBBB';
+  const entity = {
+    name: 'Chat', avatar: A,
+    messages: { n1: { swipes: [{ text: 'hi', images: [{ src: A, caption: 'x' }, { src: B }] }, { text: 'plain' }] } },
+  };
+  const { entity: stripped, images } = extractImages(entity, new Map());
+  ok(images.length === 2, 'two distinct images extracted (dedupe within entity)');
+  ok(entity.avatar === A && entity.messages.n1.swipes[0].images[0].src === A, 'input not mutated');
+  const idA = hashImageId(A), idB = hashImageId(B);
+  ok(stripped.avatar === `imgref:${idA}`, 'avatar replaced by sentinel');
+  ok(stripped.messages.n1.swipes[0].images[0].src === `imgref:${idA}`, 'shared URL shares one id');
+  ok(stripped.messages.n1.swipes[0].images[1].src === `imgref:${idB}`, 'second image gets its own id');
+  ok(stripped.messages.n1.swipes[0].images[0].caption === 'x', 'non-image strings untouched');
+  ok(stripped.messages.n1.swipes[1] === entity.messages.n1.swipes[1], 'unchanged subtree shared by reference');
+  ok(/^imgref:[0-9a-f]{16}$/.test(stripped.avatar), 'sentinel format');
+
+  // Dedupe against already-stored images: same content → no new row.
+  const known = new Map([[idA, A]]);
+  const again = extractImages({ a: A, b: B }, known);
+  ok(again.images.length === 1 && again.images[0][0] === idB, 'known image deduped, only the new one stored');
+  ok(again.entity.a === `imgref:${idA}`, 'known image still replaced by its sentinel');
+
+  // Hash collision: known id with DIFFERENT content → salted id.
+  const collider = new Map([[idA, 'data:image/gif;base64,OTHER']]);
+  const col = extractImages({ a: A }, collider);
+  ok(col.images.length === 1 && col.images[0][0] === `${idA}-2`, 'collision salts the id');
+  ok(col.entity.a === `imgref:${idA}-2`, 'salted sentinel written');
+
+  // Re-extracting an already-extracted entity is a no-op (idempotent).
+  const re = extractImages(stripped, new Map());
+  ok(re.images.length === 0 && re.entity === stripped, 're-extraction is a no-op by reference');
+
+  // Round-trip.
+  const map = new Map(images);
+  const back = rehydrateImages(stripped, map);
+  ok(back.avatar === A && back.messages.n1.swipes[0].images[1].src === B, 'rehydrate round-trips');
+  ok(back.avatar === map.get(idA), 'rehydrated string is the shared stored instance');
+  ok(rehydrateImages(stripped, new Map()).avatar === stripped.avatar, 'missing ref passes through');
+  ok(rehydrateImages({ t: 'imgref:nothex' }, map).t === 'imgref:nothex', 'ref-shaped user text untouched');
+  ok(stripped.avatar.startsWith('imgref:'), 'rehydrate does not mutate the stripped entity');
+
+  // GC reference scan: urls found across nested entities, compared by URL.
+  const refs = collectImageUrls({ list: [entity, { deep: { x: B } }] });
+  ok(refs.has(A) && refs.has(B) && refs.size === 2, 'collectImageUrls finds nested image URLs');
+  ok(collectImageUrls({ t: 'data:text/plain,xx' }).size === 0, 'non-image data URLs not collected');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

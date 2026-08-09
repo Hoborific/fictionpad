@@ -24,7 +24,8 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   BranchPanel, appendMessage, activateBranch, getActivePath,
   splitImageCalls, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   substituteComfyWorkflow, comfyHistoryResult, parseImageSize, comfyRandomSeed,
-  buildCharacterCard, embedPngCardJson, pngCrc32 };`);
+  buildCharacterCard, embedPngCardJson, pngCrc32,
+  extractImages, rehydrateImages, hashImageId, ServerDBAdapter };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -1317,6 +1318,75 @@ trial('chat options: off-branch pieces keep their row with a branch pill (deriva
   if (out.split('>branch<').length - 1 !== 1) throw new Error('exactly one branch pill expected');
   const eveRow = out.slice(out.indexOf('Eve'), out.indexOf('Docks'));
   if (!eveRow.includes('>branch<')) throw new Error('branch pill should sit on the off-branch piece');
+});
+
+// Out-of-band image storage: entities persist with imgref: sentinels, image
+// payloads ride a separate Images store (deduped by content hash), the cache
+// stays rehydrated, old servers get inline saves, and GC reclaims an image
+// only when the last referencing entity is deleted.
+trial('storage: image externalization + GC (mock server)', async () => {
+  const { ServerDBAdapter, hashImageId } = fp;
+  const A = 'data:image/webp;base64,AAAA';
+  const idA = hashImageId(A);
+  const mkServer = (info) => {
+    const rows = { Chats: {}, Images: {} };
+    const posts = [];
+    const f = async (route, opts) => {
+      const body = JSON.parse(opts?.body ?? '{}');
+      const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
+      if (route === '/version') return ok(info);
+      if (route === '/all') { posts.push({ route, body }); return ok({ entries: rows[body.store] ?? {} }); }
+      if (route === '/save') { posts.push({ route, body }); rows[body.store][body.key] = body.data; return ok({ ok: true }); }
+      if (route === '/delete') { posts.push({ route, body }); delete rows[body.store][body.key]; return ok({ ok: true }); }
+      return ok({});
+    };
+    return { rows, posts, f };
+  };
+  const oldFetch = globalThis.fetch;
+  try {
+    // New server: extraction + dedupe + rehydration.
+    const srv = mkServer({ version: 1, storage: true, images: true });
+    globalThis.fetch = srv.f;
+    const st = new ServerDBAdapter('');
+    await st.init();
+    st.set('Chats', 'c1', { id: 'c1', avatar: A, messages: {} });
+    st.set('Chats', 'c2', { id: 'c2', avatar: A, messages: {} }); // fork shares the image
+    await st.flush();
+    const imageSaves = srv.posts.filter(p => p.route === '/save' && p.body.store === 'Images');
+    if (imageSaves.length !== 1 || imageSaves[0].body.key !== idA || imageSaves[0].body.data !== A)
+      throw new Error('image row not written exactly once with the hash id: ' + JSON.stringify(imageSaves));
+    if (srv.rows.Chats.c1.avatar !== `imgref:${idA}`) throw new Error('entity not persisted with sentinel: ' + srv.rows.Chats.c1.avatar);
+    if (st.get('Chats', 'c1').avatar !== A) throw new Error('cache does not hold the rehydrated data URL');
+    if (!srv.posts.some(p => p.route === '/all' && p.body.refs === true))
+      throw new Error('boot reads must pass refs:true (thin payloads)');
+    // Fresh adapter against the same rows: init rehydrates sentinels.
+    const st2 = new ServerDBAdapter('');
+    await st2.init();
+    if (st2.get('Chats', 'c1').avatar !== A) throw new Error('init did not rehydrate imgref');
+    // GC: deleting one of two referencing chats keeps the row; deleting the
+    // last one collects it.
+    st.remove('Chats', 'c1');
+    await st.flush();
+    await st.collectImages();
+    if (srv.rows.Images[idA] !== A) throw new Error('GC reclaimed an image still referenced by c2');
+    st.remove('Chats', 'c2');
+    await st.flush();
+    await st.collectImages();
+    if (idA in srv.rows.Images) throw new Error('GC did not reclaim the orphaned image');
+    if (!srv.posts.some(p => p.route === '/delete' && p.body.store === 'Images' && p.body.key === idA))
+      throw new Error('GC did not POST the Images delete');
+    clearTimeout(st.gcTimer); // debounced sweep must not keep the process alive
+
+    // Old server (no capability): inline saves, no Images traffic.
+    const old = mkServer({ version: 1, storage: true });
+    globalThis.fetch = old.f;
+    const stOld = new ServerDBAdapter('');
+    await stOld.init();
+    stOld.set('Chats', 'c1', { id: 'c1', avatar: A, messages: {} });
+    await stOld.flush();
+    if (old.rows.Chats.c1.avatar !== A) throw new Error('old-server save not inline: ' + old.rows.Chats.c1.avatar);
+    if (old.posts.some(p => p.body.store === 'Images')) throw new Error('Images traffic against an old server');
+  } finally { globalThis.fetch = oldFetch; }
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.

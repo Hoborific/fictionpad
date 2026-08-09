@@ -67,7 +67,10 @@ const PORT = Number(process.argv[2]) || 8788;
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.FICTIONPAD_DB || join(ROOT, 'fictionpad.db');
 const TOKEN = process.env.FICTIONPAD_TOKEN || null; // when set, storage routes need Bearer auth
-const MAX_BODY = 8 * 1024 * 1024; // request-body cap for storage + proxy routes
+// Request-body cap for storage + proxy routes. Chats carry images as data
+// URLs (avatars incl. the full-res avatarFull, generated-image takes), so a
+// busy chat JSON easily clears 8 MB — 64 MB default, env-overridable.
+const MAX_BODY = (Number(process.env.FICTIONPAD_MAX_BODY_MB) || 64) * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5 * 60_000; // LLM streams can be long; 5 min ceiling
 
 // Whole-server HTTP Basic auth (LAN exposure): FICTIONPAD_AUTH=user:password.
@@ -108,7 +111,7 @@ const basicChallenge = (res, req) => {
 };
 
 // ---- server-side storage (mikupad-style): one kv table, gzip-compressed JSON ----
-const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters']);
+const KNOWN_STORES = new Set(['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters', 'Images']);
 let db;
 try {
   db = new DatabaseSync(DB_PATH);
@@ -120,6 +123,46 @@ try {
   console.error(`  (${err?.message || err})`);
   console.error(`  Delete or restore ${DB_PATH}, then restart the server.`);
   process.exit(1);
+}
+
+// ---- imgref rehydration for pre-v4.11 clients ----
+// New clients persist image payloads as separate Images rows, leaving
+// `imgref:<id>` sentinels inside entities, and rehydrate client-side (they
+// pass `refs: true` on /load and /all, which also keeps their boot payloads
+// thin). Clients that predate the feature would render broken images from
+// the sentinels, so their reads are rehydrated here instead. The sentinel
+// format must stay in sync with the app's src/30-core.js.
+const IMGREF_RE = /^imgref:([0-9a-f]{16}(?:-[0-9]+)?)$/;
+function rehydrateRefs(value, loadImages) {
+  if (typeof value === 'string') {
+    if (!value.startsWith('imgref:')) return value;
+    const m = IMGREF_RE.exec(value);
+    if (!m) return value;
+    const hit = loadImages().get(m[1]);
+    return hit !== undefined ? hit : value;
+  }
+  if (Array.isArray(value)) { for (let i = 0; i < value.length; i++) value[i] = rehydrateRefs(value[i], loadImages); return value; }
+  if (value && typeof value === 'object') { for (const k of Object.keys(value)) value[k] = rehydrateRefs(value[k], loadImages); return value; }
+  return value;
+}
+// Per-request lazy Images map — built at most once, and only when a blob
+// actually contains the sentinel prefix (checked on the raw JSON text).
+function imagesLoader() {
+  let m = null;
+  return () => {
+    if (!m) {
+      m = new Map();
+      for (const row of db.prepare('SELECT key, data FROM kv WHERE store = ?').all('Images')) {
+        try { m.set(row.key, JSON.parse(gunzipSync(row.data).toString('utf8'))); } catch {}
+      }
+    }
+    return m;
+  };
+}
+function maybeRehydrate(text, refs) {
+  const data = JSON.parse(text);
+  if (refs === true || !text.includes('imgref:')) return data;
+  return rehydrateRefs(data, imagesLoader());
 }
 
 // ---- WAL durability ----
@@ -305,7 +348,7 @@ async function handleRequest(req, res) {
   // is set (local dev default — see the startup warning).
   if (url.pathname === '/version' && req.method === 'GET') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
-    return sendJson(req, res, 200, { version: 1, storage: true });
+    return sendJson(req, res, 200, { version: 1, storage: true, images: true });
   }
 
   // Full-db backup: checkpoint the WAL first so the streamed .db is a
@@ -353,7 +396,7 @@ async function handleRequest(req, res) {
         const row = db.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get(store, String(key));
         if (!row) return sendJson(req, res, 404, { error: 'not found' });
         try {
-          return sendJson(req, res, 200, { data: JSON.parse(gunzipSync(row.data).toString('utf8')) });
+          return sendJson(req, res, 200, { data: maybeRehydrate(gunzipSync(row.data).toString('utf8'), body.refs) });
         } catch (err) {
           console.warn(`corrupted kv row ${store}/${key}: ${err?.message || err}`);
           return sendJson(req, res, 500, { error: 'corrupted stored data' });
@@ -368,9 +411,12 @@ async function handleRequest(req, res) {
       }
       case '/all': {
         const entries = {};
+        const loadImages = imagesLoader();
         for (const row of db.prepare('SELECT key, data FROM kv WHERE store = ?').all(store)) {
           try {
-            entries[row.key] = JSON.parse(gunzipSync(row.data).toString('utf8'));
+            const text = gunzipSync(row.data).toString('utf8');
+            const data = JSON.parse(text);
+            entries[row.key] = (body.refs === true || !text.includes('imgref:')) ? data : rehydrateRefs(data, loadImages);
           } catch (err) {
             // One bad row must not take down the whole store (the app calls
             // /all at boot) — skip it and keep serving the rest.

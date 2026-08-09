@@ -9,9 +9,18 @@ class AbstractStorage extends EventTarget {
   constructor() {
     super();
     this.cache = Object.fromEntries(STORES.map(s => [s, {}]));
+    // Mirror of the adapter-internal Images store (id → dataUrl). Entities in
+    // cache hold data URLs (rehydrated); extraction to imgref: sentinels
+    // happens only at the persistence boundary (see 30-core.js).
+    this.images = new Map();
+    // Adapters that support the Images store (IndexedDB always; server only
+    // when /version advertises it) persist images out-of-band. Off = inline
+    // mode: entities persist verbatim, exactly like before the feature.
+    this.imagesEnabled = false;
     this.saveQueue = new Map();
     this.saveTimer = null;
     this.retryTimer = null;
+    this.gcTimer = null;
     // Connectivity restored → flush any re-queued writes immediately.
     if (typeof window !== 'undefined')
       window.addEventListener('online', () => this.flush());
@@ -29,8 +38,52 @@ class AbstractStorage extends EventTarget {
     delete this.cache[store][key];
     this.saveQueue.set(`${store}/${key}`, { op: 'delete', store, key });
     this.#schedule();
+    this.#scheduleImageGc();
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
+  // Shared persist path for puts: extract images out-of-band (rows first, so
+  // the entity never references a missing image), then the entity itself.
+  // New ids join this.images only after their row landed — a flush retry
+  // re-extracts cleanly (dedupe via known is idempotent).
+  async persistEntity(store, key, value) {
+    if (!this.imagesEnabled) { await this.persistPut(store, key, value); return; }
+    const { entity, images } = extractImages(value, this.images);
+    for (const [id, dataUrl] of images) {
+      await this.persistImage(id, dataUrl);
+      this.images.set(id, dataUrl);
+    }
+    await this.persistPut(store, key, entity);
+  }
+  // Image GC: a reference scan, never refcounting. Debounced behind deletes
+  // (and after the flush that lands them): walk the whole cache (data URLs
+  // are rehydrated there) and drop every stored image no entity references.
+  // Cache is the single source of truth, so a live — or merely queued —
+  // entity's images can never be reclaimed. Inline mode: nothing stored
+  // out-of-band, sweep stays a no-op.
+  #scheduleImageGc() {
+    if (!this.imagesEnabled) return;
+    clearTimeout(this.gcTimer);
+    this.gcTimer = setTimeout(async () => {
+      try { await this.flush(); } catch {}
+      await this.collectImages();
+    }, 2000);
+  }
+  async collectImages() {
+    const referenced = new Set();
+    for (const s of STORES)
+      for (const v of Object.values(this.cache[s])) collectImageUrls(v, referenced);
+    for (const [id, dataUrl] of [...this.images]) {
+      if (referenced.has(dataUrl)) continue;
+      try {
+        await this.persistDeleteImage(id);
+        this.images.delete(id);
+      } catch (e) { console.error('FictionPad: image GC failed', e); }
+    }
+  }
+  async persistPut() {}
+  async persistDelete() {}
+  async persistImage() {}
+  async persistDeleteImage() {}
   #schedule() {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.flush(), 500);
@@ -52,7 +105,7 @@ class AbstractStorage extends EventTarget {
     let failed = false, fatal = null;
     for (const item of items) {
       try {
-        if (item.op === 'put') await this.persistPut(item.store, item.key, item.value);
+        if (item.op === 'put') await this.persistEntity(item.store, item.key, item.value);
         else await this.persistDelete(item.store, item.key);
       } catch (e) {
         console.error('FictionPad: persist failed', e);
@@ -107,21 +160,29 @@ class IndexedDBAdapter extends AbstractStorage {
     super();
     this.dbName = dbName;
     this.db = null;
+    this.imagesEnabled = true;
   }
   async init() {
     this.db = await new Promise((resolve, reject) => {
-      // v2 added the Characters store; onupgradeneeded creates any missing
-      // store idempotently, so old v1 databases upgrade cleanly.
-      const req = indexedDB.open(this.dbName, 2);
+      // v2 added the Characters store, v3 the Images store (out-of-band image
+      // payloads); onupgradeneeded creates any missing store idempotently, so
+      // old databases upgrade cleanly.
+      const req = indexedDB.open(this.dbName, 3);
       req.onerror = () => reject(req.error);
       req.onsuccess = () => resolve(req.result);
       req.onupgradeneeded = (e) => {
         const db = e.target.result;
-        for (const s of STORES)
+        for (const s of [...STORES, 'Images'])
           if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
       };
     });
-    for (const s of STORES) this.cache[s] = await this.#readAll(s);
+    // Images first: entities are rehydrated from them (imgref: → data URL).
+    this.images = new Map(Object.entries(await this.#readAll('Images')));
+    for (const s of STORES) {
+      const all = await this.#readAll(s);
+      for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);
+      this.cache[s] = all;
+    }
     try {
       if (navigator.storage?.persist && !(await navigator.storage.persisted()))
         await navigator.storage.persist();
@@ -155,6 +216,8 @@ class IndexedDBAdapter extends AbstractStorage {
       req.onerror = () => reject(req.error);
     });
   }
+  persistImage(id, dataUrl) { return this.persistPut('Images', id, dataUrl); }
+  persistDeleteImage(id) { return this.persistDelete('Images', id); }
 }
 
 // Server storage adapter (mikupad ServerDBAdapter pattern): same interface as
@@ -204,12 +267,29 @@ class ServerDBAdapter extends AbstractStorage {
     }
     const info = await res.json();
     if (info?.version !== 1 || info?.storage !== true) throw new Error('not a FictionPad storage server');
-    for (const s of STORES) this.cache[s] = await this.remoteAll(s);
+    // Out-of-band images need a server that knows the Images store; without
+    // the capability the adapter stays in inline mode (entities persist
+    // verbatim, no 'unknown store' 400s) — today's behavior, just fat saves.
+    this.imagesEnabled = info.images === true;
+    // Images first: entities are rehydrated from them (imgref: → data URL).
+    if (this.imagesEnabled)
+      this.images = new Map(Object.entries(await this.remoteAll('Images')));
+    for (const s of STORES) {
+      // refs: true — we rehydrate ourselves; the server's old-client
+      // rehydration must not inflate our boot payload with data URLs.
+      const all = await this.remoteAll(s, { refs: true });
+      if (this.imagesEnabled)
+        for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);
+      this.cache[s] = all;
+    }
   }
-  async persistPut(store, key, value) { await this.#post('/save', { store, key, data: value }); }
-  async persistDelete(store, key) { await this.#post('/delete', { store, key }); }
-  // Used by the settings migration helpers.
-  async remoteAll(store) { return (await this.#post('/all', { store })).entries ?? {}; }
+  persistPut(store, key, value) { return this.#post('/save', { store, key, data: value }); }
+  persistDelete(store, key) { return this.#post('/delete', { store, key }); }
+  persistImage(id, dataUrl) { return this.#post('/save', { store: 'Images', key: id, data: dataUrl }); }
+  persistDeleteImage(id) { return this.#post('/delete', { store: 'Images', key: id }); }
+  // Used by the settings migration helpers. No refs hint: the server
+  // rehydrates, so migrated entities always travel self-contained (inline).
+  async remoteAll(store, opts) { return (await this.#post('/all', { store, ...opts })).entries ?? {}; }
   async remoteSave(store, key, data) { await this.#post('/save', { store, key, data }); }
 }
 

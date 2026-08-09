@@ -1162,3 +1162,13 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - Arrow keys no longer swipe the underlying message while an image is expanded: the keyboard swipe handler now stands down whenever ANY modal overlay is open (the click-to-expand lightbox and image cropper are local component state, so the app-level `modal` check never saw them). On a multi-take image the lightbox now owns ←/→ itself — they cycle the image's takes (with matching ◀ ▶ buttons and an n/m indicator under the caption), updating the expanded view in place.
+
+
+## v4.11 - Out-of-band image storage
+
+### v4.11.0
+
+**Changed**
+
+- Images no longer ride inside every chat save. Chats used to keep generated-image takes and avatars as base64 data URLs inline in the chat JSON, so each save (every message, every swipe) re-sent the whole thing — multi-MB uploads for image-heavy chats, and IndexedDB got the same write volume. At the persistence boundary, image payloads are now stored once in a separate `Images` store and entities persist with `imgref:<hash>` sentinels instead. Ids are content hashes, so a fork-to-new-chat (or any copy sharing the same image) stores it exactly once. In-memory the app still works with plain data URLs — nothing about rendering, exports, or imports changes, and JSON exports stay self-contained. Garbage collection is a reference scan, not refcounting: deleting a chat/scenario/character sweeps image rows only when no remaining entity references them, so shared (forked) images survive until the last reference goes. IndexedDB databases upgrade automatically (schema v3). Server storage needs the updated server (it advertises an `images` capability in `/version`); against an older server the app keeps saving inline exactly as before, and the updated server rehydrates sentinels server-side for older app builds, so mixed old/new deployments keep working.
+- Server: request-body cap raised from 8 MB to 64 MB, with a `FICTIONPAD_MAX_BODY_MB` env override — image-heavy chats were hitting `413 Payload Too Large` on `/save` even before the externalization work above.

@@ -60,7 +60,7 @@ try {
 
   // /version shape
   const v = await (await fetch(`http://127.0.0.1:${portA}/version`)).json();
-  ok(v.version === 1 && v.storage === true, '/version → {version:1, storage:true}');
+  ok(v.version === 1 && v.storage === true && v.images === true, '/version → {version:1, storage:true, images:true}');
 
   // save → load roundtrip (incl. unicode + nesting)
   const entity = { id: 'abc', name: 'Tést ☃', nested: { arr: [1, 2, 3], flag: true } };
@@ -93,6 +93,33 @@ try {
   // unknown store → 400
   ok((await post(portA, '/save', { store: 'Nope', key: 'x', data: {} })).status === 400, 'unknown store → 400');
   ok((await post(portA, '/all', { store: 'Nope' })).status === 400, 'unknown store on /all → 400');
+
+  // Images store + imgref rehydration for pre-v4.11 clients.
+  {
+    const imgId = '0123456789abcdef';
+    const dataUrl = 'data:image/webp;base64,REHYDRATEME';
+    ok((await post(portA, '/save', { store: 'Images', key: imgId, data: dataUrl })).ok, 'Images store accepted on /save');
+    const refChat = { id: 'cimg', avatar: `imgref:${imgId}`, extra: 'imgref:nothex', missing: 'imgref:fedcba9876543210' };
+    await post(portA, '/save', { store: 'Chats', key: 'cimg', data: refChat });
+    // Old client (no refs hint): sentinels rehydrated inline.
+    const oldView = (await (await post(portA, '/load', { store: 'Chats', key: 'cimg' })).json()).data;
+    ok(oldView.avatar === dataUrl, '/load rehydrates imgref for old clients');
+    ok(oldView.extra === 'imgref:nothex', '/load leaves ref-shaped user text alone');
+    ok(oldView.missing === 'imgref:fedcba9876543210', '/load passes unknown refs through');
+    const oldAll = (await (await post(portA, '/all', { store: 'Chats' })).json()).entries;
+    ok(oldAll?.cimg?.avatar === dataUrl, '/all rehydrates imgref for old clients');
+    // New client (refs: true): sentinels pass through (client rehydrates).
+    const newView = (await (await post(portA, '/load', { store: 'Chats', key: 'cimg', refs: true })).json()).data;
+    ok(newView.avatar === `imgref:${imgId}`, '/load with refs:true keeps sentinels');
+    const newAll = (await (await post(portA, '/all', { store: 'Chats', refs: true })).json()).entries;
+    ok(newAll?.cimg?.avatar === `imgref:${imgId}`, '/all with refs:true keeps sentinels');
+    const imagesAll = (await (await post(portA, '/all', { store: 'Images' })).json()).entries;
+    ok(imagesAll?.[imgId] === dataUrl, 'Images store roundtrips on /all');
+    await post(portA, '/delete', { store: 'Images', key: imgId });
+    ok(!(imgId in ((await (await post(portA, '/all', { store: 'Images' })).json()).entries ?? {})),
+      'Images store row deleted');
+    await post(portA, '/delete', { store: 'Chats', key: 'cimg' });
+  }
 
   // corrupted kv blob: one bad row must not crash the server or kill /all.
   {
