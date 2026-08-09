@@ -1156,3 +1156,9 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - Tool-call records now keep the FULL arguments: both the inspector's "Tool calls" section and the per-message ⚙ pill used to store the args pre-truncated to 200 characters, so a long `generate_image` prompt (or any sizable tool call) was cut off with no way to read it. The swipe and manifest now persist the complete pretty-printed JSON; the inspector row shows a one-line preview that expands to the full args on click, and the ⚙ popover's args line does the same.
+
+### v4.10.3
+
+**Fixed**
+
+- Arrow keys no longer swipe the underlying message while an image is expanded: the keyboard swipe handler now stands down whenever ANY modal overlay is open (the click-to-expand lightbox and image cropper are local component state, so the app-level `modal` check never saw them). On a multi-take image the lightbox now owns ←/→ itself — they cycle the image's takes (with matching ◀ ▶ buttons and an n/m indicator under the caption), updating the expanded view in place.

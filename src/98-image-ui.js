@@ -25,11 +25,35 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // Click-to-expand image view: a plain modal holding the image at natural size
 // (capped to the viewport by CSS), caption underneath. Stacking, topmost-only
 // Escape and mobile full-screen come from the existing modal CSS.
-function Lightbox({ src, title = '', onClose }) {
+// On a multi-take image slot (onPrev/onNext passed), ←/→ cycle the takes and
+// matching buttons render under the caption — while any .modal-overlay is
+// open the app-level message swipe handler stands down, so these keys are
+// the lightbox's. The parent derives `src`/`title` from live state, so a
+// take change updates the view in place.
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '' }) {
+  useEffect(() => {
+    if (!onPrev && !onNext) return;
+    const onKey = (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      if (e.key === 'ArrowLeft') onPrev?.(); else onNext?.();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onPrev, onNext]);
   return html`
     <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}>
       <img class="lb-img" src=${src} alt=${title} />
       ${title && html`<div class="lb-cap">${title}</div>`}
+      ${(onPrev || onNext || pos) && html`
+        <div class="lb-takes">
+          <button class="btn small ghost" title="Previous take (←)" disabled=${!onPrev}
+            onClick=${() => onPrev?.()}>◀\uFE0E</button>
+          ${pos && html`<span class="hint">${pos}</span>`}
+          <button class="btn small ghost" title="Next take (→)" disabled=${!onNext}
+            onClick=${() => onNext?.()}>▶\uFE0E</button>
+        </div>`}
     <//>`;
 }
 

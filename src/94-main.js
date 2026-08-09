@@ -1814,6 +1814,10 @@ function Main({ storage, storageKind, storageFailed }) {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (modal || ctxMenu) return;
+      // Any modal in the DOM — including LOCAL ones the `modal` state doesn't
+      // know about (image lightbox, cropper) — owns the arrow keys now; the
+      // lightbox uses ←/→ to cycle image takes.
+      if (document.querySelector('.modal-overlay')) return;
       if (e.target?.closest?.('input, textarea, select, [contenteditable]')) return;
       const c = ref.current.chats[ui.chatId];
       if (!c) return;

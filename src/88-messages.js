@@ -133,7 +133,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
         : take?.error || !take?.src
           ? html`<div class="img-error" title=${take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
           : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
-              onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take); }} />`}
+              onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
         <span class="swipes img-swipes">
           <button class="btn small ghost" title="Previous take" disabled=${generating || activeIdx <= 0}
@@ -172,7 +172,7 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
     return () => window.removeEventListener('pointerdown', onDown);
   }, [actionsOpen, metaOpen, toolsOpen, branchOpen]);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y } — right-click on the message
-  const [lightbox, setLightbox] = useState(null); // { src, title } — avatar/image click-to-expand
+  const [lightbox, setLightbox] = useState(null); // { src, title, slot? } — avatar/image click-to-expand; slot = live take tracking
   const swipe = node.swipes[node.activeSwipe] ?? { text: '' };
   // Generated-image attachments on the active swipe (v4.10): /image replies
   // and model-attached images. Click expands via the same lightbox as
@@ -189,7 +189,11 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const canImgRegen = imagesEnabled && !!onImgRegen;
   const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
   const imgSlotRegen = (slot) => onImgRegen?.(node.id, slot);
-  const zoomImg = (im) => setLightbox({ src: im.src, title: im.caption || im.prompt || '' });
+  const zoomImg = (im, slot) => setLightbox({ src: im.src, title: im.caption || im.prompt || '', slot });
+  // Slot lightboxes track LIVE take state (not the click-time snapshot), so
+  // ←/→ take navigation inside the lightbox updates the view in place.
+  const lbSlot = lightbox?.slot != null && slots ? slots.find(s => s.slot === lightbox.slot) ?? null : null;
+  const lbSrc = lbSlot ? lbSlot.take?.src : lightbox?.src;
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
   // down one level at a time until it fits — each level drops one more detail
   // from the inline row, right to left (model, edited, gen time, date, #),
@@ -571,7 +575,14 @@ ${showNav && html`
               onClick=${av?.src ? () => setLightbox({ src: av.full, title: avName }) : null} />`}
         </div>`}
       ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
-      ${lightbox && html`<${Lightbox} src=${lightbox.src} title=${lightbox.title} onClose=${() => setLightbox(null)} />`}
+      ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}
+        title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
+        onClose=${() => setLightbox(null)}
+        ...${lbSlot && lbSlot.count > 1 ? {
+          onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,
+          onNext: lbSlot.activeIdx < lbSlot.count - 1 ? () => imgSlotSwipe(lbSlot.slot, 1) : null,
+          pos: `${lbSlot.activeIdx + 1}/${lbSlot.count}`,
+        } : {}} />`}
     </div>`;
 }
 

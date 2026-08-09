@@ -310,6 +310,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .modal.lightbox .m-body { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .modal.lightbox .lb-img { max-width: 100%; max-height: 72vh; object-fit: contain; border-radius: 6px; }
 .modal.lightbox .lb-cap { color: var(--c-dim); font-size: 13px; text-align: center; }
+.modal.lightbox .lb-takes { display: flex; align-items: center; gap: 10px; }
 
 /* ---------- avatar cropper ---------- */
 .img-crop .crop-frame {
