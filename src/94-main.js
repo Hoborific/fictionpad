@@ -696,8 +696,12 @@ function Main({ storage, storageKind, storageFailed }) {
         advance((cur) => {
           let work = cur;
           if (mode === 'auto') {
+            // Stamp with the live leaf (+ its viewed swipe): auto-mode pieces
+            // stay scoped to the branch they were extracted from — derivation
+            // replaces the old atLen rewind cutoff.
             work = applyToolCalls(work, fresh.map(p => ({ name: 'add_lore', args: p })),
-              { now: Date.now(), atLen: pathLen }).chat;
+              { now: Date.now(), atLen: pathLen, nodeId: cur.activeLeafId ?? null,
+                createdSwipe: cur.messages?.[cur.activeLeafId]?.activeSwipe ?? null }).chat;
           } else {
             for (const p of fresh) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
           }
@@ -718,8 +722,8 @@ function Main({ storage, storageKind, storageFailed }) {
   // the generation completes. Only CONTENT is rewritten and keys are merged;
   // the title is never touched — the registered name is the speaker-matching
   // key and must not drift. Failures keep the original description. The
-  // rewrite appends a stamped revision (universal rollback rule), so rewind
-  // past the enrichment restores the short registered description.
+  // rewrite appends a stamped revision (universal rollback rule), scoped to
+  // the registering swipe — a replaced take keeps its short description.
   async function maybeEnrichCharacters(chatObj, nodeId, toolResults) {
     const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
       && String(r.note ?? '').startsWith('registered character'));
@@ -728,13 +732,13 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!name) return;
       const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
         && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
-      if (!piece) return; // rewound/pruned meanwhile
+      if (!piece) return; // user-deleted meanwhile (rollback never removes pieces)
       try {
         const patch = await runGen('piece',
           'Flesh out this newly introduced character into a full reference card — appearance, personality, motives, voice. Keep the name and their role in the scene recognizable.',
           { type: 'character', title: piece.title, content: piece.content, keys: piece.keys, pinned: piece.pinned });
         // Merge-on-write: re-read at save time; drop the write if the chat or
-        // piece vanished (rewind, delete) in between.
+        // piece vanished (user delete) in between.
         const cur = ref.current.chats[chatObj.id];
         if (!cur || !(cur.lorePieces ?? []).some(p => p.id === piece.id)) return;
         const atLen = getActivePath(cur.messages, cur.activeLeafId).length;
@@ -743,14 +747,21 @@ function Main({ storage, storageKind, storageFailed }) {
           const keys = [...new Set([...(p.keys ?? []), ...(patch.keys ?? [])])].slice(0, 5);
           if (!patch.content || patch.content === p.content) return { ...p, keys };
           // Universal rollback rule: enrichment is an app-initiated content
-          // mutation like any tool write, so it appends a stamped revision —
-          // rewind past it restores the pre-enrichment description.
+          // mutation like any tool write, so it appends a stamped revision.
+          // The stamp mirrors the registration revision (node + swipe), so
+          // each take of the reply views its own enrichment state and a
+          // replaced swipe keeps the short description it was written with.
+          const lastRev = Array.isArray(p.revisions) && p.revisions.length
+            ? p.revisions[p.revisions.length - 1] : null;
+          const revSwipe = lastRev?.createdSwipe ?? p.createdSwipe ?? null;
           const revisions = [...(Array.isArray(p.revisions) ? p.revisions : [{
             content: p.content ?? '', keys: Array.isArray(p.keys) ? p.keys : [],
             atLen: Number.isFinite(p.atLen) ? p.atLen : null,
             createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
-            createdBy: p.createdBy ?? null }]),
-            { content: patch.content, keys, atLen, createdAt: Date.now(), createdBy: p.createdBy ?? null }];
+            createdBy: p.createdBy ?? null,
+            createdSwipe: Number.isInteger(p.createdSwipe) ? p.createdSwipe : null }]),
+            { content: patch.content, keys, atLen, createdAt: Date.now(), createdBy: p.createdBy ?? null,
+              ...(Number.isInteger(revSwipe) ? { createdSwipe: revSwipe } : {}) }];
           return { ...p, content: patch.content, keys, revisions };
         }) };
         // touch:false — a background lore write shouldn't re-sort the sidebar.
@@ -767,9 +778,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // gets a portrait, rendered from its registered card (the enrichment text
   // pass races this one — whichever content the piece holds at fire time is
   // fine). Same filter, same fire-and-forget concurrency, same silent
-  // degradation. No rollback stamps needed: the piece's own createdBy scope
-  // already hides it on other branches, and regenerate-prune removes the
-  // piece (the write then drops via the merge-on-write guard).
+  // degradation. No rollback stamps needed: the piece's own createdBy/
+  // createdSwipe scope already hides it on other branches and replaced
+  // swipes, and rollback never deletes pieces — the merge-on-write guard
+  // only races a user delete.
   async function maybeEnrichAvatars(chatObj, nodeId, toolResults) {
     const fresh = (toolResults ?? []).filter(r => r.name === 'register_character' && r.ok
       && String(r.note ?? '').startsWith('registered character'));
@@ -778,13 +790,13 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!name) return;
       const piece = ((ref.current.chats[chatObj.id]?.lorePieces) ?? []).find(p => p.createdBy === nodeId
         && p.type === 'character' && (p.title ?? '').trim().toLowerCase() === name.toLowerCase());
-      if (!piece || piece.avatar) return; // rewound/pruned meanwhile, or already has one
+      if (!piece || piece.avatar) return; // user-deleted meanwhile, or already has one
       try {
         const src = await generateAvatarFor({ name: piece.title, content: piece.content });
         const thumb = downscaleImageToDataURL(await loadImage(src), 256);
         // Merge-on-write: re-read at save time; drop the write if the chat or
-        // piece vanished (rewind, delete, regenerate-prune) or the piece
-        // already has an avatar (the user beat us to it) in between.
+        // piece vanished (user delete) or the piece already has an avatar
+        // (the user beat us to it) in between.
         const cur = ref.current.chats[chatObj.id];
         const live = (cur?.lorePieces ?? []).find(p => p.id === piece.id);
         if (!live || live.avatar) return;
@@ -908,29 +920,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const scen = sc[chatObj.scenarioId];
     const pers = chatObj.personaId ? pe[chatObj.personaId] : null;
     const node = chatObj.messages[nodeId];
-    // Leaf regenerate: roll back tool pieces the replaced swipe created BEFORE
-    // generating — the new take must be written against the rolled-back state
-    // (pruning afterwards would rip context out from under the swipe that was
-    // just generated with the piece in its prompt). Stashed so a generation
-    // that produces nothing can restore them (discardEmptySwipe).
-    let prunedTools = null;
-    if (!fresh && !continuation && node
-        && !Object.values(chatObj.messages).some(m => m.parentId === nodeId)) {
-      const pruned = pruneToolPieces(chatObj, nodeId);
-      // pruneToolPieces no-ops by returning the same object — reference
-      // comparison catches revision-only changes too (an update_character
-      // revision stripped from a piece keeps the piece count unchanged).
-      if (pruned !== chatObj) {
-        prunedTools = chatObj.lorePieces ?? []; // full pre-prune snapshot for restore
-        chatObj = { ...pruned, updatedAt: Date.now() };
-        upsertChat(chatObj.id, chatObj);
-        ref.current.chats = { ...ref.current.chats, [chatObj.id]: chatObj };
-      }
-    }
+    // Leaf regenerate: the replaced swipe's tool writes are NOT pruned —
+    // swipe-stamped provenance hides them during this generation by
+    // derivation (the prompt excludes the node entirely, and afterwards the
+    // node is viewed at the NEW swipe), so the new take starts clean while
+    // the old take keeps its world state. No prune/restore machinery.
     // Claim the generation slot before anything async (the prep below —
     // semantic embeddings, exact token count — can take a long time on a slow
-    // backend, and the UI keys off this). Deliberately AFTER the synchronous
-    // rollback above: a throw there must not leak the claimed slot.
+    // backend, and the UI keys off this).
     const abort = new AbortController();
     genRef.current = { abort };
     setGenerating({ chatId: chatObj.id, nodeId });
@@ -1131,34 +1128,22 @@ function Main({ storage, storageKind, storageFailed }) {
     };
     // Remove the empty generating swipe (or the fresh placeholder node) when
     // nothing was ever written — applies to errors, dropped connections,
-    // empty completions, and Stop-before-first-token alike.
+    // empty completions, and Stop-before-first-token alike. World state needs
+    // no restore: the replaced swipe's tool writes were never pruned (they
+    // hide by swipe-derivation), so a failed retry leaves them untouched.
     const discardEmptySwipe = () => {
       const n = work.messages[nodeId];
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
-      // The generation produced nothing — restore the pre-prune lore state, or
-      // a failed/empty retry would destroy the replaced take's effects while
-      // the take itself survives. The stash is the FULL pre-prune lorePieces
-      // array: prune may have stripped revisions (piece modified in place) as
-      // well as removed pieces. Safe to blanket-restore by id: discard runs
-      // only when the new take applied no tool calls of its own.
-      let base = cur;
-      if (prunedTools?.length) {
-        const stashById = new Map(prunedTools.map(p => [p.id, p]));
-        const curIds = new Set((cur.lorePieces ?? []).map(q => q.id));
-        base = { ...cur, lorePieces: [
-          ...(cur.lorePieces ?? []).map(q => stashById.get(q.id) ?? q),
-          ...prunedTools.filter(p => !curIds.has(p.id))] };
-      }
       if (n.swipes.length > 1) {
         const swipes = n.swipes.slice(0, -1);
-        work = { ...base, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
+        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
         upsertChat(work.id, work);
       } else if (fresh) {
         const messages = { ...work.messages };
         delete messages[nodeId];
-        work = { ...base, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
+        work = { ...cur, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
         upsertChat(work.id, work);
       }
     };
@@ -1250,9 +1235,9 @@ function Main({ storage, storageKind, storageFailed }) {
         ref.current.chats = { ...ref.current.chats, [work.id]: work };
         return true;
       };
-      // (Regenerate hygiene: tool pieces the replaced swipe created were
-      // already rolled back BEFORE this generation started — see the top of
-      // runGeneration. Restored by discardEmptySwipe when nothing is produced.)
+      // (Regenerate hygiene: the replaced swipe's tool writes hide by
+      // swipe-derivation — the prompt excluded this node, and the new writes
+      // below are stamped with the NEW active swipe. Nothing is pruned.)
       if (acc && st.toolsEnabled !== false) {
         // Continuation: parse ONLY the new slice — tool blocks in the base
         // text were already executed by its own generation, and the base
@@ -1300,6 +1285,7 @@ function Main({ storage, storageKind, storageFailed }) {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
               atLen: getActivePath(c.messages, nodeId).length,
+              createdSwipe: c.messages[nodeId]?.activeSwipe ?? null,
             }, mergedLorePieces(scen, c, gchars));
             loreResults = applied.results;
             return applied.chat;

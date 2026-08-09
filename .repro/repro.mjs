@@ -19,7 +19,7 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, roleConn, html, SettingsModal, DEFAULT_SETTINGS,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
-  LorePieceEditor, chatSearchText, matchExcerpt,
+  LorePieceEditor, chatSearchText, matchExcerpt, ChatOptions,
   Avatar, Lightbox, AvatarField,
   BranchPanel, appendMessage, activateBranch, getActivePath,
   splitImageCalls, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
@@ -1292,6 +1292,31 @@ trial('branch view outline: swipe tags mark different parent swipes', () => {
 trial('branch view outline: empty chat renders the empty state', () => {
   if (!bvRender({ id: 'C', messages: {}, activeLeafId: null }).includes('No messages yet.'))
     throw new Error('empty state missing');
+});
+
+trial('chat options: off-branch pieces keep their row with a branch pill (derivation, not deletion)', () => {
+  const chat = {
+    id: 'C', scenarioId: 'S', personaId: null, name: 'chat', customInstructions: '',
+    rootMessageId: 'root', activeLeafId: 'a1',
+    messages: {
+      root: { id: 'root', parentId: null, role: 'assistant', activeSwipe: 0, swipes: [{ text: 'hi', createdAt: 1 }] },
+      a1: { id: 'a1', parentId: 'root', role: 'assistant', activeSwipe: 0,
+        swipes: [{ text: 'take one', createdAt: 2 }, { text: 'take two', createdAt: 3 }] },
+    },
+    lorePieces: [
+      { id: 'P1', type: 'character', title: 'Mia', content: 'c', keys: ['mia'], createdBy: 'a1', createdSwipe: 0, createdAt: 2 },
+      { id: 'P2', type: 'character', title: 'Eve', content: 'c', keys: ['eve'], createdBy: 'a1', createdSwipe: 1, createdAt: 3 },
+      { id: 'P3', type: 'lore', title: 'Docks', content: 'c', keys: [] },
+    ],
+  };
+  const out = renderToStaticMarkup(html`<${fp.ChatOptions} chat=${chat} personas=${{}} scenario=${null}
+    characters=${{}} onUpdateChat=${() => {}} onExport=${() => {}} onDelete=${() => {}} onGenerate=${() => {}} />`);
+  for (const t of ['Mia', 'Eve', 'Docks'])
+    if (!out.includes(t)) throw new Error(`piece row missing: ${t}`);
+  // a1 is viewed at swipe 0: Mia (stamped swipe 0) is live, Eve (swipe 1) is off-branch
+  if (out.split('>branch<').length - 1 !== 1) throw new Error('exactly one branch pill expected');
+  const eveRow = out.slice(out.indexOf('Eve'), out.indexOf('Docks'));
+  if (!eveRow.includes('>branch<')) throw new Error('branch pill should sit on the off-branch piece');
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.

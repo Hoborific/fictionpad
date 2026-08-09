@@ -208,26 +208,42 @@ function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapSt
 // Ids on the active path — the branch-visibility scope for world state.
 const pathIdSet = (messages, leafId) => new Set(getActivePath(messages, leafId).map(n => n.id));
 
+// A narrative-state stamp (createdBy node + optional createdSwipe) is "on
+// view" when the node is on the active path AND — for swipe-stamped (v4.10.1+)
+// writes — the node is currently VIEWED at that swipe. Legacy stamps without
+// createdSwipe scope to the node alone (any swipe). A null createdBy is never
+// on view here — callers handle the global case themselves.
+const stampOnView = (createdBy, createdSwipe, pathIds, messages) => {
+  if (createdBy == null || !pathIds?.has(createdBy)) return false;
+  if (!Number.isInteger(createdSwipe)) return true;
+  return messages?.[createdBy]?.activeSwipe === createdSwipe;
+};
+
 // Branch view of a revision-tracked piece: effective content/keys come from
-// the last revision whose origin (createdBy) is global (null) or on the
-// active path. The stored log is never touched — switching branches
-// re-derives the view. Identity return when the latest revision is visible.
-function pieceAtPath(piece, pathIds) {
+// the last revision whose origin is global (null createdBy) or on view. The
+// stored log is never touched — switching branches/swipes re-derives the
+// view. Identity return when the latest revision is visible.
+function pieceAtPath(piece, pathIds, messages = null) {
   const revs = piece?.revisions;
   if (!Array.isArray(revs) || revs.length < 2 || !pathIds) return piece;
   let vis = null;
-  for (const r of revs) if (r?.createdBy == null || pathIds.has(r.createdBy)) vis = r;
+  for (const r of revs)
+    if (r?.createdBy == null || stampOnView(r.createdBy, r.createdSwipe, pathIds, messages)) vis = r;
   if (!vis || vis === revs[revs.length - 1]) return piece;
   return { ...piece, content: vis.content, keys: vis.keys ?? [] };
 }
 
 // Piece-level branch visibility: a piece belongs on this branch when its own
-// origin (createdBy) OR any revision's origin is global/on-path — a tool
-// update written on this branch pulls the piece into this branch's view
-// (pieceAtPath then picks the content this branch last saw).
-function pieceVisibleAt(piece, pathIds) {
-  if (piece?.createdBy == null || pathIds.has(piece.createdBy)) return true;
-  return Array.isArray(piece?.revisions) && piece.revisions.some(r => r?.createdBy != null && pathIds.has(r.createdBy));
+// origin OR any revision's origin is global/on-view — a tool update written
+// on this branch pulls the piece into this branch's view (pieceAtPath then
+// picks the content this branch last saw). Replaced swipes keep their world
+// state: a piece stamped with another swipe of an on-path node hides until
+// that swipe is viewed again — derivation, never deletion.
+function pieceVisibleAt(piece, pathIds, messages = null) {
+  if (piece?.createdBy == null) return true;
+  if (stampOnView(piece.createdBy, piece.createdSwipe, pathIds, messages)) return true;
+  return Array.isArray(piece?.revisions)
+    && piece.revisions.some(r => stampOnView(r?.createdBy, r?.createdSwipe, pathIds, messages));
 }
 
 // Reset every node's activeSwipe to its recorded usedSwipe (the version the
@@ -376,60 +392,29 @@ function deleteSubtree(messages, nodeId) {
   return copy;
 }
 
-// Trim a piece's update_character revision log with the same cutoff rule as
-// rewind (`keep`) and restore content/keys to the last surviving revision.
-// Identity return when the piece has no revisions or none are trimmed.
-function rollbackRevisions(piece, keep) {
-  const revs = piece?.revisions;
-  if (!Array.isArray(revs) || !revs.length) return piece;
-  const kept = revs.filter(keep);
-  if (kept.length === revs.length) return piece;
-  // All revisions rolled back — only possible with hostile/imported data
-  // (rev 0 of a tool-updated piece is null-stamped and always survives);
-  // fall back to the earliest known version rather than leaving stale content.
-  const restore = kept[kept.length - 1] ?? revs[0];
-  return { ...piece, revisions: kept, content: restore.content, keys: restore.keys ?? [] };
-}
-
 // Re-point the active leaf at nodeId (nothing is truncated — sibling branches
-// are untouched) and roll the memory store back to it. The cutoff is
-// position-based: entries stamped with `atLen` (active-path message count at
-// creation) survive iff atLen <= the target's path length, so rollback is
-// immune to regenerate (a new swipe gets a fresh createdAt). Entries lacking
-// atLen fall back to the createdAt cutoff (target node's active-swipe
-// createdAt). Tool-written lore (createdAt/atLen-tagged) and loreQueue
-// proposals roll back with the same rule; hand-authored pieces (no createdAt)
-// always survive.
-// Deliberately rewind-EXEMPT: chat.vars and chat.authorsNote — they are world
-// state, not narrative state, so rewinding the story does not un-write them.
+// are untouched). Narrative state is NOT deleted: tool lore, memories and
+// loreQueue entries stay in the chat — whatever belonged to the rewound-away
+// tail hides by branch/swipe derivation in the assembler (pieceVisibleAt,
+// memory atMsg scope) and re-emerges if that branch is revisited. Only the
+// summary/extraction cadence cursors roll back, so those passes re-fire from
+// the rewind point. Rewind-EXEMPT as before: chat.vars and chat.authorsNote.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
   const pathLen = getActivePath(chat.messages, nodeId).length;
-  const cutoff = node.swipes[node.activeSwipe]?.createdAt ?? Date.now();
-  const keep = (e) => Number.isFinite(e?.atLen) ? e.atLen <= pathLen : (e?.createdAt ?? 0) <= cutoff;
-  const memories = (chat.memoryStore?.memories ?? []).filter(keep);
-  const lorePieces = Array.isArray(chat.lorePieces)
-    ? chat.lorePieces.filter(keep).map(p => rollbackRevisions(p, keep)) : chat.lorePieces;
-  const loreQueue = Array.isArray(chat.loreQueue)
-    ? chat.loreQueue.filter(keep) : chat.loreQueue;
-  const next = {
-    ...chat, activeLeafId: nodeId, memoryStore: { memories, cursor: 0 },
-    ...(lorePieces !== chat.lorePieces ? { lorePieces } : {}),
-    ...(loreQueue !== chat.loreQueue ? { loreQueue } : {}),
-  };
-  next.memoryStore.cursor = pathLen;
-  next.emergentCursor = next.memoryStore.cursor; // extraction cadence rolls back too
-  return next;
+  return { ...chat, activeLeafId: nodeId,
+    memoryStore: { ...(chat.memoryStore ?? { memories: [], cursor: 0 }), cursor: pathLen },
+    emergentCursor: pathLen };
 }
 
 // Fork the chat at nodeId into a NEW self-contained chat. Only the fork
 // node's ancestor path comes over — each chat is its own tree, so the old
 // chat's sibling branches stay behind (before in-chat branching made the
 // tree visible, deep-copying the whole tree was harmless; it isn't anymore).
-// World state rolls back to the fork point via rewindChat's cutoffs
-// (memories, tool lore, loreQueue, cursors); rewind-exempt state (vars,
-// author's note) carries over as with a rewind.
+// World state comes over intact but stays scoped: pieces/memories stamped
+// with nodes beyond the fork point have no path to them in the new chat and
+// hide by derivation (rewindChat here just re-points the leaf + cursors).
 function branchChat(chat, nodeId) {
   const copy = deepClone(chat);
   if (!copy.messages?.[nodeId])
@@ -741,23 +726,26 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    persona block + per-chat custom instructions + length directive
   // sub = {{user}} then {{var:name}} substitution (per-chat story variables).
   const sub = (t) => subVars(subUser(t, personaName), chat?.vars);
-  // Branch visibility: model/app-written world state is scoped to the branch
-  // it was created on. A chat-overlay piece whose origin node (createdBy) or a
-  // memory whose origin leaf (atMsg) is not on the ACTIVE path is hidden —
-  // derived per assembly, never deleted, so switching branches re-derives it
-  // (unstamped entries are global). A hidden overlay piece also stops
-  // shadowing its scenario/global original, which resurfaces on other
-  // branches. Dedupe paths (applyToolCalls allPieces) still see everything.
+  // Branch visibility: model/app-written world state is scoped to where it
+  // was written. A chat-overlay piece whose origin (createdBy node +
+  // createdSwipe swipe) — and every revision's origin — is not on the ACTIVE
+  // view is hidden, as is a memory whose origin leaf (atMsg) is off the
+  // active path — derived per assembly, never deleted, so switching
+  // branches/swipes re-derives it (unstamped entries are global). A hidden
+  // overlay piece also stops shadowing its scenario/global original, which
+  // resurfaces on other branches. Dedupe paths (applyToolCalls allPieces)
+  // still see everything.
   const pathIds = pathIdSet(chat?.messages ?? {}, chat?.activeLeafId);
+  const chatMsgs = chat?.messages ?? null;
   const branchHidden = (Array.isArray(chat?.lorePieces) ? chat.lorePieces : [])
-    .filter(p => !pieceVisibleAt(p, pathIds));
+    .filter(p => !pieceVisibleAt(p, pathIds, chatMsgs));
   const chatForLore = branchHidden.length
-    ? { ...chat, lorePieces: chat.lorePieces.filter(p => pieceVisibleAt(p, pathIds)) }
+    ? { ...chat, lorePieces: chat.lorePieces.filter(p => pieceVisibleAt(p, pathIds, chatMsgs)) }
     : chat;
   // Merged once here — the lore layer below reuses this same list. Pieces with
   // a revision log are viewed at the last revision visible on this branch.
   const lorePieces = mergedLorePieces(scenario, chatForLore, characters)
-    .map(p => pieceAtPath(p, pathIds));
+    .map(p => pieceAtPath(p, pathIds, chatMsgs));
   // Registered speakers, spelled out in the prompt: weak models shorten long
   // names ("The Auctioneer" → "Auctioneer:") and the display split is an
   // exact name match, so the full names are listed explicitly. Mirrors
@@ -1193,9 +1181,10 @@ function comfyHistoryResult(history, promptId) {
 // Execute parsed calls against the chat's lore overlay. Returns
 // { chat, results: [{ name, args, ok, note }] }; same chat object when
 // nothing applied. Unknown tools / validation failures are notes, not throws.
-// New pieces are tagged { createdAt: now, createdBy: nodeId } (plus atLen when
-// the caller supplies it) — provenance for rewind rollback and regenerate
-// pruning (pruneToolPieces). Updates keep the original piece's provenance.
+// New pieces are tagged { createdAt, createdBy, createdSwipe } (plus atLen
+// for position context) — the provenance the assembler's branch/swipe
+// derivation scopes by (rewind/regenerate never delete world state).
+// Updates keep the original piece's provenance.
 // opts.queueLore: add_lore calls for NEW titles go to the review queue
 // (emergent-lore 'queue' mode) instead of straight into lorePieces.
 // allPieces (optional): the full merged piece list (scenario + global
@@ -1216,29 +1205,11 @@ function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}, allP
   return { chat: work, results };
 }
 
-// Remove tool-written pieces created by a given node (its earlier swipes) and
-// strip update_character REVISIONS written by it (restoring content/keys to
-// the last remaining revision). SAFE only when that node has no children — the
-// caller checks. No-op (same object) when nothing matches.
-function pruneToolPieces(chat, nodeId) {
-  const pieces = chat?.lorePieces;
-  if (!Array.isArray(pieces)) return chat;
-  const mine = (e) => e?.createdBy === nodeId;
-  if (!pieces.some(p => mine(p) || (Array.isArray(p?.revisions) && p.revisions.some(mine))))
-    return chat;
-  return { ...chat, lorePieces: pieces.filter(p => !mine(p)).map(p => {
-    if (!Array.isArray(p.revisions) || !p.revisions.some(mine)) return p;
-    const revs = p.revisions.filter(r => !mine(r));
-    const restore = revs[revs.length - 1] ?? p.revisions[0];
-    return { ...p, revisions: revs, content: restore.content, keys: restore.keys ?? [] };
-  }) };
-}
-
 // ---- emergent lore review queue ---------------------------------------------
 // Proposals (add_lore tool calls under a 'queue'-mode scenario, or the
 // extraction pipeline) wait in chat.loreQueue for user review. Accept moves a
-// proposal into lorePieces as USER-OWNED — provenance stripped, so prune and
-// rewind no longer auto-remove it.
+// proposal into lorePieces as USER-OWNED — provenance stripped, so the piece
+// is global (branch derivation never hides it) like a hand-authored one.
 function queueLorePiece(chat, entry) {
   const loreQueue = [...(Array.isArray(chat?.loreQueue) ? chat.loreQueue : []),
     { id: uid(), type: 'lore', title: '', content: '', keys: [], source: 'tool', createdAt: Date.now(), ...entry }];
@@ -1263,7 +1234,7 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
-function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null } = {}) {
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null, createdSwipe = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
   const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
@@ -1272,17 +1243,22 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     wholeWord: false, caseSensitive: false, smart: false,
   };
   const save = (lorePieces, note) => ({ ok: true, note, chat: { ...chat, lorePieces } });
-  const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId };
+  // createdSwipe: the active swipe of nodeId at write time — scopes the write
+  // to that take of the reply (a regenerate's new swipe starts clean, the
+  // replaced swipe keeps its own state; derivation, never deletion).
+  const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId,
+    ...(Number.isInteger(createdSwipe) ? { createdSwipe } : {}) };
   // Revision log for EVERY tool-driven content mutation (universal rollback
-  // rule): entry i became active at position atLen; piece.content/keys always
-  // mirror the LAST revision. The first revision is the pre-update original —
-  // null-stamped for scenario/global/hand-authored pieces, so the rewind
-  // cutoff keeps it forever and the original is never lost. rewindChat and
-  // pruneToolPieces trim the log and restore the last surviving revision.
+  // rule): piece.content/keys always mirror the LAST revision, and the
+  // assembler views the piece at the last revision on view for the active
+  // branch/swipe (pieceAtPath). The first revision is the pre-update
+  // original — null-stamped for scenario/global/hand-authored pieces, so it
+  // is visible on every branch and the original is never lost.
   const revOf = (p) => ({ content: p.content ?? '', keys: Array.isArray(p.keys) ? p.keys : [],
     atLen: Number.isFinite(p.atLen) ? p.atLen : null,
     createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
-    createdBy: p.createdBy ?? null });
+    createdBy: p.createdBy ?? null,
+    createdSwipe: Number.isInteger(p.createdSwipe) ? p.createdSwipe : null });
   // p = piece to write (already provenance-stamped for shadows); seed = the
   // piece rev 0 is taken from when no log exists yet; keys null = keep current.
   const withRevision = (p, seed, content, keys) => ({
@@ -1576,13 +1552,16 @@ function normalizeLorePiece(p) {
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     sticky: posInt(o.sticky), cooldown: posInt(o.cooldown), delay: posInt(o.delay),
     prob: pct(o.prob), group: asStr(o.group).trim() || undefined,
+    // Swipe-scoped provenance (v4.10.1): integer or absent.
+    createdSwipe: Number.isInteger(o.createdSwipe) ? o.createdSwipe : undefined,
     // update_character version log — shape-only heal; absent stays absent
     // (undefined keys serialize away).
     revisions: o.revisions === undefined ? undefined : asArr(o.revisions).map(r => ({
       content: asStr(r?.content), keys: asArr(r?.keys).map(String),
       atLen: Number.isFinite(r?.atLen) ? r.atLen : null,
       createdAt: Number.isFinite(r?.createdAt) ? r.createdAt : null,
-      createdBy: r?.createdBy != null ? String(r.createdBy) : null })) };
+      createdBy: r?.createdBy != null ? String(r.createdBy) : null,
+      createdSwipe: Number.isInteger(r?.createdSwipe) ? r.createdSwipe : null })) };
 }
 function normalizeScenario(s) {
   const o = (s && typeof s === 'object') ? s : {};

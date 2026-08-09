@@ -1140,3 +1140,13 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - The Role connections section rendered on every settings tab (it was inserted after the Connection tab's template close instead of inside it); it is scoped to Connection now, with an SSR regression trial pinning per-tab section scoping.
+
+### v4.10.1
+
+**Fixed**
+
+- Chat-registered characters and lore no longer vanish on rewind, regenerate, or ⑂ fork. Rollback of model/app-written world state used to DELETE it (rewind's position cutoff, the leaf-regenerate prune): a scenario character the model updated in-chat (a "shadow" overlay piece) disappeared from the Chat tab and resurfaced as the scenario original — still injected, but without the chat pill and with the pre-update card. World state is now never deleted by rollback: tool writes are stamped with the writing node AND its active swipe (`createdSwipe`), and the assembler derives visibility per branch/swipe like it already did for memories — a rewound-away or replaced take's pieces hide as "Not injected · branch" and re-emerge with their own card revisions when you swipe or jump back. The Chat tab keeps every chat-overlay row permanently, marking off-branch ones with a `branch` pill. Forks come over intact (state stamped past the fork point simply has no path to it and hides). Extraction-pass auto-mode pieces are now stamped with the live leaf too, so they stay scoped to their branch instead of going global.
+
+**Changed**
+
+- Rewind (`Rewind to here`) and fork no longer trim memory stores, lore revision logs, or the lore review queue — only the summary/extraction cadence cursors roll back, so those passes still re-fire from the rewind point.

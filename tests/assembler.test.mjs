@@ -15,9 +15,9 @@ const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, pieceVisibleAt,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
-  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   healImageEntry, groupImageSlots,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
@@ -29,9 +29,9 @@ const core = await import('data:text/javascript;charset=utf-8,' + encodeURICompo
 const {
   MEMORY_CAP, LINK_BOOST, LAYER_CAPS, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, pieceVisibleAt,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
-  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, pruneToolPieces, TOOL_CALL_CAP, splitSpeakerSegments,
+  parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   healImageEntry, groupImageSlots,
   resolveLimits, autoReserve,
@@ -113,15 +113,20 @@ section('message tree');
   ok(b.messages.root && b.messages[uid1] && !b.messages[r.id] && Object.keys(b.messages).length === 2,
     'fork keeps only the root→fork path');
   ok(getActivePath(b.messages, b.activeLeafId).length === 2, 'fork path is root→fork node');
-  // World state rolls back to the fork point (rewind cutoffs); original untouched.
+  // World state comes over intact; scope derives per assembly — entries
+  // stamped past the fork point hide in the fork (their nodes don't exist
+  // there), nothing is deleted.
   const c2 = { ...chat, memoryStore: { memories: [
-    { id: 'mOld', text: 'old', pinned: false, createdAt: 1, atLen: 2 }, // at the fork node
-    { id: 'mNew', text: 'new', pinned: false, createdAt: 2, atLen: 3 }, // past it
+    { id: 'mOld', text: 'old', pinned: false, createdAt: 1, atLen: 2, atMsg: uid1 }, // at the fork node
+    { id: 'mNew', text: 'new', pinned: false, createdAt: 2, atLen: 3, atMsg: r.id }, // past it
   ], cursor: 3 } };
   const b3 = branchChat(c2, uid1);
-  ok(b3.memoryStore.memories.some(m => m.id === 'mOld') && !b3.memoryStore.memories.some(m => m.id === 'mNew'),
-    'fork rolls memories back to the fork point');
+  ok(b3.memoryStore.memories.length === 2, 'fork keeps all memories — derivation, not deletion');
   ok(b3.memoryStore.cursor === 2, 'fork resets the memory cursor to the fork path length');
+  const forkMan = assemblePrompt({ scenario: baseScenario, persona, chat: b3, settings }).manifest;
+  ok(forkMan.layers.memory.memories.some(m => m.id === 'mOld')
+    && forkMan.layers.memory.inactive.some(m => m.id === 'mNew' && m.reason === 'branch'),
+    'fork hides memories stamped past the fork point');
   ok(c2.memoryStore.memories.length === 2 && c2.memoryStore.cursor === 3,
     'fork leaves the source chat untouched');
 }
@@ -374,33 +379,41 @@ section('tool calls');
     const applied = applyToolCalls(baseChat, parsed.calls);
     ok(applied.chat.lorePieces?.[0]?.title === 'Mira', 'parse → execute end-to-end');
   }
-  // provenance + prune + rewind rollback
+  // provenance + swipe-scoped visibility + rewind derivation
   {
     const r = applyToolCalls(baseChat, [{ name: 'register_character', args: { name: 'Vex', description: 'd' } }],
-      { nodeId: 'N1', now: 1000 });
+      { nodeId: 'N1', now: 1000, createdSwipe: 1 });
     const piece = r.chat.lorePieces[0];
-    ok(piece.createdBy === 'N1' && piece.createdAt === 1000, 'new tool pieces tagged with provenance');
+    ok(piece.createdBy === 'N1' && piece.createdAt === 1000 && piece.createdSwipe === 1,
+      'new tool pieces tagged with node + swipe provenance');
     // update path preserves original provenance
     const r2 = applyToolCalls(r.chat, [{ name: 'register_character', args: { name: 'Vex', description: 'd2' } }],
       { nodeId: 'N2', now: 2000 });
     ok(r2.chat.lorePieces[0].createdBy === 'N1' && r2.chat.lorePieces[0].createdAt === 1000
       && r2.chat.lorePieces[0].content === 'd2', 'update keeps original provenance');
-    // prune removes only that node's pieces
-    const withManual = { ...r2.chat, lorePieces: [...r2.chat.lorePieces, lore({ id: 'M', title: 'Manual' })] };
-    const pruned = pruneToolPieces(withManual, 'N1');
-    ok(pruned.lorePieces.length === 1 && pruned.lorePieces[0].id === 'M', 'pruneToolPieces removes only createdBy-match');
-    ok(pruneToolPieces(withManual, 'NOPE') === withManual, 'pruneToolPieces no-op when nothing matches');
-    // rewind rolls tool lore back by createdAt; manual pieces survive
+    ok(r2.chat.lorePieces[0].revisions[1].createdBy === 'N2'
+      && r2.chat.lorePieces[0].revisions[1].createdSwipe == null,
+      'revision stamped with its writer node; swipe omitted when not supplied');
+    // swipe-scoped visibility: stamped (N1, swipe 1) hides while N1 shows another swipe
+    const msgs = { root: node('root', null, 'assistant', 'hi'),
+      N1: { ...node('N1', 'root', 'assistant', 'take0'), swipes: [{ text: 'take0' }, { text: 'take1' }], activeSwipe: 0 } };
+    const ids = new Set(['root', 'N1']);
+    ok(pieceVisibleAt(piece, ids, { ...msgs, N1: { ...msgs.N1, activeSwipe: 1 } }),
+      'piece visible when its node is viewed at the stamped swipe');
+    ok(!pieceVisibleAt(piece, ids, msgs), 'piece hides when its node is viewed at another swipe');
+    ok(pieceVisibleAt({ ...piece, createdSwipe: undefined }, ids, msgs),
+      'legacy stamp without a swipe scopes to the node alone');
+    ok(!pieceVisibleAt(piece, new Set(['root']), msgs), 'piece hides when its node leaves the path');
+    // rewind never deletes: tool + manual pieces survive; visibility derives per assembly
     let chat = baseChat;
-    let r3 = appendMessage(chat, 'root', 'user', 'hi', null); chat = r3.chat; // createdAt: now
-    const before = Date.now();
+    let r3 = appendMessage(chat, 'root', 'user', 'hi', null); chat = r3.chat;
     const future = { ...chat, lorePieces: [
-      lore({ id: 'M', title: 'Manual' }),                       // hand-authored: no createdAt
-      { ...lore({ id: 'T', title: 'Tool' }), createdAt: before + 60000, createdBy: 'x' },
+      lore({ id: 'M', title: 'Manual' }),                       // hand-authored: no provenance
+      { ...lore({ id: 'T', title: 'Tool' }), createdAt: Date.now(), createdBy: 'x' },
     ] };
-    const rewound = rewindChat(future, 'root'); // cutoff = root swipe createdAt (1)
-    ok(rewound.lorePieces.length === 1 && rewound.lorePieces[0].id === 'M',
-      'rewind rolls back tool lore, keeps hand-authored pieces');
+    const rewound = rewindChat(future, 'root');
+    ok(rewound.lorePieces.length === 2 && rewound.activeLeafId === 'root',
+      'rewind keeps all lore pieces — derivation, not deletion');
   }
 }
 
@@ -654,17 +667,26 @@ section('memory store');
     'pinned memories never evicted (incoming unpinned memory is dropped instead)');
 }
 
-// ---- rewind rolls memory back ----
+// ---- rewind keeps world state (derivation, not deletion) ----
 section('rewind');
 {
   let chat = baseChat;
-  let r = appendMessage(chat, 'root', 'user', 'first', null); chat = r.chat; // createdAt = now
-  const store = addMemory(chat.memoryStore, 'recent event', Date.now() + 100000);
+  let r = appendMessage(chat, 'root', 'user', 'first', null); chat = r.chat;
+  const leafId = r.id;
+  const store = addMemory(chat.memoryStore, 'recent event', Date.now(), MEMORY_CAP, 2, leafId);
   chat = { ...chat, memoryStore: store };
   const rewound = rewindChat(chat, 'root');
   ok(rewound.activeLeafId === 'root', 'rewind sets active leaf');
-  ok(rewound.memoryStore.memories.length === 0, 'rewind rolls back memories created after the target node');
+  ok(rewound.memoryStore.memories.length === 1, 'rewind keeps memories — derivation, not deletion');
   ok(rewound.memoryStore.cursor === 1, 'rewind resets the summary cursor to path length');
+  // the memory's atMsg leaf left the active path → hidden per assembly…
+  const man = assemblePrompt({ scenario: baseScenario, persona, chat: rewound, settings }).manifest;
+  ok(man.layers.memory.memories.length === 0
+    && man.layers.memory.inactive.some(m => m.reason === 'branch'),
+    'rewound-away memory hides as Not injected · branch');
+  // …and re-emerges when its branch is viewed again
+  const back = assemblePrompt({ scenario: baseScenario, persona, chat, settings }).manifest;
+  ok(back.layers.memory.memories.length === 1, 'memory re-emerges on its own branch');
 }
 
 // ---- assembler: budgeting + manifest ----
@@ -1017,15 +1039,12 @@ section('sampler param expansion');
     '__proto__/constructor/prototype segments rejected, no pollution');
 }
 
-// ---- rewind: position-based (atLen) cutoff ----
-section('rewind atLen cutoff');
+// ---- rewind: non-destructive, visibility derives per assembly ----
+section('rewind derivation');
 {
-  // root(1) → m1(2) → m2(3); m1's active swipe is a REGENERATE with a fresh
-  // createdAt (9000) — wall-clock cutoffs break here, position cutoffs don't.
-  // Each entry's createdAt is arranged to contradict its atLen outcome, so the
-  // test only passes if atLen takes precedence:
-  //   kept  entries have createdAt AFTER  the fallback cutoff (9000)
-  //   dropped entries have createdAt BEFORE the fallback cutoff
+  // root(1) → m1(2) → m2(3). Rewinding to m1 used to DELETE everything
+  // stamped past it; now it only re-points the leaf and resets the cursors —
+  // off-path pieces/memories hide by branch derivation instead.
   const m1 = { id: 'm1', parentId: 'root', role: 'user', activeSwipe: 1, edited: false,
     swipes: [{ text: 'v1', createdAt: 10, modelId: null }, { text: 'v2', createdAt: 9000, modelId: null }] };
   const chat = {
@@ -1038,7 +1057,7 @@ section('rewind atLen cutoff');
     activeLeafId: 'm2',
     memoryStore: { memories: [
       { id: 'memOld', text: 'old', pinned: false, createdAt: 9500, atLen: 2 },
-      { id: 'memNew', text: 'new', pinned: false, createdAt: 8000, atLen: 3 },
+      { id: 'memNew', text: 'new', pinned: false, createdAt: 8000, atLen: 3, atMsg: 'm2' },
     ], cursor: 3 },
     lorePieces: [
       lore({ id: 'M', title: 'Manual' }), // hand-authored: no provenance
@@ -1050,25 +1069,25 @@ section('rewind atLen cutoff');
       { id: 'q2', title: 'QLate', content: 'x', keys: [], source: 'tool', createdAt: 8000, atLen: 3 },
     ],
   };
-  const rw = rewindChat(chat, 'm1'); // pathLen = 2
-  ok(rw.memoryStore.memories.map(m => m.id).join(',') === 'memOld',
-    'atLen memories: regenerate-safe position cutoff (new swipe createdAt irrelevant)');
-  ok(rw.lorePieces.map(p => p.id).join(',') === 'M,T1',
-    'atLen tool lore rolls back by position; hand-authored pieces survive');
-  ok(rw.loreQueue.map(q => q.id).join(',') === 'q1',
-    'loreQueue proposals roll back with the same rule');
+  const rw = rewindChat(chat, 'm1');
+  ok(rw.activeLeafId === 'm1' && rw.memoryStore.memories.length === 2
+    && rw.lorePieces.length === 3 && rw.loreQueue.length === 2,
+    'rewind keeps memories, tool lore and queue entries — derivation, not deletion');
   ok(rw.memoryStore.cursor === 2 && rw.emergentCursor === 2, 'cursors reset to path length');
-  // entries WITHOUT atLen still fall back to the createdAt cutoff
-  const untagged = { ...baseChat,
-    memoryStore: { memories: [
-      { id: 'a', text: 'a', pinned: false, createdAt: 0 },
-      { id: 'b', text: 'b', pinned: false, createdAt: Date.now() + 100000 },
-    ], cursor: 0 },
-    loreQueue: [{ id: 'q', title: 'Q', content: 'x', keys: [], source: 'tool', createdAt: Date.now() + 100000 }] };
-  const rw2 = rewindChat(untagged, 'root');
-  ok(rw2.memoryStore.memories.length === 1 && rw2.memoryStore.memories[0].id === 'a',
-    'entries without atLen fall back to the createdAt cutoff');
-  ok(rw2.loreQueue.length === 0, 'loreQueue entries without atLen fall back too');
+  // derivation: T2 (written by m2, off the rewound path) hides as branch; T1 stays node-scoped
+  const man = assemblePrompt({ scenario: baseScenario, persona, chat: rw, settings }).manifest;
+  ok(man.layers.lore.inactive.find(p => p.id === 'T2')?.reason === 'branch',
+    'piece written past the rewind point hides as Not injected · branch');
+  ok(man.layers.lore.inactive.find(p => p.id === 'T1')?.reason === 'not-triggered',
+    'piece written at the rewind point stays live on the branch');
+  ok(man.layers.memory.inactive.find(m => m.id === 'memNew')?.reason === 'branch',
+    'memory stamped with an off-path leaf hides as branch');
+  // …and everything re-emerges when the branch is viewed again
+  const back = assemblePrompt({ scenario: baseScenario, persona, chat, settings }).manifest;
+  ok(back.layers.lore.inactive.find(p => p.id === 'T2')?.reason === 'not-triggered',
+    'piece re-emerges on its own branch');
+  ok(back.layers.memory.inactive.find(m => m.id === 'memNew') == null,
+    'memory re-emerges on its own branch');
 }
 
 // ---- pruneInterrupted purity ----
@@ -1222,19 +1241,22 @@ section('universal rollback of tool updates');
     'add_lore title-update appends a revision (covers extraction auto mode)');
   ok(lp.keys.join() === 'gate' && lp.revisions[1].keys.join() === 'gate',
     'add_lore update without keys keeps current keys');
-  // end-to-end: an applied update rolls back on rewind
+  // end-to-end: an applied update reverts to the pre-update card on rewind —
+  // the piece is never mutated; the assembler's revision view falls back
   let c2 = baseChat;
   const a1 = appendMessage(c2, 'root', 'user', 'one', null); c2 = a1.chat;      // pathLen 2
   const a2 = appendMessage(c2, a1.id, 'user', 'two', null); c2 = a2.chat;        // pathLen 3
   c2 = { ...c2, lorePieces: [lore({ id: 'C1', title: 'Vex', type: 'character', content: 'v1' })] };
   c2 = applyToolCalls(c2, [{ name: 'update_character', args: { name: 'Vex', content: 'v2' } }],
     { nodeId: 'x', now: Date.now(), atLen: 3 }).chat;
-  ok(c2.lorePieces[0].content === 'v2' && rewindChat(c2, a1.id).lorePieces[0].content === 'v1',
-    'applied update rolls back to the pre-update card on rewind');
+  const rwAsm = assemblePrompt({ scenario: baseScenario, persona, chat: rewindChat(c2, a1.id), settings }).manifest;
+  ok(c2.lorePieces[0].content === 'v2'
+    && rwAsm.layers.lore.inactive.find(p => p.id === 'C1')?.content === 'v1',
+    'applied update reverts to the pre-update card on rewind (derived view, log intact)');
 }
 
-// ---- revision rewind + prune ----
-section('revision rewind + prune');
+// ---- revision views derive per branch (rewind never trims the log) ----
+section('revision derivation');
 {
   let chat = baseChat;
   const m1 = appendMessage(chat, 'root', 'user', 'one', null); chat = m1.chat;   // pathLen 2
@@ -1242,28 +1264,45 @@ section('revision rewind + prune');
   const piece = { ...lore({ id: 'C1', title: 'Vex', type: 'character', content: 'v3', keys: ['k3'] }),
     revisions: [
       { content: 'v1', keys: ['k1'], atLen: null, createdAt: null, createdBy: null },
-      { content: 'v2', keys: ['k2'], atLen: 2, createdAt: 100, createdBy: 'N1' },
-      { content: 'v3', keys: ['k3'], atLen: 3, createdAt: 200, createdBy: 'N2' },
+      { content: 'v2', keys: ['k2'], atLen: 2, createdAt: 100, createdBy: m1.id },
+      { content: 'v3', keys: ['k3'], atLen: 3, createdAt: 200, createdBy: m2.id },
     ] };
   const withPiece = { ...chat, lorePieces: [piece] };
-  ok(rewindChat(withPiece, m2.id).lorePieces[0].revisions.length === 3,
-    'rewind to the tip keeps all revisions');
-  const rwMid = rewindChat(withPiece, m1.id);
-  ok(rwMid.lorePieces[0].content === 'v2' && rwMid.lorePieces[0].keys.join() === 'k2'
-    && rwMid.lorePieces[0].revisions.length === 2,
-    'rewind trims revisions past the target and restores content+keys');
-  const rwRoot = rewindChat(withPiece, 'root');
-  ok(rwRoot.lorePieces[0].content === 'v1' && rwRoot.lorePieces[0].keys.join() === 'k1'
-    && rwRoot.lorePieces[0].revisions.length === 1,
-    'rewind to root restores the null-stamped original');
-  const pruned = pruneToolPieces(withPiece, 'N2');
-  ok(pruned !== withPiece && pruned.lorePieces[0].content === 'v2'
-    && pruned.lorePieces[0].keys.join() === 'k2' && pruned.lorePieces[0].revisions.length === 2,
-    'prune strips revisions createdBy the node and restores content');
-  ok(pruneToolPieces(withPiece, 'NOPE') === withPiece,
-    'prune no-op (identity) when no piece or revision matches');
-  const dropped = pruneToolPieces({ ...baseChat, lorePieces: [{ ...piece, createdBy: 'N2' }] }, 'N2');
-  ok(dropped.lorePieces.length === 0, 'piece created by the node still dropped whole');
+  const viewAt = (leaf) => {
+    const ids = pathIdSet(withPiece.messages, leaf);
+    return pieceAtPath(withPiece.lorePieces[0], ids, withPiece.messages);
+  };
+  ok(viewAt(m2.id).content === 'v3', 'tip view sees the latest revision');
+  ok(viewAt(m1.id).content === 'v2' && viewAt(m1.id).keys.join() === 'k2',
+    'mid-chain view falls back to the last on-view revision');
+  ok(viewAt('root').content === 'v1' && viewAt('root').keys.join() === 'k1',
+    'root view restores the null-stamped original');
+  const rw = rewindChat(withPiece, m1.id);
+  ok(rw.lorePieces[0].revisions.length === 3 && rw.lorePieces[0].content === 'v3',
+    'rewind keeps the full revision log and content — views derive per assembly');
+}
+
+// ---- swipe-scoped world state in the assembler ----
+section('swipe-scoped lore derivation');
+{
+  // Node A has two takes; the tool write belongs to take 1. Viewing take 0
+  // hides it (a replaced swipe is its own branch), take 1 restores it.
+  const A = { id: 'A', parentId: 'root', role: 'assistant', activeSwipe: 0, edited: false,
+    swipes: [{ text: 'first take', createdAt: 1, modelId: null }, { text: 'second take', createdAt: 2, modelId: null }] };
+  const chat = { ...baseChat,
+    messages: { root: node('root', null, 'assistant', 'hi', 1), A },
+    activeLeafId: 'A',
+    lorePieces: [{ ...lore({ id: 'T', title: 'TakeLore', pinned: true }), createdAt: 2, createdBy: 'A', createdSwipe: 1 }],
+  };
+  const at = (swipe) => assemblePrompt({ scenario: baseScenario, persona,
+    chat: { ...chat, messages: { ...chat.messages, A: { ...A, activeSwipe: swipe } } }, settings }).manifest;
+  ok(at(1).layers.lore.pieces.some(p => p.id === 'T' && p.origin === 'chat'),
+    'piece injects with chat origin when its take is viewed');
+  const man0 = at(0);
+  ok(!man0.layers.lore.pieces.some(p => p.id === 'T')
+    && man0.layers.lore.inactive.some(p => p.id === 'T' && p.reason === 'branch'),
+    'piece hides as Not injected · branch when another take is viewed — never deleted');
+  ok(chat.lorePieces.length === 1, 'state untouched by derivation');
 }
 
 // ---- revisions import healing ----

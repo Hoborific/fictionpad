@@ -5,6 +5,12 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
+  // Pieces are never deleted by rewind/regenerate — a piece stamped with a
+  // node/swipe off the active view belongs to a sibling branch or a replaced
+  // take and hides by derivation. It still renders here, marked, so the chat
+  // tab can never silently lose a chat-registered character.
+  const pathIds = pathIdSet(chat.messages ?? {}, chat.activeLeafId);
+  const offBranch = (p) => !pieceVisibleAt(p, pathIds, chat.messages ?? null);
   const allPieces = mergedLorePieces(scenario, chat, characters);
   const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => update({ ...chat, lorePieces });
@@ -67,6 +73,7 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
               ${p.type === 'character' && html`<span class="pill">character</span>`}
               ${p.pinned && html`<span class="pill pinned">pinned</span>`}
               ${p.enabled === false && html`<span class="pill">disabled</span>`}
+              ${offBranch(p) && html`<span class="pill" title="Belongs to another branch or a replaced swipe — hidden from context until you switch back to it">branch</span>`}
               <button class="btn small danger" title="Remove from this chat"
                 onClick=${(e) => { e.stopPropagation(); setPieces(pieces.filter(q => q.id !== p.id)); }}>✕</button>
             </div>
