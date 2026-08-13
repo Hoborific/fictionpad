@@ -673,6 +673,25 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .sampler-row .sval { width: 100px; flex: none; display: flex; justify-content: flex-end; align-items: center; min-height: 26px; }
 .sampler-row .sval input[type="number"], .sampler-row .sval select { width: 100%; padding: 3px 6px; font-size: 13px; }
 .sampler-row .sval .hint { margin: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ModelPicker: text input + popover list of fetched models. Rows wrap
+   (word-break) so long model ids are always fully visible — the whole point
+   of replacing the native datalist, whose popup truncates them. */
+.mp-wrap { position: relative; display: flex; gap: 6px; flex: 1; min-width: 0; }
+.mp-wrap > input { flex: 1; min-width: 0; }
+.mp-wrap .mp-toggle { flex: none; padding: 4px 8px; }
+.mp-wrap .mp-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
+  max-height: 40vh; overflow-y: auto;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.mp-wrap .mp-item {
+  display: block; width: 100%; text-align: left; font: inherit; font-size: 13px;
+  padding: 6px 8px; background: transparent; border: none; border-radius: 6px;
+  color: var(--c-text); cursor: pointer; word-break: break-all;
+}
+.mp-wrap .mp-item:hover { background: var(--c-bg-1); }
+.mp-wrap .mp-item.cur { color: var(--c-accent); }
 .lore-card { border: 1px solid var(--c-border); border-radius: 8px; margin-bottom: 8px; background: var(--c-bg-2); }
 .lore-card > .lc-head { display: flex; gap: 6px; align-items: center; padding: 6px 10px; cursor: pointer; }
 .lore-card > .lc-head .t { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -924,7 +943,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.0';
+const APP_VERSION = '4.11.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2554,10 +2573,10 @@ const TOOLS_PROMPT = `You can grow the story's cast and world by emitting tool b
 {"tool": "register_character", "args": {"name": "Vex", "description": "A wiry dock informant with a copper eye. Nervous, greedy, loyal to whoever pays."}}
 \`\`\`
 Available tools:
-- register_character(name, description) — a NEW named character enters the story who may recur. description: appearance, personality, motives in a few sentences.
-- update_character(name, content, keys?) — rewrite an EXISTING character's reference card when their lasting traits, appearance, relationships, or knowledge change. content is the character's FULL updated card with the change folded in — never a fragment or a diff. Only for characters the app already knows; a newcomer is registered first. Past versions are kept and can be rolled back, so update freely when the story genuinely changes someone.
-- add_lore(title, content, keys?) — record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
-Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; a character you speak for with a Name: prefix must be known to the app — register a newcomer BEFORE their first prefixed line, in the same reply; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
+- register_character(name, description): a NEW named character enters the story who may recur. description: appearance, personality, motives in a few sentences.
+- update_character(name, content, keys?): rewrite an EXISTING character's reference card when their lasting traits, appearance, relationships, or knowledge change. content is the character's FULL updated card with the change folded in, never a fragment or a diff. Only for characters the app already knows; a newcomer is registered first. Past versions are kept and can be rolled back, so update freely when the story genuinely changes someone.
+- add_lore(title, content, keys?): record a lasting fact about the world, a place, or an object. keys: up to 5 optional trigger words.
+Rules: the JSON field for the tool is "tool", never "name"; emit a block at the moment the character or thing enters the narrative, then continue the story; never register {{user}}; a character you speak for with a Name: prefix must be known to the app, so register a newcomer BEFORE their first prefixed line, in the same reply; at most one tool block per reply unless several newcomers appear at once; never mention tool blocks in the prose.`;
 
 // ---- multi-speaker segments -------------------------------------------------
 // One turn stays ONE swipe in the tree; a reply containing several
@@ -2693,19 +2712,19 @@ function splitSpeakerSegments(text, names) {
 // Default platform-prompt addition permitting multi-speaker replies.
 // Appended when settings.multiSpeaker !== false; user-editable
 // (settings.speakerPrompt, this is the default).
-const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …" — shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with a single "Narrator:" on its own line — never several "Narrator:" parts in a row, and only for genuine scene-level narration that belongs to no character (unprefixed lines simply continue the current part). In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows — from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
+const SPEAKER_PROMPT = `When several named characters share the scene, you may reply for more than one of them in a single turn: start each character's part with their FULL registered name and a colon on its own line ("The Auctioneer: …"; shortenings like "Auctioneer:" are not recognized), in the order they speak or act, at most one part per character. One prefix starts the whole part; never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. Narration needs no prefix at the start of the reply; after a character's part, resume it with a single "Narrator:" on its own line, never several "Narrator:" parts in a row, and only for genuine scene-level narration that belongs to no character (unprefixed lines simply continue the current part). In a scene with only one character, write everything in that character's own voice, action and description included; do not use "Narrator:" at all. Use a prefix only for a character the app already knows, whether from the scenario lore or an earlier registration; a prefix for an unknown name is not recognized and is shown to the reader as plain text.`;
 
 // Prose formatting conventions — single source of truth, woven into the
 // platform prompt (src/83-settings.js) and both generator prompts below, so
 // the RP reply format and generated greetings/lore can't drift apart.
-const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:" — never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part — never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with a single "Narrator:" line — never several "Narrator:" parts in a row. Narration without a speaker needs no prefix.';
+const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotation marks ("like this") and actions or non-verbal beats in single asterisks (*like this*). When a specific character speaks or acts, begin that part with the character\'s FULL name exactly as registered, followed by a colon ("The Auctioneer:", never a shortening like "Auctioneer:"; a partial name is not recognized and shows to the reader as plain text). One prefix starts the whole part; never repeat it for the same character; the following lines belong to that character until another name or "Narrator:" appears. The app labels the message with the prefix and hides it from the reader; resume scene-level narration with a single "Narrator:" line, never several "Narrator:" parts in a row. Narration without a speaker needs no prefix.';
 
 // Default aux-task prompts (user-editable in Settings → Prompts). {{user}} is
 // substituted with the persona name at call time; the suggestions prompt also
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
 const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
-const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation — long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}] — or [] if nothing qualifies.';
+const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation: long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}], or [] if nothing qualifies.';
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
 const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
@@ -2713,9 +2732,9 @@ const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a co
 // runtime placeholders — {{user}} stays literal so the generated text keeps
 // the macro. The reply contract is one JSON object; parsing is tolerant
 // (first { to last } — see extractGenJSON in src/97-generator.js).
-const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI — description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat — write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned — every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece — the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
-const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active — compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character — write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI — omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character — keep it as-is. ' + PROSE_FORMAT_RULES;
-const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates — for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned — every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character — keep it as-is.';
+const DEFAULT_SCENARIO_GEN_PROMPT = 'You design roleplay scenarios for a chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","description":"…","tags":["…"],"scenarioInstructions":"…","backstory":"…","greeting":"…","lorePieces":[{"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}]}. name, description and tags are metadata never sent to the AI; description is a one-line teaser. scenarioInstructions steer the AI\'s style and behavior; backstory is the world setup the AI always sees. The greeting is the first assistant message of every new chat; write it in scene as narrative prose in the app\'s format. Each lore piece covers ONE entity (a character, location, faction or item): content is compact reference prose, keys are trigger words that inject the piece when mentioned; every character piece needs its name as a key. Every character who speaks or acts in the greeting needs a character lore piece; the app attributes Name: speech only to characters in the lore. At most 5 character pieces. {{user}} in any field is a literal macro for the user\'s character; keep it as-is. Omit lorePieces if none are needed; always return the complete object. ' + PROSE_FORMAT_RULES;
+const DEFAULT_CHARACTER_GEN_PROMPT = 'You design character cards for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"name":"…","content":"…","keys":["…"],"greeting":"…","color":"#rrggbb"}. content is the card sent to the AI when the character is active: compact reference prose covering appearance, personality and motives. keys are trigger words that activate the card when mentioned; include the character\'s name. The greeting is the first assistant message of a chat with this character; write it in scene from that character, in the app\'s prose format. color is optional: a hex colour suiting the character, used for their name in the chat UI; omit it when nothing fits. {{user}} in any field is a literal macro for the user\'s character; keep it as-is. ' + PROSE_FORMAT_RULES;
+const DEFAULT_PIECE_GEN_PROMPT = 'You write lorebook entries for a roleplay chat app. Given the user\'s request (and an optional current draft to extend), reply with a single JSON object only, no commentary: {"type":"lore|character","title":"…","content":"…","keys":["…"],"pinned":false}. One entry covers ONE entity (a character, location, faction or item). content is compact reference prose sent to the AI when the entry activates; for characters cover appearance, personality and motives. keys are trigger words that inject the entry when mentioned; every character entry needs its name as a key. pinned entries are always injected; use sparingly. {{user}} in any field is a literal macro for the user\'s character; keep it as-is.';
 // Image prompts (v4.10): the first teaches the chat model the generate_image
 // tool (platform-prompt addition, user-editable like TOOLS_PROMPT); the
 // second is the system prompt for the avatar-generation aux call (the user
@@ -2724,8 +2743,8 @@ const DEFAULT_IMAGE_PROMPT = `You can attach ONE generated image to a reply by e
 \`\`\`tool
 {"tool": "generate_image", "args": {"prompt": "Vex, a wiry dock informant with a copper eye and a patched oilskin coat, leaning on a rain-slick railing in a floating city's sky docks at dusk, warm lantern light, painterly style", "caption": "Vex at the sky docks"}}
 \`\`\`
-Rules: attach an image only for visually significant moments — a new location, a character's first appearance, a dramatic reveal — never for ordinary exchanges; the prompt must be a complete, self-contained visual description (subjects, clothing, setting, lighting, style) because the image generator sees nothing else; the caption is at most 12 words; the image block goes at the very end of the reply, after any other tool block; never mention the image block in the prose.`;
-const DEFAULT_AVATAR_GEN_PROMPT = 'You condense character cards into image-generation prompts. Given a character\'s name and card, write a single prompt for a square portrait of that character: face and distinguishing features, expression, and a simple background that fits them. The portrait shows this one character only, with no text and no watermark. Output only the prompt text — no commentary, no quotes.';
+Rules: attach an image only for visually significant moments: a new location, a character's first appearance, a dramatic reveal; never for ordinary exchanges; the prompt must be a complete, self-contained visual description (subjects, clothing, setting, lighting, style) because the image generator sees nothing else; the caption is at most 12 words; the image block goes at the very end of the reply, after any other tool block; never mention the image block in the prose.`;
+const DEFAULT_AVATAR_GEN_PROMPT = 'You condense character cards into image-generation prompts. Given a character\'s name and card, write a single prompt for a square portrait of that character: face and distinguishing features, expression, and a simple background that fits them. The portrait shows this one character only, with no text and no watermark. Output only the prompt text, no commentary, no quotes.';
 // ---- import normalization ----
 // Imports (sidebar files, bundles, full backups) upsert JSON nearly verbatim —
 // a hand-edited or third-party file can lack fields the editors and the
@@ -3113,6 +3132,32 @@ function collectImageUrls(value, into = new Set()) {
   };
   walk(value);
   return into;
+}
+
+// ---- connection profiles ---------------------------------------------------
+// Named bundles of connection + model + sampler settings (Settings →
+// Connection → Profiles). PROFILE_FIELDS is the exact allowlist copied both
+// ways (draft → profile on save, profile → draft on apply), so unrelated
+// settings never hitchhike and serverToken (per-device) is never stored.
+const PROFILE_FIELDS = [
+  'endpoint', 'apiKey',
+  'auxEndpoint', 'auxApiKey', 'genEndpoint', 'genApiKey',
+  'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey',
+  'model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel',
+  'samplers', 'disabledSamplers', 'customSamplers',
+];
+// Snapshot the profiled fields out of a settings object (draft or live).
+function profileFromSettings(st) {
+  const fields = {};
+  for (const k of PROFILE_FIELDS) if (st?.[k] !== undefined) fields[k] = st[k];
+  return fields;
+}
+// Overlay a profile's fields onto a settings object; unknown keys in the
+// profile are ignored. Returns a new object — the input is never mutated.
+function applyProfile(st, profile) {
+  const out = { ...st };
+  for (const k of PROFILE_FIELDS) if (profile?.fields?.[k] !== undefined) out[k] = profile.fields[k];
+  return out;
 }
 // === PURE CORE END ===
 // ============================================================================
@@ -4348,6 +4393,44 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
 }
 
+// Text input with a model dropdown. The native <datalist> popup truncates
+// long model ids (worst on mobile) and can't be styled, so the fetched list
+// renders as a wrapping popover instead: free typing stays, typing filters,
+// ▾ toggles the full list, click picks. Closes on outside pointerdown and on
+// Escape (stopped before it reaches the modal's own Escape handler).
+function ModelPicker({ value, models, placeholder, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    window.addEventListener('pointerdown', close, true);
+    return () => window.removeEventListener('pointerdown', close, true);
+  }, [open]);
+  const all = models ?? [];
+  const q = (value ?? '').toLowerCase();
+  const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); };
+  return html`<div class="mp-wrap" ref=${wrapRef}>
+    <input type="text" value=${value ?? ''} placeholder=${placeholder}
+      onFocus=${() => { setTyping(false); if (all.length) setOpen(true); }}
+      onInput=${(e) => { setTyping(true); setOpen(true); onChange(e.target.value); }}
+      onKeyDown=${(e) => {
+        if (e.key === 'Escape' && open) { e.stopPropagation(); setOpen(false); }
+        else if (e.key === 'ArrowDown' && !open && all.length) { setTyping(false); setOpen(true); }
+      }} />
+    ${all.length > 0 && html`<button type="button" class="btn mp-toggle" tabindex="-1"
+      title="Show fetched models"
+      onClick=${() => { setTyping(false); setOpen(!open); }}>▾</button>`}
+    ${open && shown.length > 0 && html`<div class="mp-pop">
+      ${shown.map(m => html`<button type="button" key=${m}
+        class=${`mp-item ${m === value ? 'cur' : ''}`}
+        onPointerDown=${(e) => { e.preventDefault(); pick(m); }}>${m}</button>`)}
+    </div>`}
+  </div>`;
+}
+
 // ============================================================================
 // COMPONENTS: SCENARIO EDITOR — full CRUD incl. lore piece editor.
 // ============================================================================
@@ -4786,7 +4869,7 @@ const DEFAULT_PLATFORM_PROMPT =
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
   'Characters know only what they have witnessed or learned within the story: a ' +
-  'character absent from a scene does not know what happened there — never let one ' +
+  'character absent from a scene does not know what happened there; never let one ' +
   'act on, reference, or reveal knowledge they could not plausibly have. ' +
   PROSE_FORMAT_RULES;
 
@@ -4799,6 +4882,10 @@ const DEFAULT_SETTINGS = {
   auxEndpoint: '', auxApiKey: '',     // memory, suggestions, /improve, /recap, impersonate, lore extraction
   genEndpoint: '', genApiKey: '',     // ✦ generator buttons
   embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
+  // Saved connection profiles (Settings → Connection → Profiles):
+  // [{ id, name, fields }] — fields covers the PROFILE_FIELDS allowlist
+  // (connection, models, samplers); serverToken is never stored.
+  profiles: [],
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
@@ -5040,6 +5127,32 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
+  // Connection profiles: named snapshots of the PROFILE_FIELDS group
+  // (connection, models, samplers). Apply only patches the draft — the
+  // profile takes effect when the user saves the settings form.
+  const [profileSel, setProfileSel] = useState('');
+  const profiles = draft.profiles ?? [];
+  const saveProfile = () => {
+    const cur = profiles.find(x => x.id === profileSel);
+    const name = (prompt('Profile name:', cur?.name ?? '') ?? '').trim();
+    if (!name) return;
+    const existing = profiles.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (existing && !confirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`)) return;
+    const entry = { id: existing?.id ?? uid(), name, fields: profileFromSettings(draft) };
+    set({ profiles: [...profiles.filter(x => x.id !== entry.id), entry] });
+    setProfileSel(entry.id);
+  };
+  const applySelectedProfile = () => {
+    const p = profiles.find(x => x.id === profileSel);
+    if (p) set(applyProfile({}, p));
+  };
+  const deleteSelectedProfile = () => {
+    const p = profiles.find(x => x.id === profileSel);
+    if (!p || !confirm(`Delete profile "${p.name}"?`)) return;
+    set({ profiles: profiles.filter(x => x.id !== p.id) });
+    setProfileSel('');
+  };
+
   // Shared prompt-textarea block for the Prompts tab.
   const promptField = (key, label, def, rows, hint) => html`
     <label class="field"><span>${label}</span>
@@ -5072,8 +5185,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${SETTINGS_TABS.map(([id, label]) => html`
           <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
       </div>
-      <!-- model pickers on several tabs share this list; datalists are invisible -->
-      <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
+      <!-- model pickers share the fetched list via ModelPicker popovers -->
 
       ${tab === 'appearance' && html`
         ${section('Theme', html`
@@ -5113,6 +5225,17 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </label>`)}`}
 
       ${tab === 'connection' && html`
+        ${section('Profiles', html`
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <select value=${profileSel} onChange=${(e) => setProfileSel(e.target.value)} style=${{ flex: 1, minWidth: '140px' }}>
+              <option value="">(no profile selected)</option>
+              ${profiles.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+            </select>
+            <button class="btn small" disabled=${!profileSel} onClick=${applySelectedProfile}>Apply</button>
+            <button class="btn small" onClick=${saveProfile}>Save…</button>
+            <button class="btn small danger" disabled=${!profileSel} onClick=${deleteSelectedProfile}>Delete</button>
+          </div>`,
+          'Save the current connection, models and samplers as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
         ${section('API connection', html`
           <div class="grid2">
             <label class="field"><span>Endpoint</span>
@@ -5189,32 +5312,32 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <div class="grid3">
             <label class="field"><span>Chat model</span>
               <div style=${{ display: 'flex', gap: '6px' }}>
-                <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
+                <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
                 <button class="btn" onClick=${fetchModels}>Fetch</button>
               </div>
               ${modelsError && html`<span class="warn">${modelsError}</span>`}
               ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
             </label>
             <label class="field"><span>Aux model</span>
-              <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} />
+              <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
               <span class="hint">Memory summaries, suggestions, /improve, /recap. Blank = chat model.</span>
             </label>
             <label class="field"><span>Generator model</span>
-              <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} />
+              <${ModelPicker} value=${draft.genModel ?? ''} models=${models} onChange=${(v) => set({ genModel: v })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
             </label>
           </div>
           <div class="grid3">
             <label class="field"><span>Image model</span>
-              <input type="text" list="fp-models" value=${draft.imageModel ?? ''} onInput=${(e) => set({ imageModel: e.target.value })} />
+              <${ModelPicker} value=${draft.imageModel ?? ''} models=${models} onChange=${(v) => set({ imageModel: v })} />
               <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
           </div>`)}
         ${section('Embeddings', html`
           <div class="grid2">
             <label class="field"><span>Embedding model</span>
-              <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
-                onInput=${(e) => set({ embeddingModel: e.target.value })} />
+              <${ModelPicker} value=${draft.embeddingModel ?? ''} models=${models} placeholder="e.g. bge-m3"
+                onChange=${(v) => set({ embeddingModel: v })} />
               <span class="hint">Semantic lore activation; blank = off. Often a separate model name — Fetch above populates the list.</span>
             </label>
             ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}

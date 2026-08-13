@@ -1172,3 +1172,14 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Images no longer ride inside every chat save. Chats used to keep generated-image takes and avatars as base64 data URLs inline in the chat JSON, so each save (every message, every swipe) re-sent the whole thing — multi-MB uploads for image-heavy chats, and IndexedDB got the same write volume. At the persistence boundary, image payloads are now stored once in a separate `Images` store and entities persist with `imgref:<hash>` sentinels instead. Ids are content hashes, so a fork-to-new-chat (or any copy sharing the same image) stores it exactly once. In-memory the app still works with plain data URLs — nothing about rendering, exports, or imports changes, and JSON exports stay self-contained. Garbage collection is a reference scan, not refcounting: deleting a chat/scenario/character sweeps image rows only when no remaining entity references them, so shared (forked) images survive until the last reference goes. IndexedDB databases upgrade automatically (schema v3). Server storage needs the updated server (it advertises an `images` capability in `/version`); against an older server the app keeps saving inline exactly as before, and the updated server rehydrates sentinels server-side for older app builds, so mixed old/new deployments keep working.
 - Server: request-body cap raised from 8 MB to 64 MB, with a `FICTIONPAD_MAX_BODY_MB` env override — image-heavy chats were hitting `413 Payload Too Large` on `/save` even before the externalization work above.
+
+### v4.11.1
+
+**Added**
+
+- Connection profiles (Settings → Connection → Profiles): save the current connection (endpoint, keys, per-role overrides), models and samplers as a named profile, then switch setups with Apply. Profiles live in the settings, so they sync with server storage like the API key does; the per-device server token is never part of a profile.
+
+**Changed**
+
+- Model pickers no longer rely on the browser's native datalist popup, which truncated long model ids (worst on mobile). The fetched model list now opens as a wrapping popover under each model field — full ids always visible, still free-typeable, typing filters the list.
+- Default prompts are em-dash-free: the platform, speaker, prose-format, tool, image, avatar, lore-extraction and ✦ generator defaults no longer contain "—", so models stop picking the habit up from the prompt itself. Existing installs keep their saved prompt copies — use Reset to default in Settings → Prompts to adopt the new text.

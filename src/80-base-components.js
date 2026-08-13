@@ -116,3 +116,41 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
 }
 
+// Text input with a model dropdown. The native <datalist> popup truncates
+// long model ids (worst on mobile) and can't be styled, so the fetched list
+// renders as a wrapping popover instead: free typing stays, typing filters,
+// ▾ toggles the full list, click picks. Closes on outside pointerdown and on
+// Escape (stopped before it reaches the modal's own Escape handler).
+function ModelPicker({ value, models, placeholder, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    window.addEventListener('pointerdown', close, true);
+    return () => window.removeEventListener('pointerdown', close, true);
+  }, [open]);
+  const all = models ?? [];
+  const q = (value ?? '').toLowerCase();
+  const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); };
+  return html`<div class="mp-wrap" ref=${wrapRef}>
+    <input type="text" value=${value ?? ''} placeholder=${placeholder}
+      onFocus=${() => { setTyping(false); if (all.length) setOpen(true); }}
+      onInput=${(e) => { setTyping(true); setOpen(true); onChange(e.target.value); }}
+      onKeyDown=${(e) => {
+        if (e.key === 'Escape' && open) { e.stopPropagation(); setOpen(false); }
+        else if (e.key === 'ArrowDown' && !open && all.length) { setTyping(false); setOpen(true); }
+      }} />
+    ${all.length > 0 && html`<button type="button" class="btn mp-toggle" tabindex="-1"
+      title="Show fetched models"
+      onClick=${() => { setTyping(false); setOpen(!open); }}>▾</button>`}
+    ${open && shown.length > 0 && html`<div class="mp-pop">
+      ${shown.map(m => html`<button type="button" key=${m}
+        class=${`mp-item ${m === value ? 'cur' : ''}`}
+        onPointerDown=${(e) => { e.preventDefault(); pick(m); }}>${m}</button>`)}
+    </div>`}
+  </div>`;
+}
+

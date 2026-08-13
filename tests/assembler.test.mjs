@@ -24,7 +24,8 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
-  hashImageId, extractImages, rehydrateImages, collectImageUrls };`;
+  hashImageId, extractImages, rehydrateImages, collectImageUrls,
+  PROFILE_FIELDS, profileFromSettings, applyProfile };`;
 const core = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const {
@@ -40,6 +41,7 @@ const {
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
+  PROFILE_FIELDS, profileFromSettings, applyProfile,
 } = core;
 
 // detectSpeaker lives in src/20-prose.js, outside the pure-core region —
@@ -2134,6 +2136,31 @@ section('splitImageCalls');
   ok(empty.imageCalls.length === 0 && empty.loreCalls.length === 0, 'missing input partitions to empty lists');
   ok(IMAGE_CALL_CAP === 1 && DEFAULT_IMAGE_PROMPT.includes('generate_image') && DEFAULT_AVATAR_GEN_PROMPT.length > 0,
     'image call cap + default prompts present');
+}
+
+// ---- connection profiles ----
+section('connection profiles');
+{
+  const st = {
+    endpoint: 'http://a:1', apiKey: 'k1', model: 'm1', auxModel: 'm2',
+    samplers: { temperature: 0.7 }, disabledSamplers: ['top_k'], customSamplers: [{ id: 'x', key: 'k' }],
+    serverToken: 'secret', contextLength: 4096, platformPrompt: 'pp',
+  };
+  const fields = profileFromSettings(st);
+  ok(fields.endpoint === 'http://a:1' && fields.model === 'm1' && fields.samplers.temperature === 0.7,
+    'profile snapshot carries connection, model and sampler fields');
+  ok(!('serverToken' in fields) && !('contextLength' in fields) && !('platformPrompt' in fields)
+    && !PROFILE_FIELDS.includes('serverToken'),
+    'profile snapshot excludes the server token and unrelated settings');
+  const profile = { id: 'P', name: 'p', fields: { ...fields, bogus: 1 } };
+  const applied = applyProfile(st, profile);
+  ok(applied.endpoint === 'http://a:1' && applied.apiKey === 'k1' && applied.auxModel === 'm2'
+    && applied.serverToken === 'secret' && applied.contextLength === 4096,
+    'apply overlays profile fields, keeps the rest of the settings');
+  ok(!('bogus' in applied), 'apply ignores keys outside the allowlist');
+  ok(st.endpoint === 'http://a:1' && !('bogus' in st), 'apply does not mutate the input');
+  const cleared = applyProfile(st, { id: 'P2', name: 'q', fields: { ...fields, endpoint: 'http://b:2' } });
+  ok(cleared.endpoint === 'http://b:2' && cleared.apiKey === 'k1', 'second profile overlays only what differs');
 }
 
 // ---- image prompt prefix (v4.10) ----

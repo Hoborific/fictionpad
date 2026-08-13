@@ -7,7 +7,7 @@ const DEFAULT_PLATFORM_PROMPT =
   'the fourth wall unless the user speaks out-of-character. Portray the world and its ' +
   'characters; leave the actions, words, and thoughts of {{user}} to the user. ' +
   'Characters know only what they have witnessed or learned within the story: a ' +
-  'character absent from a scene does not know what happened there — never let one ' +
+  'character absent from a scene does not know what happened there; never let one ' +
   'act on, reference, or reveal knowledge they could not plausibly have. ' +
   PROSE_FORMAT_RULES;
 
@@ -20,6 +20,10 @@ const DEFAULT_SETTINGS = {
   auxEndpoint: '', auxApiKey: '',     // memory, suggestions, /improve, /recap, impersonate, lore extraction
   genEndpoint: '', genApiKey: '',     // ✦ generator buttons
   embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
+  // Saved connection profiles (Settings → Connection → Profiles):
+  // [{ id, name, fields }] — fields covers the PROFILE_FIELDS allowlist
+  // (connection, models, samplers); serverToken is never stored.
+  profiles: [],
   model: '',
   auxModel: '',
   embeddingModel: '', // semantic lore activation; empty = disabled
@@ -261,6 +265,32 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
+  // Connection profiles: named snapshots of the PROFILE_FIELDS group
+  // (connection, models, samplers). Apply only patches the draft — the
+  // profile takes effect when the user saves the settings form.
+  const [profileSel, setProfileSel] = useState('');
+  const profiles = draft.profiles ?? [];
+  const saveProfile = () => {
+    const cur = profiles.find(x => x.id === profileSel);
+    const name = (prompt('Profile name:', cur?.name ?? '') ?? '').trim();
+    if (!name) return;
+    const existing = profiles.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (existing && !confirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`)) return;
+    const entry = { id: existing?.id ?? uid(), name, fields: profileFromSettings(draft) };
+    set({ profiles: [...profiles.filter(x => x.id !== entry.id), entry] });
+    setProfileSel(entry.id);
+  };
+  const applySelectedProfile = () => {
+    const p = profiles.find(x => x.id === profileSel);
+    if (p) set(applyProfile({}, p));
+  };
+  const deleteSelectedProfile = () => {
+    const p = profiles.find(x => x.id === profileSel);
+    if (!p || !confirm(`Delete profile "${p.name}"?`)) return;
+    set({ profiles: profiles.filter(x => x.id !== p.id) });
+    setProfileSel('');
+  };
+
   // Shared prompt-textarea block for the Prompts tab.
   const promptField = (key, label, def, rows, hint) => html`
     <label class="field"><span>${label}</span>
@@ -293,8 +323,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${SETTINGS_TABS.map(([id, label]) => html`
           <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
       </div>
-      <!-- model pickers on several tabs share this list; datalists are invisible -->
-      <datalist id="fp-models">${(models ?? []).map(m => html`<option key=${m} value=${m} />`)}</datalist>
+      <!-- model pickers share the fetched list via ModelPicker popovers -->
 
       ${tab === 'appearance' && html`
         ${section('Theme', html`
@@ -334,6 +363,17 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </label>`)}`}
 
       ${tab === 'connection' && html`
+        ${section('Profiles', html`
+          <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <select value=${profileSel} onChange=${(e) => setProfileSel(e.target.value)} style=${{ flex: 1, minWidth: '140px' }}>
+              <option value="">(no profile selected)</option>
+              ${profiles.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+            </select>
+            <button class="btn small" disabled=${!profileSel} onClick=${applySelectedProfile}>Apply</button>
+            <button class="btn small" onClick=${saveProfile}>Save…</button>
+            <button class="btn small danger" disabled=${!profileSel} onClick=${deleteSelectedProfile}>Delete</button>
+          </div>`,
+          'Save the current connection, models and samplers as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
         ${section('API connection', html`
           <div class="grid2">
             <label class="field"><span>Endpoint</span>
@@ -410,32 +450,32 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <div class="grid3">
             <label class="field"><span>Chat model</span>
               <div style=${{ display: 'flex', gap: '6px' }}>
-                <input type="text" list="fp-models" value=${draft.model} onInput=${(e) => set({ model: e.target.value })} />
+                <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
                 <button class="btn" onClick=${fetchModels}>Fetch</button>
               </div>
               ${modelsError && html`<span class="warn">${modelsError}</span>`}
               ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
             </label>
             <label class="field"><span>Aux model</span>
-              <input type="text" list="fp-models" value=${draft.auxModel} onInput=${(e) => set({ auxModel: e.target.value })} />
+              <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
               <span class="hint">Memory summaries, suggestions, /improve, /recap. Blank = chat model.</span>
             </label>
             <label class="field"><span>Generator model</span>
-              <input type="text" list="fp-models" value=${draft.genModel ?? ''} onInput=${(e) => set({ genModel: e.target.value })} />
+              <${ModelPicker} value=${draft.genModel ?? ''} models=${models} onChange=${(v) => set({ genModel: v })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
             </label>
           </div>
           <div class="grid3">
             <label class="field"><span>Image model</span>
-              <input type="text" list="fp-models" value=${draft.imageModel ?? ''} onInput=${(e) => set({ imageModel: e.target.value })} />
+              <${ModelPicker} value=${draft.imageModel ?? ''} models=${models} onChange=${(v) => set({ imageModel: v })} />
               <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
           </div>`)}
         ${section('Embeddings', html`
           <div class="grid2">
             <label class="field"><span>Embedding model</span>
-              <input type="text" list="fp-models" placeholder="e.g. bge-m3" value=${draft.embeddingModel ?? ''}
-                onInput=${(e) => set({ embeddingModel: e.target.value })} />
+              <${ModelPicker} value=${draft.embeddingModel ?? ''} models=${models} placeholder="e.g. bge-m3"
+                onChange=${(v) => set({ embeddingModel: v })} />
               <span class="hint">Semantic lore activation; blank = off. Often a separate model name — Fetch above populates the list.</span>
             </label>
             ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
