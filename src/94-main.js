@@ -590,7 +590,7 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return null;
-    const maxChars = st.memoryMaxChars ?? 1000;
+    const maxChars = st.memoryMaxChars ?? 5000;
     const priorTexts = (chatObj.memoryStore?.memories ?? []).slice(-MEM_PRIOR_MAX).map(m => m.text);
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
@@ -599,7 +599,7 @@ function Main({ storage, storageKind, storageFailed }) {
       endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
       user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
-      maxTokens: st.memoryMaxTokens ?? 400, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
+      maxTokens: st.memoryMaxTokens ?? 1500, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
     return out.slice(0, maxChars) || null;
   }
@@ -675,9 +675,9 @@ function Main({ storage, storageKind, storageFailed }) {
       const out = await auxLogged('lore-extract', {
         endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
-          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 3))),
+          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
         user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
-        maxTokens: st.loreExtractMaxTokens ?? 400, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
+        maxTokens: st.loreExtractMaxTokens ?? 1500, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       }, chatObj.id);
       const m = out.match(/\[[\s\S]*\]/);
       const proposals = m ? JSON.parse(m[0]) : [];
@@ -691,7 +691,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }))
         .filter(p => p.title && p.content
           && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
-        .slice(0, Math.max(1, st.loreExtractMax ?? 3));
+        .slice(0, Math.max(1, st.loreExtractMax ?? 5));
       if (fresh.length) {
         advance((cur) => {
           let work = cur;
@@ -1084,6 +1084,16 @@ function Main({ storage, storageKind, storageFailed }) {
     // lands on the swipe as `think` — displayed collapsibly, never prompted.
     // Continuations prepend the base swipe's reasoning like its text.
     let thinkAcc = continuation ? (node?.swipes?.[node.activeSwipe]?.think ?? '') : '';
+    // Thinking wall time (first think chunk to the first content chunk —
+    // prefill excluded) lands on the swipe as thinkMs; continuations add to
+    // the base swipe's window.
+    const baseThinkMs = continuation ? (node?.swipes?.[node.activeSwipe]?.thinkMs ?? 0) : 0;
+    let thinkStartAt = null, thinkStopAt = null;
+    // Backend-reported token counts (stream_options include_usage) land on
+    // the swipe as usage.completion; on continuation the count adds the base
+    // swipe's, so the ribbon total covers the whole reply.
+    const baseUsageTok = continuation ? (node?.swipes?.[node.activeSwipe]?.usage?.completion ?? 0) : 0;
+    let usageRec = null;
     const lpTape = [];
     // Tool replies: the RAW accumulated text and its raw→stripped char map
     // (set when tool blocks were stripped) so the lp tape — which covers the
@@ -1163,6 +1173,9 @@ function Main({ storage, storageKind, storageFailed }) {
     // OpenAI-style backends 400 the whole request when stop has >4 entries:
     // retry once with the list truncated, then surface any error as-is.
     let stopList = st.stopStrings;
+    // Usage reporting (stream_options.include_usage): a backend that 400s the
+    // unknown field gets one silent retry without it, like the stop retry.
+    let wantUsage = true;
     try {
       for (let attempt = 0; ; attempt++) {
         try {
@@ -1172,14 +1185,22 @@ function Main({ storage, storageKind, storageFailed }) {
             samplers: effSamplers,
             maxTokens: st.maxTokens, signal: abort.signal,
             tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: stopList,
+            usageStats: wantUsage,
           })) {
             if (chunk.done) {
               sawDone = true;
               if (chunk.finishReason === 'length') truncated = true;
               continue;
             }
+            if (chunk.usage) { usageRec = chunk.usage; continue; }
             if (chunk.lp) { lpTape.push(...chunk.lp); continue; }
-            if (chunk.think) { thinkAcc += chunk.think; applyText(acc); continue; }
+            if (chunk.think) {
+              if (thinkStartAt == null) thinkStartAt = Date.now();
+              thinkAcc += chunk.think; applyText(acc); continue;
+            }
+            // Thinking ends at the first content token (streams that emit
+            // only reasoning keep thinkStopAt null → the stamp uses stream end).
+            if (thinkStartAt != null && thinkStopAt == null) thinkStopAt = Date.now();
             acc += chunk.content;
             // Streaming view hides tool protocol blocks (complete + trailing
             // unterminated) so the user never sees them mid-generation.
@@ -1190,6 +1211,11 @@ function Main({ storage, storageKind, storageFailed }) {
                              : 'The connection ended before any text arrived.');
           break;
         } catch (e) {
+          if (wantUsage && !acc && e?.status === 400 && /stream_options|include_usage/i.test(e?.message ?? '')) {
+            console.warn('FictionPad: backend rejected stream_options — retrying without usage reporting.');
+            wantUsage = false;
+            continue;
+          }
           if (attempt === 0 && !acc && e?.status === 400 && /stop/i.test(e?.message ?? '')
               && Array.isArray(stopList) && stopList.length > 4) {
             console.warn(`FictionPad: backend rejected ${stopList.length} stop strings — retrying with the first 4.`);
@@ -1389,8 +1415,19 @@ function Main({ storage, storageKind, storageFailed }) {
         const names = characterNamesOf(scen, work, gchars);
         const n = work.messages[nodeId];
         if (n) {
+          // thinkMs: first-think-token → first-content-token window (stream
+          // end when no content followed), plus the base swipe's window on
+          // continuations.
+          const thinkMs = thinkAcc
+            ? baseThinkMs + (thinkStartAt != null ? (thinkStopAt ?? Date.now()) - thinkStartAt : 0)
+            : 0;
           const swipes = n.swipes.slice();
           swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], speaker: detectSpeaker(acc, names) ?? 'Narrator', genMs: Date.now() - genStart,
+            ...(thinkMs > 0 ? { thinkMs } : {}),
+            // Backend-reported counts win over the ribbon's tape/estimate —
+            // completion covers the reasoning tokens too on thinking models.
+            ...(usageRec?.completion != null
+              ? { usage: { ...usageRec, completion: usageRec.completion + baseUsageTok } } : {}),
             ...(interrupted ? { interrupted: true } : {}),
             // Persisted on the swipe (full args) so the gear popover can show
             // them after the fact — the popover truncates for display only.
@@ -1623,7 +1660,7 @@ function Main({ storage, storageKind, storageFailed }) {
         endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: subUser(st.improvePrompt || DEFAULT_IMPROVE_PROMPT, `${pName}${personaDesc}`),
         user: `${recent ? `Recent scene:\n\n${recent}\n\n` : ''}Draft:\n\n${draft}`,
-        maxTokens: st.improveMaxTokens ?? 400, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
+        maxTokens: st.improveMaxTokens ?? 1500, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
       setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
@@ -1678,9 +1715,9 @@ function Main({ storage, storageKind, storageFailed }) {
     try {
       const out = await auxLogged('recap', {
         endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
-        system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 400)),
+        system: (st.recapPrompt || DEFAULT_RECAP_PROMPT).replaceAll('{{words}}', String(st.recapWords ?? 800)),
         user: `Roleplay excerpt (last ${n} messages):\n\n${recent}`,
-        maxTokens: st.recapMaxTokens ?? 700, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
+        maxTokens: st.recapMaxTokens ?? 1500, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
       setModal({ kind: 'recap', text: out });

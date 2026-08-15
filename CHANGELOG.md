@@ -1183,3 +1183,16 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - Model pickers no longer rely on the browser's native datalist popup, which truncated long model ids (worst on mobile). The fetched model list now opens as a wrapping popover under each model field — full ids always visible, still free-typeable, typing filters the list.
 - Default prompts are em-dash-free: the platform, speaker, prose-format, tool, image, avatar, lore-extraction and ✦ generator defaults no longer contain "—", so models stop picking the habit up from the prompt itself. Existing installs keep their saved prompt copies — use Reset to default in Settings → Prompts to adopt the new text.
+
+### v4.11.2
+
+**Added**
+
+- Custom samplers support a string type: a free-text value, or a dropdown when the definition carries a comma-separated choices list — e.g. `chat_template_kwargs.reasoning_effort` with choices `low, medium, high`. The picked string is sent verbatim (dotted keys nest as before), and a stored value outside the choice list is kept as an extra option instead of being dropped.
+- The thinking box header shows the total thinking time once the stream ends ("Thinking - 12.3s"), measured from the first reasoning token to the first content token; continuations add their window to the base swipe's.
+- The message meta ribbon now shows the reply's generation stats as one compact readout — gen time · token count · tok/s, e.g. `58.7s · 3.5k tok · 59.3 t/s`, with full precision and the count's source on the tooltip (thinking included either way). The count is exact when the backend reports usage — requested via `stream_options: { include_usage: true }`, with a silent retry without it when a backend 400s the unknown field — or sent logprobs, and ~estimated from characters otherwise.
+
+**Changed**
+
+- A too-long model id in the message meta row is now truncated with an ellipsis as the first fit step (full id on the tooltip) instead of being dropped straight into the › popover; it's only hidden at the next overflow stage. And the fit-collapse itself now applies at every width, not just phones — a contested desktop row (long model id, multi-speaker header) used to wrap mid-item into a broken two-line row because the nowrap/trim rules lived in the mobile media query.
+- Aux-call default limits raised so summaries and recaps stop truncating mid-thought: memory summary 400 → 1500 max tokens with the stored-note cap scaled to match (1000 → 5000 chars, ~1500 tokens at the 3.3 chars/token estimate); lore extraction 400 → 1500 max tokens and 3 → 5 pieces proposed per pass; /improve 400 → 1500 max tokens; /recap 700 → 1500 max tokens with the word target 400 → 800. Existing installs keep their saved values — the new numbers are the fresh-install and Reset-to-default baselines.

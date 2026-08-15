@@ -290,6 +290,39 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .swipes .gen { color: var(--c-accent); }
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
 
+/* Meta row collapses by FIT in per-item stages at ANY width (JS adds t1–t6 as
+   the row overflows, one step per pre-paint pass, until it fits): details
+   leave the inline row from right to left — model (first truncated with an
+   ellipsis, then hidden), (edited), gen stats, date, # — each still reachable
+   in the › popover (the toggle appears at t1); t6 also collapses the action
+   icons behind ›. flex-shrink: 0 + nowrap keep every item at natural width so
+   the overflow is measurable — without them the spans shrink to min-content
+   and wrap mid-item (two-line rows) and the row looks "fine" to the
+   measurement. Note .meta-details is display:contents, so its children are
+   matched separately (they are not DOM children of .meta). */
+.msg .meta > *, .msg .meta .meta-details:not(.open) > * { flex-shrink: 0; white-space: nowrap; }
+.msg .meta > .grow { flex-shrink: 1; }
+.msg .meta:is(.t1, .t2, .t3, .t4, .t5, .t6) .meta-toggle { display: inline-block; }
+.msg .meta.t1 .meta-details:not(.open) .md-model {
+  max-width: 14ch; overflow: hidden; text-overflow: ellipsis; }
+.msg .meta.t2 .meta-details:not(.open) :is(.md-model, .md-edited) { display: none; }
+.msg .meta.t3 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gen) { display: none; }
+.msg .meta.t4 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gen, .md-date) { display: none; }
+.msg .meta:is(.t5, .t6) .meta-details:not(.open) { display: none; }
+.msg .meta.t6 .actions { display: none; }
+.msg .meta.t6 .actions-toggle { display: inline-block; }
+.msg .meta .actions.open {
+  display: flex; opacity: 1; position: absolute; right: 0; top: 1.6em; z-index: 25; margin-top: 2px;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.msg .meta .meta-details.open {
+  display: flex; flex-direction: column; gap: 2px;
+  position: absolute; left: 0; top: 1.6em; z-index: 25; margin-top: 2px;
+  background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: 6px 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+
 /* ---------- avatars (chat column, segment gutters, sidebar, editors) ---------- */
 .avatar { display: inline-block; border-radius: 50%; object-fit: cover; flex: none; }
 .avatar-tile {
@@ -817,36 +850,6 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   .side-item .tools { display: flex; opacity: 0.55; }
   /* Finger-sized targets (~33px tall): meta-row actions, message/image swipe ◀▶, sidebar tools. */
   .msg .meta .btn.small, .msg .img-swipes .btn.small, .side-item .tools .btn.small { padding: 7px 10px; }
-  /* Meta row collapses by FIT in per-item stages (JS adds t1–t6 as the row
-     overflows, one step per pre-paint pass, until it fits): details leave the
-     inline row from right to left — model, (edited), gen time, date, # — each
-     still reachable in the › popover (the toggle appears at t1); t6 also
-     collapses the action icons behind ›. flex-shrink: 0 + nowrap keep every
-     item at natural width so the overflow is measurable — without them the
-     spans shrink and wrap (two-line rows) and the row looks "fine" to the
-     measurement. Note .meta-details is display:contents, so its children are
-     matched separately (they are not DOM children of .meta). */
-  .msg .meta > *, .msg .meta .meta-details:not(.open) > * { flex-shrink: 0; white-space: nowrap; }
-  .msg .meta > .grow { flex-shrink: 1; }
-  .msg .meta:is(.t1, .t2, .t3, .t4, .t5, .t6) .meta-toggle { display: inline-block; }
-  .msg .meta.t1 .meta-details:not(.open) .md-model { display: none; }
-  .msg .meta.t2 .meta-details:not(.open) :is(.md-model, .md-edited) { display: none; }
-  .msg .meta.t3 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gentime) { display: none; }
-  .msg .meta.t4 .meta-details:not(.open) :is(.md-model, .md-edited, .md-gentime, .md-date) { display: none; }
-  .msg .meta:is(.t5, .t6) .meta-details:not(.open) { display: none; }
-  .msg .meta.t6 .actions { display: none; }
-  .msg .meta.t6 .actions-toggle { display: inline-block; }
-  .msg .meta .actions.open {
-    display: flex; opacity: 1; position: absolute; right: 0; top: 1.6em; z-index: 25; margin-top: 2px;
-    background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
-    padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
-  }
-  .msg .meta .meta-details.open {
-    display: flex; flex-direction: column; gap: 2px;
-    position: absolute; left: 0; top: 1.6em; z-index: 25; margin-top: 2px;
-    background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
-    padding: 6px 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
-  }
 }
 
 /* Stop iOS auto-zoom on field focus: Safari force-zooms a focused field under

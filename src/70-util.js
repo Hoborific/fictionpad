@@ -101,18 +101,28 @@ const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f])
 //   number  — behaves like a built-in (send-checkbox + numeric input)
 //   boolean — send-checkbox + true/false select; while enabled the chosen
 //             bool IS sent (e.g. chat_template_kwargs.enable_thinking: false)
+//   string  — send-checkbox + text input, or a dropdown when the def carries
+//             a comma-separated choices list (e.g. reasoning_effort:
+//             "low, medium, high"); the chosen string is sent verbatim
 const customSamplerFields = (st) => (st?.customSamplers ?? [])
   .filter(d => d?.key?.trim() && !SAMPLER_FIELD_MAP[d.key.trim()])
-  .map(d => ({
-    key: d.key.trim(),
-    label: d.name?.trim() || d.key.trim(),
-    type: d.type === 'boolean' ? 'boolean' : 'number',
-    min: Number.isFinite(d.min) ? d.min : 0,
-    max: Number.isFinite(d.max) ? d.max : 1,
-    step: Number.isFinite(d.step) && d.step > 0 ? d.step : 0.01,
-    def: d.type === 'boolean' ? d.def !== false : (Number.isFinite(d.def) ? d.def : 0),
-    custom: true,
-  }));
+  .map(d => {
+    const options = String(d.choices ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const type = d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : 'number';
+    return {
+      key: d.key.trim(),
+      label: d.name?.trim() || d.key.trim(),
+      type,
+      min: Number.isFinite(d.min) ? d.min : 0,
+      max: Number.isFinite(d.max) ? d.max : 1,
+      step: Number.isFinite(d.step) && d.step > 0 ? d.step : 0.01,
+      def: type === 'boolean' ? d.def !== false
+        : type === 'string' ? String(d.def ?? options[0] ?? '')
+        : (Number.isFinite(d.def) ? d.def : 0),
+      options,
+      custom: true,
+    };
+  });
 const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)];
 
 // Samplers minus the user-disabled keys — the set actually sent. Values stay
@@ -121,13 +131,23 @@ const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)]
 const enabledSamplers = (st) => Object.fromEntries(
   Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
 
-// Value editor for a sampler field — true/false select for booleans, NumInput
-// otherwise. Shared by every surface that edits a sampler set (per-chat
-// overrides, scenario defaults), so the rows can't drift.
+// Value editor for a sampler field — true/false select for booleans, dropdown
+// for strings with a choices list (a stored value outside the list is kept as
+// an extra option, never silently dropped), plain text input for free-form
+// strings, NumInput otherwise. Shared by every surface that edits a sampler
+// set (per-chat overrides, scenario defaults), so the rows can't drift.
 const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
   ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
       <option value="true">true</option><option value="false">false</option></select>`
-  : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+  : f.type === 'string'
+    ? (f.options?.length
+      ? html`<select value=${String(value ?? f.def ?? '')} onChange=${(e) => onChange(e.target.value)}>
+          ${(value != null && value !== '' && !f.options.includes(String(value))
+            ? [String(value), ...f.options] : f.options)
+            .map(o => html`<option key=${o} value=${o}>${o}</option>`)}</select>`
+      : html`<input type="text" value=${String(value ?? '')} placeholder=${f.def || f.key}
+          onInput=${(e) => onChange(e.target.value)} />`)
+    : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
       onCommit=${onChange} />`;
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.

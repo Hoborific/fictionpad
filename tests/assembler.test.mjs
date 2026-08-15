@@ -1037,6 +1037,10 @@ section('sampler param expansion');
   ok(!('a' in skipped) && !('b' in skipped) && skipped.c === 1, 'null/undefined dropped');
   ok(expandSamplerParams({ 'a.b': 1, a: 5 }).a === 5, 'flat/dotted collision last-write-wins');
   ok(expandSamplerParams(null) && Object.keys(expandSamplerParams(null)).length === 0, 'null input → empty');
+  // String samplers (e.g. chat_template_kwargs.reasoning_effort) pass through verbatim
+  ok(expandSamplerParams({ 'chat_template_kwargs.reasoning_effort': 'high' })
+    .chat_template_kwargs?.reasoning_effort === 'high', 'string value nests verbatim');
+  ok(expandSamplerParams({ effort: '' }).effort === '', 'empty string kept (explicitly enabled)');
   // Hostile keys: prototype-chain segments are skipped entirely
   const hostile = expandSamplerParams({ '__proto__.polluted': 1, 'a.__proto__.b': 2, 'constructor.x': 3, ok: 4 });
   ok(Object.keys(hostile).join(',') === 'ok' && ({}).polluted === undefined && Object.prototype.polluted === undefined,

@@ -64,22 +64,22 @@ const DEFAULT_SETTINGS = {
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
-  memoryMaxTokens: 400, // aux response cap for a summary
-  memoryMaxChars: 1000, // stored note length cap
+  memoryMaxTokens: 1500, // aux response cap for a summary
+  memoryMaxChars: 5000, // stored note length cap (~1500 tokens at TOKEN_CHARS)
   memoryCap: MEMORY_CAP, // memory cards kept per chat (pinned exempt)
   memoryRecall: 'recent', // 'recent' = pinned-then-newest | 'smart' = similarity-ranked recall (needs embeddingModel)
   loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
   loreExtractTemp: 0.3,
-  loreExtractMaxTokens: 400,
-  loreExtractMax: 3, // pieces proposed per extraction pass
+  loreExtractMaxTokens: 1500,
+  loreExtractMax: 5, // pieces proposed per extraction pass
   improvePrompt: DEFAULT_IMPROVE_PROMPT, // /improve
   improveTemp: 0.7,
-  improveMaxTokens: 400,
+  improveMaxTokens: 1500,
   impersonatePrompt: DEFAULT_IMPERSONATE_PROMPT, // /impersonate + "✦ Write my reply"
   recapPrompt: DEFAULT_RECAP_PROMPT, // /recap
   recapTemp: 0.4,
-  recapMaxTokens: 700,
-  recapWords: 400, // word target substituted into the recap prompt's {{words}}
+  recapMaxTokens: 1500,
+  recapWords: 800, // word target substituted into the recap prompt's {{words}}
   scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT, // ✦ Generate in the scenario editor
   characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, // ✦ Generate in the character editor
   pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT, // ✦ Generate on a single lore piece
@@ -133,7 +133,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     <div class="lore-card">
       <div class="lc-head" onClick=${() => setOpen(!open)}>
         <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
-        <span class="pill">${d.type === 'boolean' ? 'bool' : 'num'}</span>
+        <span class="pill">${d.type === 'boolean' ? 'bool' : d.type === 'string' ? 'str' : 'num'}</span>
         <span>${open ? '▾' : '▸'}</span>
       </div>
       ${open && html`
@@ -148,17 +148,27 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
           </div>
           <div class="grid3">
             <label class="field"><span>Type</span>
-              <select value=${d.type === 'boolean' ? 'boolean' : 'number'}
-                onChange=${(e) => setDef({ type: e.target.value, def: e.target.value === 'boolean' ? true : 0 })}>
+              <select value=${d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : 'number'}
+                onChange=${(e) => setDef({ type: e.target.value,
+                  def: e.target.value === 'boolean' ? true : e.target.value === 'string' ? '' : 0 })}>
                 <option value="number">number</option>
                 <option value="boolean">boolean (true/false)</option>
+                <option value="string">string (text / choices)</option>
               </select></label>
             ${d.type === 'boolean'
               ? html`<label class="field"><span>Default when enabled</span>
                   <select value=${String(d.def !== false)} onChange=${(e) => setDef({ def: e.target.value === 'true' })}>
                     <option value="true">true</option><option value="false">false</option>
                   </select></label>`
-              : [['def', 'Default'], ['min', 'Min'], ['max', 'Max'], ['step', 'Step']].map(([k, lbl]) => html`
+              : d.type === 'string'
+                ? html`
+                  <label class="field"><span>Default when enabled</span>
+                    <input type="text" value=${d.def ?? ''} placeholder="medium"
+                      onInput=${(e) => setDef({ def: e.target.value })} /></label>
+                  <label class="field"><span>Choices (comma-separated — becomes a dropdown)</span>
+                    <input type="text" value=${d.choices ?? ''} placeholder="low, medium, high"
+                      onInput=${(e) => setDef({ choices: e.target.value })} /></label>`
+                : [['def', 'Default'], ['min', 'Min'], ['max', 'Max'], ['step', 'Step']].map(([k, lbl]) => html`
                   <label class="field" key=${k}><span>${lbl}</span>
                     <${NumInput} value=${d[k] ?? (k === 'step' ? 0.01 : 0)} step=${0.01} fallback=${k === 'step' ? 0.01 : 0}
                       onCommit=${(n) => setDef({ [k]: n })} /></label>`)}
@@ -527,12 +537,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                     ${f.label}${f.custom ? ' ✦' : ''}</label>
                   <span class="sval">
                     ${active
-                      ? (f.type === 'boolean'
-                        ? html`<select value=${String(draft.samplers[f.key] !== false)}
-                            onChange=${(e) => setSampler(f.key, e.target.value === 'true')}>
-                            <option value="true">true</option><option value="false">false</option></select>`
-                        : html`<${NumInput} value=${draft.samplers[f.key]} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
-                            onCommit=${(n) => setSampler(f.key, n)} />`)
+                      ? samplerValueCtl(f, draft.samplers[f.key], (v) => setSampler(f.key, v))
                       : html`<span class="hint">${draft.samplers?.[f.key] != null ? String(draft.samplers[f.key]) : '—'}</span>`}
                   </span>
                 </div>`;
@@ -567,7 +572,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
                 samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
               })} />`)}`,
-          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>. Built-in keys are reserved. Registered samplers join the lists above.`,
+          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>, and key <b>chat_template_kwargs.reasoning_effort</b> with type string + choices <b>low, medium, high</b> sends the picked string. Built-in keys are reserved. Registered samplers join the lists above.`,
           html`<button class="btn small"
             onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button>`)}
         ${section('Logprobs', html`
@@ -698,8 +703,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
-            ${numField('memoryMaxTokens', 'Summary max tokens', 400, { min: 50, max: 2000, step: 10 })}
-            ${numField('memoryMaxChars', 'Note max characters', 1000, { min: 100, max: 5000, step: 50 })}
+            ${numField('memoryMaxTokens', 'Summary max tokens', 1500, { min: 50, max: 4000, step: 10 })}
+            ${numField('memoryMaxChars', 'Note max characters', 5000, { min: 100, max: 20000, step: 50 })}
           </div>
           <div class="grid3">
             ${numField('memoryCap', 'Memory cards kept per chat', MEMORY_CAP, { min: 5, max: 1000 })}
@@ -714,19 +719,19 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${section('Lore extraction', html`
           <div class="grid3">
             ${numField('loreExtractTemp', 'Temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
-            ${numField('loreExtractMaxTokens', 'Max tokens', 400, { min: 50, max: 2000, step: 10 })}
-            ${numField('loreExtractMax', 'Max pieces per pass', 3, { min: 1, max: 10 })}
+            ${numField('loreExtractMaxTokens', 'Max tokens', 1500, { min: 50, max: 4000, step: 10 })}
+            ${numField('loreExtractMax', 'Max pieces per pass', 5, { min: 1, max: 10 })}
           </div>`,
           'Runs on the memory cadence. {{max}} in the extraction prompt auto-fills from max pieces per pass.')}
         ${section('Slash commands', html`
           <div class="grid3">
             ${numField('improveTemp', '/improve temperature', 0.7, { min: 0, max: 2, step: 0.05 })}
-            ${numField('improveMaxTokens', '/improve max tokens', 400, { min: 50, max: 4000, step: 10 })}
+            ${numField('improveMaxTokens', '/improve max tokens', 1500, { min: 50, max: 4000, step: 10 })}
           </div>
           <div class="grid3">
             ${numField('recapTemp', '/recap temperature', 0.4, { min: 0, max: 2, step: 0.05 })}
-            ${numField('recapMaxTokens', '/recap max tokens', 700, { min: 50, max: 4000, step: 10 })}
-            ${numField('recapWords', '/recap word target', 400, { min: 50, max: 3000, step: 50 })}
+            ${numField('recapMaxTokens', '/recap max tokens', 1500, { min: 50, max: 4000, step: 10 })}
+            ${numField('recapWords', '/recap word target', 800, { min: 50, max: 3000, step: 50 })}
           </div>`,
           'Both use the aux model. The word target fills {{words}} in the recap prompt; max tokens is the hard cap.')}
         ${section('✦ Generator', html`

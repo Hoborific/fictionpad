@@ -43,14 +43,16 @@ function ProbsView({ tokens, onPick }) {
 
 // Collapsible reasoning box (delta.reasoning_content — vLLM/DeepSeek/etc.).
 // Collapsed by default, streaming or not — the header still shows live that
-// thinking is in progress ("Thinking…"). The expanded body scrolls via
+// thinking is in progress ("Thinking…"), and once the stream ends it carries
+// the total thinking time (swipe.thinkMs). The expanded body scrolls via
 // RailScroll (hidden native scrollbar, accent rail + bottom fade cues).
-function ThinkBox({ text, streaming }) {
+function ThinkBox({ text, streaming, thinkMs }) {
   const [open, setOpen] = useState(false);
   return html`
     <div class="think">
       <button class="think-head" onClick=${() => setOpen(!open)}>
-        <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…' : ''}</button>
+        <span class="think-caret">${open ? '▾' : '▸'}</span> Thinking${streaming ? '…'
+          : Number.isFinite(thinkMs) ? ` - ${(thinkMs / 1000).toFixed(1)}s` : ''}</button>
       ${open && html`<${RailScroll} className="think-body">${text}<//>`}
     </div>`;
 }
@@ -199,15 +201,13 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // from the inline row, right to left (model, edited, gen time, date, #),
   // then the action icons (t6). Never measured mid-stream (the row is widest
   // while generating); re-probes from t0 on swipe change and row resizes.
-  // Pre-paint, so no flash.
-  // The t1–t6 hiding rules exist only inside `@media (max-width: 700px)`, so
-  // the whole fit-measurement is pointless (and wastes up to 6 renders per
-  // message) on wider viewports — gate every step on it.
-  const metaCollapseApplies = () => window.matchMedia('(max-width: 700px)').matches;
+  // Pre-paint, so no flash. Applies at every width: without the t1–t6 rules a
+  // contested row shrinks its spans to min-content and wraps mid-item, which
+  // reads as a broken two-line row (worst with multi-speaker headers).
   const metaRef = useRef(null);
   const [metaLevel, setMetaLevel] = useState(0);
   useEffect(() => {
-    const el = metaRef.current; if (!el || !metaCollapseApplies()) return;
+    const el = metaRef.current; if (!el) return;
     let seen = false; // RO fires once on observe — skip that, react only to real resizes
     const ro = new ResizeObserver(() => { if (seen) setMetaLevel(0); seen = true; });
     ro.observe(el);
@@ -220,13 +220,40 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
       if (metaLevel) { setMetaLevel(0); return; }
     }
     const el = metaRef.current;
-    if (!el || streaming || !metaCollapseApplies()) return;
+    if (!el || streaming) return;
     if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
   }, [metaLevel, streaming, swipe]);
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());
   const hasProbs = !isUser && Array.isArray(swipe.tokens) && swipe.tokens.length > 0;
+  // Ribbon token stats, best source first: the backend's reported usage
+  // (stream_options include_usage — covers the reasoning tokens too on
+  // thinking models), then the aligned logprob tape (real sampled count, but
+  // never covers think — estimated on top), then the char estimate (~).
+  const tapeLen = hasProbs ? swipe.tokens.length : 0;
+  const usageTok = Number.isFinite(swipe.usage?.completion) ? swipe.usage.completion : null;
+  const tokEst = usageTok == null && !tapeLen;
+  const tokTotal = isUser ? 0
+    : usageTok ?? ((tapeLen || estimateTokens(swipe.text)) + (swipe.think ? estimateTokens(swipe.think) : 0));
+  // The gen stats render as ONE compact span — "58.7s · 3.5k tok · 59.3 t/s" —
+  // so the ribbon stays short and the collapse cascade drops a single unit.
+  // Parts appear as they exist: tokens stream live, time/speed once the swipe
+  // finishes. Full precision + the count's source live on the tooltip.
+  const tokShort = (n) => n >= 10000 ? `${Math.round(n / 1000)}k`
+    : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+  const genSecs = Number.isFinite(swipe.genMs) ? swipe.genMs / 1000 : null;
+  const genStatParts = [
+    genSecs != null ? `${genSecs.toFixed(1)}s` : null,
+    tokTotal > 0 ? `${tokEst ? '~' : ''}${tokShort(tokTotal)} tok` : null,
+    tokTotal > 0 && genSecs > 0 ? `${(tokTotal / genSecs).toFixed(1)} t/s` : null,
+  ].filter(Boolean);
+  const genStatTitle = [
+    genSecs != null ? `${genSecs.toFixed(1)}s generation time, prompt to completion` : null,
+    tokTotal > 0 ? `${tokEst ? '~' : ''}${tokTotal} tokens, thinking included — ${usageTok != null
+      ? 'reported by the backend' : tapeLen ? 'logprob count + estimated thinking' : 'estimated from characters'}` : null,
+    tokTotal > 0 && genSecs > 0 ? `${(tokTotal / genSecs).toFixed(1)} tokens/s over the whole generation` : null,
+  ].filter(Boolean).join(' · ');
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
@@ -251,7 +278,7 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // Reasoning channel (swipe.think): its own bubble ahead of the reply —
   // visually separated like a speaker segment, but unnamed and collapsible.
   const thinkBubble = !isUser && !editing && showThinking !== false && swipe.think
-    ? html`<div class="bubble think-bubble"><${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} /></div>`
+    ? html`<div class="bubble think-bubble"><${ThinkBox} text=${subUser(swipe.think, personaName)} streaming=${streaming} thinkMs=${swipe.thinkMs} /></div>`
     : null;
 
   // Horizontal swipe gesture (touch/pen only) mirroring the swipe navigator:
@@ -380,8 +407,8 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const avName = isUser ? personaName : (multi ? (segments[0].speaker ?? 'Narrator') : (speaker ?? 'Narrator'));
   const av = avatars?.[String(avName ?? '').toLowerCase()];
   const avTile = !isUser && avName !== 'Narrator'; // tile fallback is named-character-only
-  // #, date, gen time, edited, model collapse behind the › toggle on phones
-  // (desktop shows them inline via .meta-details { display: contents }).
+  // #, date, gen stats, edited, model shrink/collapse behind the › toggle when
+  // the row overflows at any width (fit-measured per row, t1–t6 stages).
   const hasMetaDetails = !!(index != null || swipe.createdAt || Number.isFinite(swipe.genMs) || node.edited || swipe.modelId);
   // The row's content (meta row, bubbles, branch chip, context menu). With
   // avatars on, it wraps in .msg-body beside the .msg-av column; otherwise it
@@ -412,9 +439,9 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
         <span class="meta-details ${metaOpen ? 'open' : ''}" onClick=${() => setMetaOpen(false)}>
           ${index != null && html`<span class="md-index">#${index}</span>`}
           ${swipe.createdAt && html`<span class="md-date">${fmtDate(swipe.createdAt, dateFormat)}</span>`}
-          ${Number.isFinite(swipe.genMs) && html`<span class="md-gentime" title="Generation time, prompt to completion">${(swipe.genMs / 1000).toFixed(1)}s</span>`}
+          ${genStatParts.length > 0 && html`<span class="md-gen" title=${genStatTitle}>${genStatParts.join(' · ')}</span>`}
           ${node.edited && html`<span class="md-edited">(edited)</span>`}
-          ${swipe.modelId && html`<span class="md-model">${swipe.modelId}</span>`}
+          ${swipe.modelId && html`<span class="md-model" title=${swipe.modelId}>${swipe.modelId}</span>`}
         </span>
         <span class="grow" style=${{ flex: 1 }}></span>
         <span class="actions ${streaming ? 'always' : ''} ${actionsOpen ? 'open' : ''}"

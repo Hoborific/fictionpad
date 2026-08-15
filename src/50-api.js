@@ -166,9 +166,12 @@ async function* parseEventStream(body) {
 //   { lp: [{ token, logprob, top }] } — raw logprob tape entries, no content
 //   { think }    — reasoning text (delta.reasoning_content / delta.reasoning,
 //                  vLLM/DeepSeek/OpenRouter convention); displayed, never prompted
+//   { usage }    — { prompt, completion } token counts from the trailing
+//                  usage-only chunk (stream_options.include_usage); absent
+//                  when the backend doesn't report usage
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
@@ -180,6 +183,9 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
+      // Usage reporting: backends that don't know stream_options either ignore
+      // it or 400 — the caller retries once without it on a 400 naming it.
+      ...(usageStats ? { stream_options: { include_usage: true } } : {}),
     }),
     signal,
   });
@@ -194,9 +200,15 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     throw err;
   }
   for await (const json of parseEventStream(res.body)) {
+    // The trailing usage-only chunk (stream_options.include_usage) arrives
+    // with choices: [] — capture the counts BEFORE the choices gate below.
+    if (json.usage) yield { usage: {
+      prompt: json.usage.prompt_tokens ?? null,
+      completion: json.usage.completion_tokens ?? null,
+    } };
     const choice = json.choices?.[0];
-    // Chunks with no choices (e.g. a trailing usage-only chunk with
-    // choices: []) carry nothing to yield — skip them.
+    // Chunks with no choices left (the usage-only chunk, keepalives) carry
+    // nothing more to yield — skip them.
     if (!choice) continue;
     // delta.content is the text authority — logprobs never alter it.
     const deltaText = choice?.delta?.content ?? choice?.message?.content;
