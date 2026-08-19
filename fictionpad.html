@@ -794,6 +794,18 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 }
 .banner button { margin-left: auto; }
 
+/* Floating error toast: sits above overlay panes (40) and modals (50), below
+   context menus (70) and the server gate (80); stays until dismissed or the
+   next generation starts. */
+.err-toast {
+  position: fixed; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px) + 8px);
+  left: 50%; transform: translateX(-50%); z-index: 60;
+  max-width: min(680px, calc(100vw - 24px));
+  border: 1px solid var(--c-danger); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+}
+.err-toast button { flex: none; }
+
 .errbox {
   margin: 12px; padding: 12px; border: 1px solid var(--c-danger); border-radius: 8px;
   background: color-mix(in oklch, var(--c-danger) 10%, var(--c-bg-1)); font-size: 13px;
@@ -946,7 +958,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.2';
+const APP_VERSION = '4.11.3';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2819,7 +2831,27 @@ function normalizeCharacter(c) {
     model: asStr(o.model).trim() || undefined,
     samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined };
 }
-// Node shape: every node needs a swipes array (≥1 swipe) and an in-range
+// Export a character-type lore piece (chat-registered or scenario-owned) as a
+// global character card. Content/keys are taken as stored — they mirror the
+// piece's latest revision, which is what the piece editor shows. Provenance
+// (createdBy/atLen/createdSwipe, revisions) and lore-only fields (links,
+// timed activation, search flags) are stripped: a global card is branch-global
+// by construction. Fresh id — a same-named card never clobbers (the single-
+// character JSON import precedent). Run the result through normalizeCharacter.
+function characterFromPiece(p) {
+  const o = (p && typeof p === 'object') ? p : {};
+  const now = Date.now();
+  return {
+    id: uid(), name: asStr(o.title), content: asStr(o.content),
+    keys: asArr(o.keys).map(String),
+    pinned: !!o.pinned, weight: Number.isFinite(o.weight) ? o.weight : 0,
+    smart: !!o.smart, enabled: o.enabled !== false,
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
+    color: '', greeting: '', alternateGreetings: [],
+    createdAt: now, updatedAt: now,
+  };
+}
 // activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
 function normalizeChat(c) {
   const o = (c && typeof c === 'object') ? c : {};
@@ -4160,6 +4192,26 @@ function downloadJSON(filename, obj) {
   downloadBlob(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), filename);
 }
 
+// Save a data: URL (or any URL) as a file — the image counterpart of
+// downloadBlob. In-memory images are always data URLs (imgref sentinels only
+// exist at the persistence boundary), so no fetch/decode step is needed.
+function downloadDataURL(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
+
+// "A portrait of Mia" + data:image/webp;… → "a-portrait-of-mia.webp". Blank
+// names fall back to a timestamp; the extension comes from the data-URL mime.
+function imageFilename(name, url) {
+  const base = String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '').slice(0, 60);
+  const mime = /^data:image\/([a-z0-9+.-]+)/i.exec(String(url))?.[1] ?? '';
+  const ext = { 'jpeg': 'jpg', 'svg+xml': 'svg' }[mime] ?? mime ?? '';
+  return `${base || `image-${Date.now()}`}.${ext || 'png'}`;
+}
+
 function pickFile(accept) {
   return new Promise((resolve) => {
     const input = document.createElement('input');
@@ -4593,7 +4645,7 @@ function LorePieceFields({ piece, others, set, onGenerateAvatar = null }) {
         <//></label>`}`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null }) {
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null, onExportPiece = null }) {
   const [open, setOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -4619,6 +4671,9 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGen
         ${piece.enabled === false && html`<span class="pill">disabled</span>`}
         ${onGenerate && html`<button class="btn small" title="Generate / flesh out this piece with the AI"
           onClick=${(e) => { e.stopPropagation(); setGenError(null); setGenOpen(true); }}>✦</button>`}
+        ${piece.type === 'character' && onExportPiece && html`
+          <button class="btn small" title="Export as a global character — appears in the sidebar's Characters section"
+            onClick=${(e) => { e.stopPropagation(); onExportPiece(piece); }}>⇪${'\uFE0E'}</button>`}
         <button class="btn small danger" onClick=${(e) => { e.stopPropagation(); onRemove(); }}>✕</button>
       </div>
       ${genOpen && html`
@@ -4763,7 +4818,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null, onExportPiece = null }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -4842,7 +4897,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
-            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`)}
+            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
@@ -6004,7 +6059,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -6077,6 +6132,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
               ${p.pinned && html`<span class="pill pinned">pinned</span>`}
               ${p.enabled === false && html`<span class="pill">disabled</span>`}
               ${offBranch(p) && html`<span class="pill" title="Belongs to another branch or a replaced swipe — hidden from context until you switch back to it">branch</span>`}
+              ${p.type === 'character' && onExportPiece && html`
+                <button class="btn small" title="Export as a global character — appears in the sidebar's Characters section"
+                  onClick=${(e) => { e.stopPropagation(); onExportPiece(p); }}>⇪${'\uFE0E'}</button>`}
               <button class="btn small danger" title="Remove from this chat"
                 onClick=${(e) => { e.stopPropagation(); setPieces(pieces.filter(q => q.id !== p.id)); }}>✕</button>
             </div>
@@ -6784,6 +6842,16 @@ ${showNav && html`
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
+            // Right-click landed on a generated image: image actions first.
+            ...(ctxMenu.img ? [
+              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src)) },
+              { label: 'Expand image', fn: () => {
+                  const s = ctxMenu.img.slot != null && slots ? slots.find(v => v.slot === ctxMenu.img.slot) : null;
+                  if (s?.take) zoomImg(s.take, s.slot);
+                  else setLightbox({ src: ctxMenu.img.src, title: ctxMenu.img.name });
+                } },
+              '-',
+            ] : []),
             ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
             { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); }, disabled: generating },
             isUser
@@ -6802,7 +6870,14 @@ ${showNav && html`
         // Keep the native menu when the user has text selected (copy etc.).
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
-        setCtxMenu({ x: e.clientX, y: e.clientY });
+        // A right-click on a generated image carries the image target along,
+        // so the menu can offer Save/Expand for it. The slot id (when the
+        // click-time src still matches a live take) keeps Expand on the live
+        // take-tracking lightbox path.
+        const imgEl = e.target.closest?.('img.swipe-img') ?? null;
+        const imgSlot = imgEl ? slots?.find(s => s.take?.src === imgEl.src)?.slot ?? null : null;
+        setCtxMenu({ x: e.clientX, y: e.clientY,
+          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSlot } : null });
       }}>
       ${avatarsOn && html`
         <div class="msg-av">
@@ -7761,7 +7836,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -7774,13 +7849,13 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -7792,7 +7867,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
     <//>`;
 }
 
@@ -7806,7 +7881,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -7823,7 +7898,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -8054,7 +8129,9 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // matching buttons render under the caption — while any .modal-overlay is
 // open the app-level message swipe handler stands down, so these keys are
 // the lightbox's. The parent derives `src`/`title` from live state, so a
-// take change updates the view in place.
+// take change updates the view in place. The footer's Save button downloads
+// the shown image (the live take on a slot, full-res for avatar expansions) —
+// this is also the touch path, since phones have no right-click.
 function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '' }) {
   useEffect(() => {
     if (!onPrev && !onNext) return;
@@ -8068,7 +8145,9 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
     return () => window.removeEventListener('keydown', onKey);
   }, [onPrev, onNext]);
   return html`
-    <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}>
+    <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
+      footer=${html`<button class="btn" title="Save this image as a file"
+        onClick=${() => downloadDataURL(src, imageFilename(title, src))}>⬇${'\uFE0E'} Save image</button>`}>
       <img class="lb-img" src=${src} alt=${title} />
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`
@@ -8494,12 +8573,8 @@ function Main({ storage, storageKind, storageFailed }) {
   const ref = useRef({});
   ref.current = { scenarios, personas, chats, characters, settings };
 
-  useEffect(() => {
-    if (!error) return;
-    const t = setTimeout(() => setError(null), 9000);
-    return () => clearTimeout(t);
-  }, [error]);
-
+  // Errors no longer auto-dismiss: the toast stays until the user closes it
+  // (✕) or the next generation starts (cleared in runGeneration).
   // Real token counts for the inspector — debounced, async, silently absent
   // when /tokenize is unavailable. Estimates remain the fallback.
   useEffect(() => {
@@ -9174,6 +9249,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // backend, and the UI keys off this).
     const abort = new AbortController();
     genRef.current = { abort };
+    setError(null); // a fresh generation supersedes the last error toast
     setGenerating({ chatId: chatObj.id, nodeId });
     // The node being generated is excluded from the prompt unless continuing it.
     // NB: not `??` — the root's parentId is null, and null MUST survive: for a
@@ -10236,6 +10312,14 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // Export a character-type lore piece (chat-registered or scenario-owned) as
+  // a global character card: pure-core mapping, fresh id, provenance stripped.
+  // The new card just appears in the sidebar Characters section.
+  const onExportPieceToCharacter = (piece) => {
+    const c = normalizeCharacter(characterFromPiece(piece));
+    if (!c.name.trim()) return setError('Give the piece a title first — it becomes the character name.');
+    upsertCharacter(c.id, c);
+  };
   // PNG card export: the avatar IS the card image — the full-res companion
   // when one exists (avatarFull || avatar) — redrawn to PNG at natural size
   // (long edge ≤1024), with the chara_card v2 JSON (character + its first
@@ -10442,6 +10526,7 @@ function Main({ storage, storageKind, storageFailed }) {
     <div class="app ${dragging ? 'dragging' : ''}">
       ${overlayPanes && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
+      ${error && html`<div class="banner err-toast" role="alert">${error}<button class="btn small ghost" title="Dismiss" onClick=${() => setError(null)}>✕</button></div>`}
       <div class="topbar">
         <div class="topbar-inner">
           <span ref=${leftBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
@@ -10531,7 +10616,6 @@ function Main({ storage, storageKind, storageFailed }) {
       <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${saveFailed && html`<div class="banner">${saveFailed}</div>`}
-        ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
@@ -10576,12 +10660,13 @@ function Main({ storage, storageKind, storageFailed }) {
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
+        onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onExportPiece=${onExportPieceToCharacter} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
@@ -10644,6 +10729,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
+        onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}

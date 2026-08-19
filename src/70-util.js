@@ -13,6 +13,26 @@ function downloadJSON(filename, obj) {
   downloadBlob(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), filename);
 }
 
+// Save a data: URL (or any URL) as a file — the image counterpart of
+// downloadBlob. In-memory images are always data URLs (imgref sentinels only
+// exist at the persistence boundary), so no fetch/decode step is needed.
+function downloadDataURL(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
+
+// "A portrait of Mia" + data:image/webp;… → "a-portrait-of-mia.webp". Blank
+// names fall back to a timestamp; the extension comes from the data-URL mime.
+function imageFilename(name, url) {
+  const base = String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '').slice(0, 60);
+  const mime = /^data:image\/([a-z0-9+.-]+)/i.exec(String(url))?.[1] ?? '';
+  const ext = { 'jpeg': 'jpg', 'svg+xml': 'svg' }[mime] ?? mime ?? '';
+  return `${base || `image-${Date.now()}`}.${ext || 'png'}`;
+}
+
 function pickFile(accept) {
   return new Promise((resolve) => {
     const input = document.createElement('input');

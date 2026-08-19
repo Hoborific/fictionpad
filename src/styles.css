@@ -775,6 +775,18 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 }
 .banner button { margin-left: auto; }
 
+/* Floating error toast: sits above overlay panes (40) and modals (50), below
+   context menus (70) and the server gate (80); stays until dismissed or the
+   next generation starts. */
+.err-toast {
+  position: fixed; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px) + 8px);
+  left: 50%; transform: translateX(-50%); z-index: 60;
+  max-width: min(680px, calc(100vw - 24px));
+  border: 1px solid var(--c-danger); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+}
+.err-toast button { flex: none; }
+
 .errbox {
   margin: 12px; padding: 12px; border: 1px solid var(--c-danger); border-radius: 8px;
   background: color-mix(in oklch, var(--c-danger) 10%, var(--c-bg-1)); font-size: 13px;

@@ -250,12 +250,8 @@ function Main({ storage, storageKind, storageFailed }) {
   const ref = useRef({});
   ref.current = { scenarios, personas, chats, characters, settings };
 
-  useEffect(() => {
-    if (!error) return;
-    const t = setTimeout(() => setError(null), 9000);
-    return () => clearTimeout(t);
-  }, [error]);
-
+  // Errors no longer auto-dismiss: the toast stays until the user closes it
+  // (✕) or the next generation starts (cleared in runGeneration).
   // Real token counts for the inspector — debounced, async, silently absent
   // when /tokenize is unavailable. Estimates remain the fallback.
   useEffect(() => {
@@ -930,6 +926,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // backend, and the UI keys off this).
     const abort = new AbortController();
     genRef.current = { abort };
+    setError(null); // a fresh generation supersedes the last error toast
     setGenerating({ chatId: chatObj.id, nodeId });
     // The node being generated is excluded from the prompt unless continuing it.
     // NB: not `??` — the root's parentId is null, and null MUST survive: for a
@@ -1992,6 +1989,14 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // Export a character-type lore piece (chat-registered or scenario-owned) as
+  // a global character card: pure-core mapping, fresh id, provenance stripped.
+  // The new card just appears in the sidebar Characters section.
+  const onExportPieceToCharacter = (piece) => {
+    const c = normalizeCharacter(characterFromPiece(piece));
+    if (!c.name.trim()) return setError('Give the piece a title first — it becomes the character name.');
+    upsertCharacter(c.id, c);
+  };
   // PNG card export: the avatar IS the card image — the full-res companion
   // when one exists (avatarFull || avatar) — redrawn to PNG at natural size
   // (long edge ≤1024), with the chara_card v2 JSON (character + its first
@@ -2198,6 +2203,7 @@ function Main({ storage, storageKind, storageFailed }) {
     <div class="app ${dragging ? 'dragging' : ''}">
       ${overlayPanes && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
+      ${error && html`<div class="banner err-toast" role="alert">${error}<button class="btn small ghost" title="Dismiss" onClick=${() => setError(null)}>✕</button></div>`}
       <div class="topbar">
         <div class="topbar-inner">
           <span ref=${leftBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
@@ -2287,7 +2293,6 @@ function Main({ storage, storageKind, storageFailed }) {
       <div class="center-col" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, paddingLeft: padL, paddingRight: padR }}>
         ${storageFailed && html`<div class="banner">IndexedDB unavailable — data will not persist across reloads.</div>`}
         ${saveFailed && html`<div class="banner">${saveFailed}</div>`}
-        ${error && html`<div class="banner">${error}<button class="btn small ghost" onClick=${() => setError(null)}>✕</button></div>`}
         <div style=${{ flex: 1, display: 'flex', minHeight: 0 }}>
           <${ErrorBoundary} name="chat">
             <${ChatPane} chat=${chat} persona=${persona} characterNames=${characterNames} characterColors=${characterColors} cmdArgs=${cmdArgs}
@@ -2332,12 +2337,13 @@ function Main({ storage, storageKind, storageFailed }) {
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
+        onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${onOpenBranches}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
     ${modal?.kind === 'scenario' && html`
-      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onClose=${() => setModal(null)} /><//>`}
+      <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onExportPiece=${onExportPieceToCharacter} onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
@@ -2400,6 +2406,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
+        onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}

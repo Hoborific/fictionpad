@@ -1196,3 +1196,14 @@ Note: this only changes the default prompt text; existing chats with a customize
 
 - A too-long model id in the message meta row is now truncated with an ellipsis as the first fit step (full id on the tooltip) instead of being dropped straight into the › popover; it's only hidden at the next overflow stage. And the fit-collapse itself now applies at every width, not just phones — a contested desktop row (long model id, multi-speaker header) used to wrap mid-item into a broken two-line row because the nowrap/trim rules lived in the mobile media query.
 - Aux-call default limits raised so summaries and recaps stop truncating mid-thought: memory summary 400 → 1500 max tokens with the stored-note cap scaled to match (1000 → 5000 chars, ~1500 tokens at the 3.3 chars/token estimate); lore extraction 400 → 1500 max tokens and 3 → 5 pieces proposed per pass; /improve 400 → 1500 max tokens; /recap 700 → 1500 max tokens with the word target 400 → 800. Existing installs keep their saved values — the new numbers are the fresh-install and Reset-to-default baselines.
+
+### v4.11.3
+
+**Added**
+
+- Images can be saved straight from the UI: right-click a generated image in the chat for "Save image" / "Expand image" in the message context menu, and the click-to-expand lightbox now has a ⬇ Save image button in its footer — the touch path too, since phones have no right-click. The saved file is the currently shown take on multi-take images and the full-res companion on avatar expansions, named from the caption/prompt with the right extension.
+- Character-type lore pieces export to global character cards: chat-registered (tool) characters and scenario-owned character pieces get a ⇪ button in the Chat options lore list and the scenario editor. The new card carries over the content, keys, avatar and activation flags (tool provenance and revision history are stripped — a global card is branch-global by construction), gets a fresh id so a same-named card is never clobbered, and appears in the sidebar's Characters section, ready to link into any scenario or chat.
+
+**Fixed**
+
+- Error messages (failed generations, imports, image jobs, missing endpoint hints) no longer hide behind the side panes or vanish mid-read: the banner is now a floating toast pinned top-center above the panes and panels, and it stays up until you dismiss it (✕) or the next generation starts — the old 9-second auto-fade is gone.

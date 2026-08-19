@@ -575,6 +575,16 @@ ${showNav && html`
       ${ctxMenu && html`
         <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
           items=${[
+            // Right-click landed on a generated image: image actions first.
+            ...(ctxMenu.img ? [
+              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src)) },
+              { label: 'Expand image', fn: () => {
+                  const s = ctxMenu.img.slot != null && slots ? slots.find(v => v.slot === ctxMenu.img.slot) : null;
+                  if (s?.take) zoomImg(s.take, s.slot);
+                  else setLightbox({ src: ctxMenu.img.src, title: ctxMenu.img.name });
+                } },
+              '-',
+            ] : []),
             ...(hasProbs ? [{ label: 'Token probabilities', fn: () => setShowProbs(!showProbs) }] : []),
             { label: 'Edit', fn: () => { setDraft(swipe.text); setEditing(true); }, disabled: generating },
             isUser
@@ -593,7 +603,14 @@ ${showNav && html`
         // Keep the native menu when the user has text selected (copy etc.).
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
-        setCtxMenu({ x: e.clientX, y: e.clientY });
+        // A right-click on a generated image carries the image target along,
+        // so the menu can offer Save/Expand for it. The slot id (when the
+        // click-time src still matches a live take) keeps Expand on the live
+        // take-tracking lightbox path.
+        const imgEl = e.target.closest?.('img.swipe-img') ?? null;
+        const imgSlot = imgEl ? slots?.find(s => s.take?.src === imgEl.src)?.slot ?? null : null;
+        setCtxMenu({ x: e.clientX, y: e.clientY,
+          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSlot } : null });
       }}>
       ${avatarsOn && html`
         <div class="msg-av">

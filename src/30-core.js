@@ -1600,7 +1600,27 @@ function normalizeCharacter(c) {
     model: asStr(o.model).trim() || undefined,
     samplers: (o.samplers && typeof o.samplers === 'object' && !Array.isArray(o.samplers)) ? o.samplers : undefined };
 }
-// Node shape: every node needs a swipes array (≥1 swipe) and an in-range
+// Export a character-type lore piece (chat-registered or scenario-owned) as a
+// global character card. Content/keys are taken as stored — they mirror the
+// piece's latest revision, which is what the piece editor shows. Provenance
+// (createdBy/atLen/createdSwipe, revisions) and lore-only fields (links,
+// timed activation, search flags) are stripped: a global card is branch-global
+// by construction. Fresh id — a same-named card never clobbers (the single-
+// character JSON import precedent). Run the result through normalizeCharacter.
+function characterFromPiece(p) {
+  const o = (p && typeof p === 'object') ? p : {};
+  const now = Date.now();
+  return {
+    id: uid(), name: asStr(o.title), content: asStr(o.content),
+    keys: asArr(o.keys).map(String),
+    pinned: !!o.pinned, weight: Number.isFinite(o.weight) ? o.weight : 0,
+    smart: !!o.smart, enabled: o.enabled !== false,
+    avatar: typeof o.avatar === 'string' ? o.avatar : '',
+    avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
+    color: '', greeting: '', alternateGreetings: [],
+    createdAt: now, updatedAt: now,
+  };
+}
 // activeSwipe — the message UI reads node.swipes[node.activeSwipe] unguarded.
 function normalizeChat(c) {
   const o = (c && typeof c === 'object') ? c : {};

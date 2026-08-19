@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -74,6 +74,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
               ${p.pinned && html`<span class="pill pinned">pinned</span>`}
               ${p.enabled === false && html`<span class="pill">disabled</span>`}
               ${offBranch(p) && html`<span class="pill" title="Belongs to another branch or a replaced swipe — hidden from context until you switch back to it">branch</span>`}
+              ${p.type === 'character' && onExportPiece && html`
+                <button class="btn small" title="Export as a global character — appears in the sidebar's Characters section"
+                  onClick=${(e) => { e.stopPropagation(); onExportPiece(p); }}>⇪${'\uFE0E'}</button>`}
               <button class="btn small danger" title="Remove from this chat"
                 onClick=${(e) => { e.stopPropagation(); setPieces(pieces.filter(q => q.id !== p.id)); }}>✕</button>
             </div>

@@ -29,7 +29,9 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // matching buttons render under the caption — while any .modal-overlay is
 // open the app-level message swipe handler stands down, so these keys are
 // the lightbox's. The parent derives `src`/`title` from live state, so a
-// take change updates the view in place.
+// take change updates the view in place. The footer's Save button downloads
+// the shown image (the live take on a slot, full-res for avatar expansions) —
+// this is also the touch path, since phones have no right-click.
 function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '' }) {
   useEffect(() => {
     if (!onPrev && !onNext) return;
@@ -43,7 +45,9 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
     return () => window.removeEventListener('keydown', onKey);
   }, [onPrev, onNext]);
   return html`
-    <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}>
+    <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
+      footer=${html`<button class="btn" title="Save this image as a file"
+        onClick=${() => downloadDataURL(src, imageFilename(title, src))}>⬇${'\uFE0E'} Save image</button>`}>
       <img class="lb-img" src=${src} alt=${title} />
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`

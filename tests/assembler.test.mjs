@@ -22,7 +22,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   healImageEntry, groupImageSlots,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
-  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
+  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
   PROFILE_FIELDS, profileFromSettings, applyProfile };`;
@@ -38,7 +38,7 @@ const {
   healImageEntry, groupImageSlots,
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
-  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece,
+  normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
   PROFILE_FIELDS, profileFromSettings, applyProfile,
@@ -280,6 +280,40 @@ section('global characters');
   const m3 = assemblePrompt({ scenario: scenKw, persona, chat: chatMention, settings, platformPrompt: '', characters: charsKw }).manifest;
   ok(m3.layers.lore.pieces.some(p => p.id === 'CH2' && p.reason === 'triggered'),
     'assembler: global character keyword-triggers on its name');
+}
+
+// ---- characterFromPiece: lore piece → global character export ----
+section('characterFromPiece');
+{
+  const piece = {
+    id: 'LP1', type: 'character', title: 'Mira', content: 'Mira is a tide-witch.',
+    keys: ['mira', 'tide-witch'], pinned: true, weight: 2, smart: true, enabled: true,
+    links: ['L9'], searchDepth: 4, wholeWord: true, caseSensitive: true,
+    sticky: 2, cooldown: 3, delay: 1, prob: 50, group: 'g',
+    avatar: 'data:image/webp;base64,THUMB', avatarFull: 'data:image/webp;base64,FULL',
+    createdAt: 111, atLen: 5, createdBy: 'n1', createdSwipe: 0,
+    revisions: [{ content: 'old', keys: [], atLen: null, createdAt: null, createdBy: null, createdSwipe: null }],
+  };
+  const c = characterFromPiece(piece);
+  ok(c.name === 'Mira' && c.content === 'Mira is a tide-witch.' && c.keys.join() === 'mira,tide-witch',
+    'title/content/keys map to name/content/keys');
+  ok(c.id !== 'LP1' && typeof c.id === 'string' && c.id.length > 0, 'fresh id minted');
+  ok(c.pinned === true && c.weight === 2 && c.smart === true && c.enabled === true,
+    'pinned/weight/smart/enabled carried over');
+  ok(c.avatar.endsWith('THUMB') && c.avatarFull.endsWith('FULL'), 'avatar pair carried over');
+  ok(!('createdBy' in c) && !('atLen' in c) && !('createdSwipe' in c) && !('revisions' in c)
+    && !('links' in c) && !('sticky' in c) && !('group' in c) && !('type' in c),
+    'provenance, revisions and lore-only fields stripped');
+  ok(c.color === '' && c.greeting === '' && Array.isArray(c.alternateGreetings)
+    && Number.isFinite(c.createdAt) && Number.isFinite(c.updatedAt),
+    'character-only defaults filled, timestamps set');
+  const healed = normalizeCharacter(c);
+  ok(healed.name === 'Mira' && healed.keys.length === 2, 'survives normalizeCharacter round-trip');
+  const disabled = characterFromPiece({ title: 'X', enabled: false });
+  ok(disabled.enabled === false && disabled.pinned === false && disabled.weight === 0
+    && disabled.avatar === '' && disabled.keys.length === 0,
+    'sparse piece heals to safe defaults');
+  ok(characterFromPiece(null).name === '', 'null piece → blank card, no throw');
 }
 
 // ---- tool calls ----

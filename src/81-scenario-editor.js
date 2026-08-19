@@ -125,7 +125,7 @@ function LorePieceFields({ piece, others, set, onGenerateAvatar = null }) {
         <//></label>`}`;
 }
 
-function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null }) {
+function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGenerateAvatar = null, onExportPiece = null }) {
   const [open, setOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -151,6 +151,9 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGen
         ${piece.enabled === false && html`<span class="pill">disabled</span>`}
         ${onGenerate && html`<button class="btn small" title="Generate / flesh out this piece with the AI"
           onClick=${(e) => { e.stopPropagation(); setGenError(null); setGenOpen(true); }}>✦</button>`}
+        ${piece.type === 'character' && onExportPiece && html`
+          <button class="btn small" title="Export as a global character — appears in the sidebar's Characters section"
+            onClick=${(e) => { e.stopPropagation(); onExportPiece(piece); }}>⇪${'\uFE0E'}</button>`}
         <button class="btn small danger" onClick=${(e) => { e.stopPropagation(); onRemove(); }}>✕</button>
       </div>
       ${genOpen && html`
@@ -295,7 +298,7 @@ function newScenario() {
   };
 }
 
-function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
+function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, onClose, onGenerate, onGenerateAvatar = null, onExportPiece = null }) {
   // normalizeScenario: imports upsert JSON verbatim — heal missing fields
   // (lorePieces etc.) here too, or the draft reads below crash on open.
   const [draft, setDraft] = useState(() => normalizeScenario(deepClone(scenario)));
@@ -374,7 +377,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
           <${LorePieceCard} key=${p.id} piece=${p} allPieces=${draft.lorePieces}
             onChange=${(next) => setPiece(p.id, next)}
             onRemove=${() => set({ lorePieces: draft.lorePieces.filter(q => q.id !== p.id) })}
-            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`)}
+            onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />`)}
       </div>
       ${genOpen && html`
         <${GeneratorModal} title="Generate scenario" busy=${genBusy} error=${genError}
