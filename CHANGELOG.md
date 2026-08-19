@@ -1207,3 +1207,9 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Fixed**
 
 - Error messages (failed generations, imports, image jobs, missing endpoint hints) no longer hide behind the side panes or vanish mid-read: the banner is now a floating toast pinned top-center above the panes and panels, and it stays up until you dismiss it (✕) or the next generation starts — the old 9-second auto-fade is gone.
+
+### v4.11.4
+
+**Added**
+
+- Speaker names in the chat column are clickable: clicking a known character's name (the meta-row name on a reply, or a per-speaker chip in a multi-speaker reply) opens that character for editing without leaving the chat. Chat-registered and scenario character pieces open the lore piece popout (Save writes back to the chat or scenario accordingly); linked global cards open the character editor, since their piece view is derived. Resolution follows the usual merge priority — the chat overlay wins a name collision, then the scenario, then global cards. Narrator, the persona, and unregistered names stay inert.

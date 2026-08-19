@@ -242,6 +242,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
             branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
+            onOpenCharacter=${actions.onOpenCharacter}
             onImgSwipe=${actions.onImgSwipe} onImgRegen=${actions.onImgRegen} imagesEnabled=${imagesEnabled}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />

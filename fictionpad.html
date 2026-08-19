@@ -308,6 +308,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .swipes .used-dot.jump:hover { color: var(--c-accent); }
 .msg .swipes .gen { color: var(--c-accent); }
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
+/* Known-character names click through to the character's lore piece / card. */
+.msg .who.click, .msg .seg-who.click { cursor: pointer; }
+.msg .who.click:hover, .msg .seg-who.click:hover { text-decoration: underline dotted; }
 
 /* Meta row collapses by FIT in per-item stages at ANY width (JS adds t1–t6 as
    the row overflows, one step per pre-paint pass, until it fits): details
@@ -958,7 +961,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.3';
+const APP_VERSION = '4.11.4';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -6419,7 +6422,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches, onOpenCharacter = null }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -6523,6 +6526,13 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   ].filter(Boolean).join(' · ');
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
+  // Clickable speaker names open the character's lore piece (Main resolves
+  // chat piece → scenario piece → global card). Only names the chat knows as
+  // character pieces (characterNamesOf — persona excluded) get the affordance.
+  const canOpenChar = (name) => !!onOpenCharacter && !!name && name !== 'Narrator'
+    && characterNames.some(n => n.toLowerCase() === String(name).toLowerCase());
+  const openCharProps = (name) => canOpenChar(name)
+    ? { title: 'Open character card', onClick: () => onOpenCharacter(name) } : {};
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
   // Whitespace-only text (a pre-fix multi-tool reply keeps the newlines that
   // separated its stripped blocks) renders exactly like an empty swipe.
@@ -6685,10 +6695,10 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
       <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
-              class="who ${name !== 'Narrator' ? 'speaker' : ''}"
-              style=${name !== 'Narrator' ? speakerStyle(name) : null}>${name}</span>`)
-          : html`<span class="who ${isCharacter ? 'speaker' : ''}"
-              style=${isCharacter ? speakerStyle(speaker) : null}>${speaker}</span>`}
+              class="who ${name !== 'Narrator' ? 'speaker' : ''} ${canOpenChar(name) ? 'click' : ''}"
+              style=${name !== 'Narrator' ? speakerStyle(name) : null} ...${openCharProps(name)}>${name}</span>`)
+          : html`<span class="who ${isCharacter ? 'speaker' : ''} ${canOpenChar(speaker) ? 'click' : ''}"
+              style=${isCharacter ? speakerStyle(speaker) : null} ...${openCharProps(speaker)}>${speaker}</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
           <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
@@ -6765,8 +6775,8 @@ ${showNav && html`
                 onClick=${segAv?.src ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
             </div>`}
             <div class="seg-col">
-              <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-                style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${segName}</div>
+              <div class="seg-who ${seg.speaker ? 'speaker' : ''} ${canOpenChar(seg.speaker) ? 'click' : ''}"
+                style=${seg.speaker ? speakerStyle(seg.speaker) : null} ...${openCharProps(seg.speaker)}>${segName}</div>
               <div class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
                 style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
                 ...${gestureHandlers}>
@@ -7478,6 +7488,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
             branchKids=${kidsByParent.get(node.id) ?? NO_KIDS} childOnPathId=${path[i + 1]?.id ?? null}
             onEdit=${actions.onEdit} onRegenerate=${actions.onRegenerate} onSwipe=${actions.onSwipe}
             onSwipeTo=${actions.onSwipeTo} onJump=${actions.onJump} onOpenBranches=${actions.onOpenBranches}
+            onOpenCharacter=${actions.onOpenCharacter}
             onImgSwipe=${actions.onImgSwipe} onImgRegen=${actions.onImgRegen} imagesEnabled=${imagesEnabled}
             onBranch=${actions.onBranch} onRewind=${actions.onRewind} onDelete=${actions.onDeleteMsg}
             onReply=${actions.onReply} onRegenFromToken=${actions.onRegenFromToken} />
@@ -10146,6 +10157,33 @@ function Main({ storage, storageKind, storageFailed }) {
   // four) — opened from the chat context menu, the branch chip popover, or
   // Chat options.
   const onOpenBranches = (chatId = ui.chatId) => setModal({ kind: 'branches', chatId });
+  // Click a speaker name in the chat column → open that character for editing.
+  // Resolution mirrors the merge priority used everywhere else (chat overlay
+  // wins a name collision, then scenario, then global — cf. characterAvatars):
+  // chat/scenario character pieces open the shared LorePieceEditor popout
+  // (stored by id, so the popout reads live state); a linked GLOBAL card opens
+  // the character editor instead — its piece view is derived, the card is the
+  // only honest surface. Narrator/persona/unregistered names never get here
+  // (MessageItem only makes known character names clickable).
+  const onOpenCharacterPiece = (name) => {
+    const key = String(name ?? '').trim().toLowerCase();
+    if (!key || !chat) return;
+    const byTitle = (p) => p?.type === 'character' && (p.title ?? '').trim().toLowerCase() === key;
+    const chatPiece = (chat.lorePieces ?? []).find(byTitle);
+    if (chatPiece) return setModal({ kind: 'piece', source: 'chat', pieceId: chatPiece.id });
+    const scenPiece = (chatScenario?.lorePieces ?? []).find(byTitle);
+    if (scenPiece) return setModal({ kind: 'piece', source: 'scenario', pieceId: scenPiece.id });
+    const linkedIds = [...(chatScenario?.characterIds ?? []), ...(chat.characterIds ?? [])];
+    const card = linkedIds.map(id => characters[id])
+      .find(c => c && (c.name ?? '').trim().toLowerCase() === key);
+    if (card) setModal({ kind: 'character', character: card });
+  };
+  // The piece the 'piece' modal edits, resolved live by id (null = gone — a
+  // delete elsewhere just closes the popout by not rendering it).
+  const modalPiece = modal?.kind === 'piece'
+    ? (modal.source === 'chat' ? (chat?.lorePieces ?? []) : (chatScenario?.lorePieces ?? []))
+        .find(p => p.id === modal.pieceId) ?? null
+    : null;
 
   // ←/→ cycle the leaf message's swipes; → on the last swipe is ▶⁺ (a new
   // take). ↑/↓ move a keyboard selection through the messages (↓ past the
@@ -10637,6 +10675,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} imagesEnabled=${!!settings.imagesEnabled}
               onJump=${onJump} onOpenBranches=${onOpenBranches}
+              onOpenCharacter=${onOpenCharacterPiece}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
@@ -10667,6 +10706,16 @@ function Main({ storage, storageKind, storageFailed }) {
     </div>
     ${modal?.kind === 'scenario' && html`
       <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onExportPiece=${onExportPieceToCharacter} onClose=${() => setModal(null)} /><//>`}
+    ${modalPiece && html`
+      <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
+        allPieces=${mergedLorePieces(chatScenario, chat, characters)}
+        onSave=${(draft) => {
+          if (modal.source === 'chat') saveChat({ ...chat, lorePieces: (chat.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+          else upsertScenario(chatScenario.id, { ...chatScenario, lorePieces: (chatScenario.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+          setModal(null);
+        }}
+        onClose=${() => setModal(null)} onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}

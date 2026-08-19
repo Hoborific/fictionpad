@@ -289,6 +289,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .swipes .used-dot.jump:hover { color: var(--c-accent); }
 .msg .swipes .gen { color: var(--c-accent); }
 .msg .meta .who.speaker { color: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l)); }
+/* Known-character names click through to the character's lore piece / card. */
+.msg .who.click, .msg .seg-who.click { cursor: pointer; }
+.msg .who.click:hover, .msg .seg-who.click:hover { text-decoration: underline dotted; }
 
 /* Meta row collapses by FIT in per-item stages at ANY width (JS adds t1–t6 as
    the row overflows, one step per pre-paint pass, until it fits): details

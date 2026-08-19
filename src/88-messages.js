@@ -152,7 +152,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches }) {
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches, onOpenCharacter = null }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -256,6 +256,13 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   ].filter(Boolean).join(' · ');
   const speaker = isUser ? null : (swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator');
   const isCharacter = !!speaker && speaker !== 'Narrator';
+  // Clickable speaker names open the character's lore piece (Main resolves
+  // chat piece → scenario piece → global card). Only names the chat knows as
+  // character pieces (characterNamesOf — persona excluded) get the affordance.
+  const canOpenChar = (name) => !!onOpenCharacter && !!name && name !== 'Narrator'
+    && characterNames.some(n => n.toLowerCase() === String(name).toLowerCase());
+  const openCharProps = (name) => canOpenChar(name)
+    ? { title: 'Open character card', onClick: () => onOpenCharacter(name) } : {};
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
   // Whitespace-only text (a pre-fix multi-tool reply keeps the newlines that
   // separated its stripped blocks) renders exactly like an empty swipe.
@@ -418,10 +425,10 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
       <div class="meta ${metaLevel ? `t${metaLevel}` : ''}" ref=${metaRef}>
         ${isUser ? html`<span class="who">${personaName}</span>`
           : multiSpeakers ? multiSpeakers.map((name, i) => html`${i > 0 ? ', ' : ''}<span key=${name}
-              class="who ${name !== 'Narrator' ? 'speaker' : ''}"
-              style=${name !== 'Narrator' ? speakerStyle(name) : null}>${name}</span>`)
-          : html`<span class="who ${isCharacter ? 'speaker' : ''}"
-              style=${isCharacter ? speakerStyle(speaker) : null}>${speaker}</span>`}
+              class="who ${name !== 'Narrator' ? 'speaker' : ''} ${canOpenChar(name) ? 'click' : ''}"
+              style=${name !== 'Narrator' ? speakerStyle(name) : null} ...${openCharProps(name)}>${name}</span>`)
+          : html`<span class="who ${isCharacter ? 'speaker' : ''} ${canOpenChar(speaker) ? 'click' : ''}"
+              style=${isCharacter ? speakerStyle(speaker) : null} ...${openCharProps(speaker)}>${speaker}</span>`}
         ${swipe.interrupted && html`<span class="warn" title="The connection ended before the model finished — this reply is partial. Regenerate to replace it.">⚠\uFE0E interrupted</span>`}
         ${(swipe.toolCalls ?? []).length > 0 && html`
           <button class="pill tools-toggle" title="Tool calls made during this generation — click to view"
@@ -498,8 +505,8 @@ ${showNav && html`
                 onClick=${segAv?.src ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
             </div>`}
             <div class="seg-col">
-              <div class="seg-who ${seg.speaker ? 'speaker' : ''}"
-                style=${seg.speaker ? speakerStyle(seg.speaker) : null}>${segName}</div>
+              <div class="seg-who ${seg.speaker ? 'speaker' : ''} ${canOpenChar(seg.speaker) ? 'click' : ''}"
+                style=${seg.speaker ? speakerStyle(seg.speaker) : null} ...${openCharProps(seg.speaker)}>${segName}</div>
               <div class="bubble seg ${dragX !== 0 ? 'dragging' : ''}"
                 style=${{ transform: dragX ? `translateX(${dragX}px)` : null }}
                 ...${gestureHandlers}>

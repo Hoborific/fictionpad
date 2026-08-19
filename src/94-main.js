@@ -1823,6 +1823,33 @@ function Main({ storage, storageKind, storageFailed }) {
   // four) — opened from the chat context menu, the branch chip popover, or
   // Chat options.
   const onOpenBranches = (chatId = ui.chatId) => setModal({ kind: 'branches', chatId });
+  // Click a speaker name in the chat column → open that character for editing.
+  // Resolution mirrors the merge priority used everywhere else (chat overlay
+  // wins a name collision, then scenario, then global — cf. characterAvatars):
+  // chat/scenario character pieces open the shared LorePieceEditor popout
+  // (stored by id, so the popout reads live state); a linked GLOBAL card opens
+  // the character editor instead — its piece view is derived, the card is the
+  // only honest surface. Narrator/persona/unregistered names never get here
+  // (MessageItem only makes known character names clickable).
+  const onOpenCharacterPiece = (name) => {
+    const key = String(name ?? '').trim().toLowerCase();
+    if (!key || !chat) return;
+    const byTitle = (p) => p?.type === 'character' && (p.title ?? '').trim().toLowerCase() === key;
+    const chatPiece = (chat.lorePieces ?? []).find(byTitle);
+    if (chatPiece) return setModal({ kind: 'piece', source: 'chat', pieceId: chatPiece.id });
+    const scenPiece = (chatScenario?.lorePieces ?? []).find(byTitle);
+    if (scenPiece) return setModal({ kind: 'piece', source: 'scenario', pieceId: scenPiece.id });
+    const linkedIds = [...(chatScenario?.characterIds ?? []), ...(chat.characterIds ?? [])];
+    const card = linkedIds.map(id => characters[id])
+      .find(c => c && (c.name ?? '').trim().toLowerCase() === key);
+    if (card) setModal({ kind: 'character', character: card });
+  };
+  // The piece the 'piece' modal edits, resolved live by id (null = gone — a
+  // delete elsewhere just closes the popout by not rendering it).
+  const modalPiece = modal?.kind === 'piece'
+    ? (modal.source === 'chat' ? (chat?.lorePieces ?? []) : (chatScenario?.lorePieces ?? []))
+        .find(p => p.id === modal.pieceId) ?? null
+    : null;
 
   // ←/→ cycle the leaf message's swipes; → on the last swipe is ▶⁺ (a new
   // take). ↑/↓ move a keyboard selection through the messages (↓ past the
@@ -2314,6 +2341,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onEdit=${onEdit} onRegenerate=${onRegenerate} onSwipe=${onSwipe} onSwipeTo=${onSwipeTo}
               onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} imagesEnabled=${!!settings.imagesEnabled}
               onJump=${onJump} onOpenBranches=${onOpenBranches}
+              onOpenCharacter=${onOpenCharacterPiece}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
@@ -2344,6 +2372,16 @@ function Main({ storage, storageKind, storageFailed }) {
     </div>
     ${modal?.kind === 'scenario' && html`
       <${ErrorBoundary} name="scenario editor"><${ScenarioEditor} scenario=${modal.scenario} characters=${characters} settings=${settings} onSave=${onSaveScenario} onGenerate=${runGen} onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} onExportPiece=${onExportPieceToCharacter} onClose=${() => setModal(null)} /><//>`}
+    ${modalPiece && html`
+      <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
+        allPieces=${mergedLorePieces(chatScenario, chat, characters)}
+        onSave=${(draft) => {
+          if (modal.source === 'chat') saveChat({ ...chat, lorePieces: (chat.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+          else upsertScenario(chatScenario.id, { ...chatScenario, lorePieces: (chatScenario.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+          setModal(null);
+        }}
+        onClose=${() => setModal(null)} onGenerate=${runGen}
+        onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null} /><//>`}
     ${modal?.kind === 'character' && html`
       <${ErrorBoundary} name="character editor"><${CharacterEditor} character=${modal.character} scenarios=${scenarios} settings=${settings}
         chatLinkCount=${modal.character ? Object.values(chats).filter(c => c.characterIds?.includes(modal.character.id)).length : 0}
