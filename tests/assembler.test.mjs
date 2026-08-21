@@ -19,7 +19,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
-  healImageEntry, groupImageSlots,
+  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
@@ -35,7 +35,7 @@ const {
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
-  healImageEntry, groupImageSlots,
+  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
@@ -2209,6 +2209,47 @@ section('image prompt prefix');
   ok(imagePromptWithPrefix('', 'a dragon') === 'a dragon', 'empty prefix passes the prompt through');
   ok(imagePromptWithPrefix('   ', 'a dragon') === 'a dragon', 'blank prefix passes the prompt through');
   ok(imagePromptWithPrefix('  detailed  ', 'a dragon') === 'detailed, a dragon', 'prefix is trimmed before joining');
+}
+
+// ---- ComfyUI workflow substitution (v4.11.5) ----
+section('substituteComfyWorkflow');
+{
+  const latent = { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 768, batch_size: 1 } };
+  const sampler = { class_type: 'KSampler', inputs: { seed: 42, steps: 20,
+    positive: 'a cat', negative: '{{negative}}' } };
+
+  // No size placeholders: numeric width/height on EmptyLatent-style nodes
+  // follow the requested size; other nodes keep their numbers.
+  const wf1 = { '1': latent, '2': sampler,
+    '3': { class_type: 'ImageScale', inputs: { width: 2048, height: 2048 } } };
+  const out1 = substituteComfyWorkflow(wf1, { width: 832, height: 1216, seed: 7 });
+  ok(out1['1'].inputs.width === 832 && out1['1'].inputs.height === 1216,
+    'no placeholders: latent node numeric width/height overwritten');
+  ok(out1['1'].inputs.batch_size === 1, 'latent node batch_size untouched');
+  ok(out1['3'].inputs.width === 2048 && out1['3'].inputs.height === 2048,
+    'non-latent node numeric width/height untouched');
+  ok(out1['2'].inputs.seed === 7, 'numeric seed still overwritten with the render seed');
+  ok(wf1['1'].inputs.width === 512, 'input graph not mutated');
+
+  // Placeholders win per axis: a {{width}} anywhere leaves numeric widths
+  // alone while numeric heights still follow the size.
+  const wf2 = { '1': latent,
+    '2': { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}} at {{width}}px' } } };
+  const out2 = substituteComfyWorkflow(wf2, { prompt: 'a cat', width: 832, height: 1216, seed: 7 });
+  ok(out2['1'].inputs.width === 512 && out2['1'].inputs.height === 1216,
+    '{{width}} present: latent width kept, latent height still overwritten');
+  ok(out2['2'].inputs.text === 'a cat at 832px', 'width placeholder substituted in strings');
+
+  // String placeholders on a latent node substitute as before (numbers
+  // untouched when the axis placeholder exists).
+  const wf3 = { '1': { class_type: 'EmptySD3LatentImage',
+    inputs: { width: '{{width}}', height: '{{height}}', batch_size: 1 } } };
+  const out3 = substituteComfyWorkflow(wf3, { width: 832, height: 1216, seed: 7 });
+  ok(out3['1'].inputs.width === '832' && out3['1'].inputs.height === '1216',
+    'latent node placeholder strings substitute per axis');
+
+  ok(parseImageSize('832x1216').width === 832 && parseImageSize('junk').width === 1024,
+    'parseImageSize parses WxH and falls back to 1024 square');
 }
 
 // ---- character card export + PNG embed (v4.10) ----

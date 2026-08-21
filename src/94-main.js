@@ -809,8 +809,9 @@ function Main({ storage, storageKind, storageFailed }) {
   // One job fills one swipe's pending images entry, merge-on-write: the chat,
   // node or swipe may have vanished (rewind, delete, regenerate) while the
   // backend worked — then the write is dropped. Errors land on the entry as
-  // { error: true } (same shape healImageEntry produces for reload debris) —
-  // the bubble's failure note is the feedback, no banner.
+  // { error: <message> } (healImageEntry's reload debris stays { error: true })
+  // AND raise the sticky error toast — the bubble's failure note alone read as
+  // a silent failure (the reason used to die in console.warn).
   // The pending entry is matched by `slot` (its placement id): two jobs on
   // DIFFERENT slots of the same swipe may run concurrently and must not
   // cross-patch.
@@ -840,11 +841,13 @@ function Main({ storage, storageKind, storageFailed }) {
       patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
         ...(entry.pos !== undefined ? { pos: entry.pos } : {}) }));
     } catch (e) {
-      console.warn(describeApiError(e));
+      const msg = describeApiError(e);
+      console.warn(msg);
+      setError(`Image generation failed: ${msg}`); // the sticky toast — a broken workflow must not fail silently
       patch((entry) => {
         const out = {};
         for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (entry[k] !== undefined) out[k] = entry[k];
-        out.error = true;
+        out.error = msg; // string reason on the bubble's failure note (healImageEntry's reload debris stays boolean true)
         return out;
       });
     } finally {
@@ -2016,6 +2019,21 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // Duplicate in place: deep clone with a fresh id and a " (copy)" name
+  // suffix — the export → edit-the-id → reimport roundtrip as one click. A
+  // scenario clone keeps its linked character ids (links, not copies).
+  const onDuplicateScenario = (id) => {
+    const s = scenarios[id];
+    if (!s) return;
+    const copy = normalizeScenario({ ...deepClone(s), id: uid(), name: `${s.name} (copy)` });
+    upsertScenario(copy.id, copy);
+  };
+  const onDuplicateCharacter = (id) => {
+    const c = characters[id];
+    if (!c) return;
+    const copy = normalizeCharacter({ ...deepClone(c), id: uid(), name: `${c.name} (copy)` });
+    upsertCharacter(copy.id, copy);
+  };
   // Export a character-type lore piece (chat-registered or scenario-owned) as
   // a global character card: pure-core mapping, fresh id, provenance stripped.
   // The new card just appears in the sidebar Characters section.
@@ -2078,13 +2096,21 @@ function Main({ storage, storageKind, storageFailed }) {
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
-      // Bundle: upsert scenario + linked characters by id (last write wins,
-      // same as the migration helpers).
-      const s = normalizeScenario(obj.data.scenario);
-      if (!s.id) s.id = uid();
+      // Bundle: fresh ids for the scenario AND every bundled character —
+      // import never clobbers an existing entity (a shared file re-imported
+      // by its author, or an updated re-share, carries the same ids). The
+      // scenario's characterIds remap to the new character ids; ids pointing
+      // outside the bundle pass through untouched.
+      const idMap = {};
+      const chars = (obj.data.characters ?? []).filter(ch => ch?.name != null).map(ch => {
+        const id = uid();
+        if (ch.id) idMap[ch.id] = id;
+        return normalizeCharacter({ ...ch, id });
+      });
+      const s = normalizeScenario({ ...obj.data.scenario, id: uid(),
+        characterIds: (obj.data.scenario.characterIds ?? []).map(cid => idMap[cid] ?? cid) });
       upsertScenario(s.id, s);
-      for (const ch of obj.data.characters ?? [])
-        if (ch?.id && ch.name != null) upsertCharacter(ch.id, normalizeCharacter(ch));
+      for (const ch of chars) upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
       const ch = normalizeCharacter({ ...obj.data, id: uid() });
@@ -2298,6 +2324,7 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', scenarioId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'scenario', scenario: scenarios[id] }) },
           { label: 'Export JSON', fn: () => onExportScenario(id) },
+          { label: 'Duplicate', fn: () => onDuplicateScenario(id) },
           '-',
           { label: 'Delete…', fn: () => onDeleteScenario(id), danger: true },
         ] })}
@@ -2305,6 +2332,7 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
           { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          { label: 'Duplicate', fn: () => onDuplicateCharacter(id) },
           { label: 'Export PNG card', fn: () => onExportCharacterPng(characters[id]),
             disabled: !characters[id]?.avatar,
             title: characters[id]?.avatar ? null : 'Set an avatar first — the avatar becomes the card image.' },

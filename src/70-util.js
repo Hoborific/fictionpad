@@ -25,12 +25,16 @@ function downloadDataURL(url, filename) {
 
 // "A portrait of Mia" + data:image/webp;… → "a-portrait-of-mia.webp". Blank
 // names fall back to a timestamp; the extension comes from the data-URL mime.
-function imageFilename(name, url) {
+// `num` is the 1-based take number of a multi-take image slot: takes past the
+// first get a "-2"/"-3" suffix so re-rolls of one image don't all save under
+// the same filename.
+function imageFilename(name, url, num = 0) {
   const base = String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '').slice(0, 60);
   const mime = /^data:image\/([a-z0-9+.-]+)/i.exec(String(url))?.[1] ?? '';
   const ext = { 'jpeg': 'jpg', 'svg+xml': 'svg' }[mime] ?? mime ?? '';
-  return `${base || `image-${Date.now()}`}.${ext || 'png'}`;
+  const suffix = num > 1 ? `-${num}` : '';
+  return `${base || `image-${Date.now()}`}${suffix}.${ext || 'png'}`;
 }
 
 function pickFile(accept) {

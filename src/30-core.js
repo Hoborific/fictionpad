@@ -1127,24 +1127,36 @@ const imagePromptWithPrefix = (prefix, prompt) => {
 // {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
 // int per render — regen/takes must produce different images). Any NUMERIC
 // input key named seed/noise_seed is randomized too — a fixed seed in the
-// graph would make every take identical. Pure: the graph is never mutated.
+// graph would make every take identical. Width/height get the same numeric
+// treatment on EmptyLatent-style nodes when the axis has NO placeholder
+// anywhere in the graph: a stock "Save (API Format)" export carries plain
+// numbers, and without the overwrite imageSize would do nothing. An axis
+// with a placeholder is left to it (per-axis, so a {{width}}-only graph still
+// gets its numeric heights set). Pure: the graph is never mutated.
 const COMFY_SEED_KEYS = /^(seed|noise_seed)$/i;
+const COMFY_LATENT_NODES = /(^Empty.*Latent|^StableCascade_EmptyLatentImage)/i;
 const comfyRandomSeed = (rng = Math.random) => Math.floor(rng() * 2 ** 32);
 function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width = 1024, height = 1024, seed } = {}) {
   const useSeed = Number.isFinite(seed) ? seed : comfyRandomSeed();
+  const raw = JSON.stringify(workflow) ?? '';
+  const hasWidthPH = raw.includes('{{width}}'), hasHeightPH = raw.includes('{{height}}');
   const sub = (v) => String(v)
     .replaceAll('{{prompt}}', prompt)
     .replaceAll('{{negative}}', negative)
     .replaceAll('{{width}}', String(width))
     .replaceAll('{{height}}', String(height))
     .replaceAll('{{seed}}', String(useSeed));
-  const walk = (node) => {
+  const walk = (node, latentInputs = false) => {
     if (typeof node === 'string') return sub(node);
-    if (Array.isArray(node)) return node.map(walk);
+    if (Array.isArray(node)) return node.map(v => walk(v));
     if (node && typeof node === 'object') {
+      const isLatent = typeof node.class_type === 'string' && COMFY_LATENT_NODES.test(node.class_type);
       const out = {};
-      for (const [k, v] of Object.entries(node))
-        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v);
+      for (const [k, v] of Object.entries(node)) {
+        if (latentInputs && typeof v === 'number' && k === 'width' && !hasWidthPH) { out[k] = width; continue; }
+        if (latentInputs && typeof v === 'number' && k === 'height' && !hasHeightPH) { out[k] = height; continue; }
+        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v, isLatent && k === 'inputs');
+      }
       return out;
     }
     return node;

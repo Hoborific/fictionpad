@@ -656,7 +656,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="field"><span>Size</span>
             <input type="text" value=${draft.imageSize ?? '1024x1024'} placeholder="1024x1024"
               onInput=${(e) => set({ imageSize: e.target.value })} />
-            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders.</span>`}</label>
+            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders — or written onto EmptyLatent-style nodes' numeric width/height inputs when the workflow has no placeholder for that axis.</span>`}</label>
           <label class="field"><span>Prompt prefix</span>
             <input type="text" value=${draft.imagePrefix ?? ''} placeholder="masterpiece, best quality, detailed …"
               onInput=${(e) => set({ imagePrefix: e.target.value })} />
@@ -672,10 +672,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 onInput=${(e) => set({ imageWorkflow: e.target.value })} />
               <span class="hint">ComfyUI web UI → "Save (API Format)". Placeholders substituted per render:
                 {{prompt}}, {{negative}}, {{width}}, {{height}}, {{seed}} — numeric seed inputs are always
-                randomized so takes and re-rolls differ.</span></label>`}`,
+                randomized so takes and re-rolls differ, and numeric width/height on EmptyLatent-style
+                nodes follow the Size field when the matching placeholder is absent.</span></label>`}`,
           draft.imageBackend === 'comfyui'
-            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note.'
-            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note.')}
+            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note and the error toast.'
+            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note and the error toast.')}
         ${draft.suggestions && section('Response suggestions', html`
           <div class="grid2">
             <label class="field"><span>Number of suggestions (1–5)</span>

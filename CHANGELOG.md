@@ -1213,3 +1213,20 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Added**
 
 - Speaker names in the chat column are clickable: clicking a known character's name (the meta-row name on a reply, or a per-speaker chip in a multi-speaker reply) opens that character for editing without leaving the chat. Chat-registered and scenario character pieces open the lore piece popout (Save writes back to the chat or scenario accordingly); linked global cards open the character editor, since their piece view is derived. Resolution follows the usual merge priority — the chat overlay wins a name collision, then the scenario, then global cards. Narrator, the persona, and unregistered names stay inert.
+
+### v4.11.5
+
+**Added**
+
+- Scenarios and characters can be duplicated in place: a Duplicate item in the sidebar row's context menu (right-click / long-press / ⋯) clones the entity with a fresh id and a " (copy)" name suffix — the export → edit-the-id → reimport roundtrip as one click. A scenario clone keeps its linked characters as links, not copies.
+
+**Fixed**
+
+- Sidebar imports are now fully collision-free: importing a scenario bundle used to upsert the scenario and its characters by their stored ids, so re-importing a shared file (by its author, or an updated re-share) silently overwrote the existing entities. Bundle imports now mint fresh ids for the scenario and every bundled character and remap the scenario's character links — single-character, chat, and character-card imports already worked this way. Settings → Storage full-backup import keeps its restore semantics (upsert by id) by design.
+
+- ComfyUI image jobs no longer fail silently: an invalid workflow JSON, a rejected queue, or a timed-out run used to surface only as a bare "image unavailable" note on the bubble with the reason buried in the browser console. The failure now raises the sticky error toast with the reason, and the reason rides the image entry itself — hover the failure note to see it again later.
+- The ComfyUI Size field now actually applies to stock workflows: "Save (API Format)" exports carry plain numeric width/height on their latent nodes, and only `{{width}}`/`{{height}}` string placeholders were substituted — so imageSize did nothing unless the JSON was hand-edited. When an axis has no placeholder anywhere in the graph, the numeric width/height inputs of EmptyLatent-style nodes (EmptyLatentImage, EmptySD3LatentImage, StableCascade_EmptyLatentImage, …) are now overwritten with the configured size. Placeholders still win per axis, and non-latent nodes are never touched.
+
+**Changed**
+
+- Saving a generated image from a multi-take slot now suffixes the take number (`name-2.webp`, `name-3.webp`, …) — re-rolls of one image used to all save under the same filename. The first take keeps the plain name; single-take and avatar saves are unchanged.

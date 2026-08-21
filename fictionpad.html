@@ -961,7 +961,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.4';
+const APP_VERSION = '4.11.5';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2361,24 +2361,36 @@ const imagePromptWithPrefix = (prefix, prompt) => {
 // {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
 // int per render — regen/takes must produce different images). Any NUMERIC
 // input key named seed/noise_seed is randomized too — a fixed seed in the
-// graph would make every take identical. Pure: the graph is never mutated.
+// graph would make every take identical. Width/height get the same numeric
+// treatment on EmptyLatent-style nodes when the axis has NO placeholder
+// anywhere in the graph: a stock "Save (API Format)" export carries plain
+// numbers, and without the overwrite imageSize would do nothing. An axis
+// with a placeholder is left to it (per-axis, so a {{width}}-only graph still
+// gets its numeric heights set). Pure: the graph is never mutated.
 const COMFY_SEED_KEYS = /^(seed|noise_seed)$/i;
+const COMFY_LATENT_NODES = /(^Empty.*Latent|^StableCascade_EmptyLatentImage)/i;
 const comfyRandomSeed = (rng = Math.random) => Math.floor(rng() * 2 ** 32);
 function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width = 1024, height = 1024, seed } = {}) {
   const useSeed = Number.isFinite(seed) ? seed : comfyRandomSeed();
+  const raw = JSON.stringify(workflow) ?? '';
+  const hasWidthPH = raw.includes('{{width}}'), hasHeightPH = raw.includes('{{height}}');
   const sub = (v) => String(v)
     .replaceAll('{{prompt}}', prompt)
     .replaceAll('{{negative}}', negative)
     .replaceAll('{{width}}', String(width))
     .replaceAll('{{height}}', String(height))
     .replaceAll('{{seed}}', String(useSeed));
-  const walk = (node) => {
+  const walk = (node, latentInputs = false) => {
     if (typeof node === 'string') return sub(node);
-    if (Array.isArray(node)) return node.map(walk);
+    if (Array.isArray(node)) return node.map(v => walk(v));
     if (node && typeof node === 'object') {
+      const isLatent = typeof node.class_type === 'string' && COMFY_LATENT_NODES.test(node.class_type);
       const out = {};
-      for (const [k, v] of Object.entries(node))
-        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v);
+      for (const [k, v] of Object.entries(node)) {
+        if (latentInputs && typeof v === 'number' && k === 'width' && !hasWidthPH) { out[k] = width; continue; }
+        if (latentInputs && typeof v === 'number' && k === 'height' && !hasHeightPH) { out[k] = height; continue; }
+        out[k] = typeof v === 'number' && COMFY_SEED_KEYS.test(k) ? useSeed : walk(v, isLatent && k === 'inputs');
+      }
       return out;
     }
     return node;
@@ -4207,12 +4219,16 @@ function downloadDataURL(url, filename) {
 
 // "A portrait of Mia" + data:image/webp;… → "a-portrait-of-mia.webp". Blank
 // names fall back to a timestamp; the extension comes from the data-URL mime.
-function imageFilename(name, url) {
+// `num` is the 1-based take number of a multi-take image slot: takes past the
+// first get a "-2"/"-3" suffix so re-rolls of one image don't all save under
+// the same filename.
+function imageFilename(name, url, num = 0) {
   const base = String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '').slice(0, 60);
   const mime = /^data:image\/([a-z0-9+.-]+)/i.exec(String(url))?.[1] ?? '';
   const ext = { 'jpeg': 'jpg', 'svg+xml': 'svg' }[mime] ?? mime ?? '';
-  return `${base || `image-${Date.now()}`}.${ext || 'png'}`;
+  const suffix = num > 1 ? `-${num}` : '';
+  return `${base || `image-${Date.now()}`}${suffix}.${ext || 'png'}`;
 }
 
 function pickFile(accept) {
@@ -5611,7 +5627,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="field"><span>Size</span>
             <input type="text" value=${draft.imageSize ?? '1024x1024'} placeholder="1024x1024"
               onInput=${(e) => set({ imageSize: e.target.value })} />
-            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders.</span>`}</label>
+            ${draft.imageBackend === 'comfyui' && html`<span class="hint">Substituted into the workflow's {{width}} / {{height}} placeholders — or written onto EmptyLatent-style nodes' numeric width/height inputs when the workflow has no placeholder for that axis.</span>`}</label>
           <label class="field"><span>Prompt prefix</span>
             <input type="text" value=${draft.imagePrefix ?? ''} placeholder="masterpiece, best quality, detailed …"
               onInput=${(e) => set({ imagePrefix: e.target.value })} />
@@ -5627,10 +5643,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 onInput=${(e) => set({ imageWorkflow: e.target.value })} />
               <span class="hint">ComfyUI web UI → "Save (API Format)". Placeholders substituted per render:
                 {{prompt}}, {{negative}}, {{width}}, {{height}}, {{seed}} — numeric seed inputs are always
-                randomized so takes and re-rolls differ.</span></label>`}`,
+                randomized so takes and re-rolls differ, and numeric width/height on EmptyLatent-style
+                nodes follow the Size field when the matching placeholder is absent.</span></label>`}`,
           draft.imageBackend === 'comfyui'
-            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note.'
-            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note.')}
+            ? 'Runs queue via POST /prompt and are polled on /history (up to 5 min). Routed through the server proxy like LLM calls when "route via server" is on — localhost:8188 passes the no-auth proxy guard. No Test button — errors surface as the /image bubble\'s failure note and the error toast.'
+            : 'Routed through the server proxy like LLM calls when "route via server" is on. No Test button — errors surface as the /image bubble\'s failure note and the error toast.')}
         ${draft.suggestions && section('Response suggestions', html`
           <div class="grid2">
             <label class="field"><span>Number of suggestions (1–5)</span>
@@ -6403,7 +6420,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
     <div class="swipe-img-wrap" ...${gestureHandlers}>
       ${take?.pending ? html`<div class="img-pending"></div>`
         : take?.error || !take?.src
-          ? html`<div class="img-error" title=${take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
+          ? html`<div class="img-error" title=${typeof take?.error === 'string' ? take.error : take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
           : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
               onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
@@ -6854,7 +6871,7 @@ ${showNav && html`
           items=${[
             // Right-click landed on a generated image: image actions first.
             ...(ctxMenu.img ? [
-              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src)) },
+              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src, ctxMenu.img.num)) },
               { label: 'Expand image', fn: () => {
                   const s = ctxMenu.img.slot != null && slots ? slots.find(v => v.slot === ctxMenu.img.slot) : null;
                   if (s?.take) zoomImg(s.take, s.slot);
@@ -6881,13 +6898,14 @@ ${showNav && html`
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
         // A right-click on a generated image carries the image target along,
-        // so the menu can offer Save/Expand for it. The slot id (when the
-        // click-time src still matches a live take) keeps Expand on the live
-        // take-tracking lightbox path.
+        // so the menu can offer Save/Expand for it. The slot id + take number
+        // (when the click-time src still matches a live take) keep Expand on
+        // the live take-tracking lightbox path and suffix the saved filename.
         const imgEl = e.target.closest?.('img.swipe-img') ?? null;
-        const imgSlot = imgEl ? slots?.find(s => s.take?.src === imgEl.src)?.slot ?? null : null;
+        const imgSv = imgEl ? slots?.find(s => s.take?.src === imgEl.src) ?? null : null;
         setCtxMenu({ x: e.clientX, y: e.clientY,
-          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSlot } : null });
+          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSv?.slot ?? null,
+            num: imgSv ? imgSv.activeIdx + 1 : 0 } : null });
       }}>
       ${avatarsOn && html`
         <div class="msg-av">
@@ -6898,6 +6916,7 @@ ${showNav && html`
       ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
       ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
+        num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,
@@ -8142,8 +8161,9 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // the lightbox's. The parent derives `src`/`title` from live state, so a
 // take change updates the view in place. The footer's Save button downloads
 // the shown image (the live take on a slot, full-res for avatar expansions) —
-// this is also the touch path, since phones have no right-click.
-function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '' }) {
+// this is also the touch path, since phones have no right-click. `num` is the
+// 1-based take number, so multi-take saves get a filename suffix.
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0 }) {
   useEffect(() => {
     if (!onPrev && !onNext) return;
     const onKey = (e) => {
@@ -8158,7 +8178,7 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
   return html`
     <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
       footer=${html`<button class="btn" title="Save this image as a file"
-        onClick=${() => downloadDataURL(src, imageFilename(title, src))}>⬇${'\uFE0E'} Save image</button>`}>
+        onClick=${() => downloadDataURL(src, imageFilename(title, src, num))}>⬇${'\uFE0E'} Save image</button>`}>
       <img class="lb-img" src=${src} alt=${title} />
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`
@@ -9143,8 +9163,9 @@ function Main({ storage, storageKind, storageFailed }) {
   // One job fills one swipe's pending images entry, merge-on-write: the chat,
   // node or swipe may have vanished (rewind, delete, regenerate) while the
   // backend worked — then the write is dropped. Errors land on the entry as
-  // { error: true } (same shape healImageEntry produces for reload debris) —
-  // the bubble's failure note is the feedback, no banner.
+  // { error: <message> } (healImageEntry's reload debris stays { error: true })
+  // AND raise the sticky error toast — the bubble's failure note alone read as
+  // a silent failure (the reason used to die in console.warn).
   // The pending entry is matched by `slot` (its placement id): two jobs on
   // DIFFERENT slots of the same swipe may run concurrently and must not
   // cross-patch.
@@ -9174,11 +9195,13 @@ function Main({ storage, storageKind, storageFailed }) {
       patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
         ...(entry.pos !== undefined ? { pos: entry.pos } : {}) }));
     } catch (e) {
-      console.warn(describeApiError(e));
+      const msg = describeApiError(e);
+      console.warn(msg);
+      setError(`Image generation failed: ${msg}`); // the sticky toast — a broken workflow must not fail silently
       patch((entry) => {
         const out = {};
         for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (entry[k] !== undefined) out[k] = entry[k];
-        out.error = true;
+        out.error = msg; // string reason on the bubble's failure note (healImageEntry's reload debris stays boolean true)
         return out;
       });
     } finally {
@@ -10350,6 +10373,21 @@ function Main({ storage, storageKind, storageFailed }) {
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = (id) =>
     downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  // Duplicate in place: deep clone with a fresh id and a " (copy)" name
+  // suffix — the export → edit-the-id → reimport roundtrip as one click. A
+  // scenario clone keeps its linked character ids (links, not copies).
+  const onDuplicateScenario = (id) => {
+    const s = scenarios[id];
+    if (!s) return;
+    const copy = normalizeScenario({ ...deepClone(s), id: uid(), name: `${s.name} (copy)` });
+    upsertScenario(copy.id, copy);
+  };
+  const onDuplicateCharacter = (id) => {
+    const c = characters[id];
+    if (!c) return;
+    const copy = normalizeCharacter({ ...deepClone(c), id: uid(), name: `${c.name} (copy)` });
+    upsertCharacter(copy.id, copy);
+  };
   // Export a character-type lore piece (chat-registered or scenario-owned) as
   // a global character card: pure-core mapping, fresh id, provenance stripped.
   // The new card just appears in the sidebar Characters section.
@@ -10412,13 +10450,21 @@ function Main({ storage, storageKind, storageFailed }) {
       upsertScenario(s.id, s);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-scenario-bundle' && obj.data?.scenario?.name != null) {
-      // Bundle: upsert scenario + linked characters by id (last write wins,
-      // same as the migration helpers).
-      const s = normalizeScenario(obj.data.scenario);
-      if (!s.id) s.id = uid();
+      // Bundle: fresh ids for the scenario AND every bundled character —
+      // import never clobbers an existing entity (a shared file re-imported
+      // by its author, or an updated re-share, carries the same ids). The
+      // scenario's characterIds remap to the new character ids; ids pointing
+      // outside the bundle pass through untouched.
+      const idMap = {};
+      const chars = (obj.data.characters ?? []).filter(ch => ch?.name != null).map(ch => {
+        const id = uid();
+        if (ch.id) idMap[ch.id] = id;
+        return normalizeCharacter({ ...ch, id });
+      });
+      const s = normalizeScenario({ ...obj.data.scenario, id: uid(),
+        characterIds: (obj.data.scenario.characterIds ?? []).map(cid => idMap[cid] ?? cid) });
       upsertScenario(s.id, s);
-      for (const ch of obj.data.characters ?? [])
-        if (ch?.id && ch.name != null) upsertCharacter(ch.id, normalizeCharacter(ch));
+      for (const ch of chars) upsertCharacter(ch.id, ch);
       setUi(u => ({ ...u, scenarioId: s.id }));
     } else if (obj.type === 'fictionpad-character' && obj.data?.name != null) {
       const ch = normalizeCharacter({ ...obj.data, id: uid() });
@@ -10632,6 +10678,7 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', scenarioId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'scenario', scenario: scenarios[id] }) },
           { label: 'Export JSON', fn: () => onExportScenario(id) },
+          { label: 'Duplicate', fn: () => onDuplicateScenario(id) },
           '-',
           { label: 'Delete…', fn: () => onDeleteScenario(id), danger: true },
         ] })}
@@ -10639,6 +10686,7 @@ function Main({ storage, storageKind, storageFailed }) {
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
           { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
           { label: 'Export JSON', fn: () => onExportCharacter(id) },
+          { label: 'Duplicate', fn: () => onDuplicateCharacter(id) },
           { label: 'Export PNG card', fn: () => onExportCharacterPng(characters[id]),
             disabled: !characters[id]?.avatar,
             title: characters[id]?.avatar ? null : 'Set an avatar first — the avatar becomes the card image.' },

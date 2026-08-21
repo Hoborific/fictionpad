@@ -133,7 +133,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
     <div class="swipe-img-wrap" ...${gestureHandlers}>
       ${take?.pending ? html`<div class="img-pending"></div>`
         : take?.error || !take?.src
-          ? html`<div class="img-error" title=${take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
+          ? html`<div class="img-error" title=${typeof take?.error === 'string' ? take.error : take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
           : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
               onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
@@ -584,7 +584,7 @@ ${showNav && html`
           items=${[
             // Right-click landed on a generated image: image actions first.
             ...(ctxMenu.img ? [
-              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src)) },
+              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src, ctxMenu.img.num)) },
               { label: 'Expand image', fn: () => {
                   const s = ctxMenu.img.slot != null && slots ? slots.find(v => v.slot === ctxMenu.img.slot) : null;
                   if (s?.take) zoomImg(s.take, s.slot);
@@ -611,13 +611,14 @@ ${showNav && html`
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
         // A right-click on a generated image carries the image target along,
-        // so the menu can offer Save/Expand for it. The slot id (when the
-        // click-time src still matches a live take) keeps Expand on the live
-        // take-tracking lightbox path.
+        // so the menu can offer Save/Expand for it. The slot id + take number
+        // (when the click-time src still matches a live take) keep Expand on
+        // the live take-tracking lightbox path and suffix the saved filename.
         const imgEl = e.target.closest?.('img.swipe-img') ?? null;
-        const imgSlot = imgEl ? slots?.find(s => s.take?.src === imgEl.src)?.slot ?? null : null;
+        const imgSv = imgEl ? slots?.find(s => s.take?.src === imgEl.src) ?? null : null;
         setCtxMenu({ x: e.clientX, y: e.clientY,
-          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSlot } : null });
+          img: imgEl ? { src: imgEl.src, name: imgEl.alt || '', slot: imgSv?.slot ?? null,
+            num: imgSv ? imgSv.activeIdx + 1 : 0 } : null });
       }}>
       ${avatarsOn && html`
         <div class="msg-av">
@@ -628,6 +629,7 @@ ${showNav && html`
       ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
       ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
+        num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,
