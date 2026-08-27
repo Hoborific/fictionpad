@@ -251,6 +251,11 @@ section('global characters');
   ok(mira.type === 'character' && mira.title === 'Mira' && mira.origin === 'character',
     'resolved piece is a character-type lore piece with character origin');
   ok(mira.keys.length === 1 && mira.keys[0] === 'Mira', 'empty keys default to [name]');
+  const charsAv = { CH3: { id: 'CH3', name: 'Pip', content: 'Pip.', keys: [], avatar: 'data:image/png;base64,x', avatarFull: 'data:image/png;base64,X' } };
+  const pip = resolveCharacters(null, { characterIds: ['CH3'] }, charsAv)[0];
+  ok(pip.avatar === 'data:image/png;base64,x' && pip.avatarFull === 'data:image/png;base64,X',
+    'resolved piece carries the card avatar pair (tool shadows keep the portrait)');
+  ok(!('avatar' in mira) && !('avatarFull' in mira), 'card without an avatar resolves without avatar fields');
   ok(resolveCharacters(scenLink, null, null).length === 0
     && mergedLorePieces(scenLink, null, null) === scenLink.lorePieces,
     'no characters map → scenario pieces returned unchanged');
@@ -1614,6 +1619,19 @@ section('character card import');
     'FictionPad exports never misdetect as cards');
   ok(parseCharacterCard(null) === null && parseCharacterCard({ foo: 1 }) === null, 'non-cards → null');
 
+  // Selective scenario creation (v4.11.6): a card with no scenario-level
+  // content imports as a bare character — tags/creator_notes alone don't
+  // justify an empty same-named scenario shell.
+  const bare = parseCharacterCard({ name: 'Solo', description: 'Just a character.',
+    creator_notes: 'by someone', tags: ['fantasy'] });
+  ok(bare && bare.scenario === null && bare.character.name === 'Solo',
+    'notes/tags-only card → no scenario');
+  const bookOnly = parseCharacterCard({ name: 'B', description: 'd',
+    character_book: { entries: [{ keys: ['ab'], content: 'x' }] } });
+  ok(bookOnly?.scenario?.lorePieces?.length === 1, 'character_book alone is scenario-worthy');
+  const promptOnly = parseCharacterCard({ name: 'P', description: 'd', system_prompt: 'Be bold.' });
+  ok(promptOnly?.scenario?.scenarioInstructions === 'Be bold.', 'system_prompt alone is scenario-worthy');
+
   const pngWithCard = (jsonStr) => {
     const b64 = Buffer.from(jsonStr, 'utf8').toString('base64');
     const payload = Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(b64, 'latin1')]);
@@ -2286,8 +2304,8 @@ section('character card export');
     'null scenario → character-only card');
   const rtSolo = parseCharacterCard(solo);
   ok(rtSolo && rtSolo.character.name === 'Mia Voss' && rtSolo.character.content === char3.content
-    && rtSolo.character.greeting === char3.greeting && rtSolo.scenario.backstory === '',
-    'null-scenario card round-trips the character');
+    && rtSolo.character.greeting === char3.greeting && rtSolo.scenario === null,
+    'null-scenario card round-trips as a bare character — no shell scenario');
 }
 section('PNG card embed');
 {

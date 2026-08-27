@@ -132,7 +132,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
-  const genRef = useRef(null); // { abort }
+  const genRef = useRef(null); // { abort, chatId } — chatId lets background writers (image jobs) defer instead of being clobbered
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
 
   // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
@@ -321,35 +321,44 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterColors = useMemo(() => Object.fromEntries(
     Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
       .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
-  // Avatar images: every global character card with one set, keyed by
-  // lowercase name, then the active chat's character-type lore pieces
-  // (tool-registered characters — chat pieces WIN a name collision), and
-  // finally the active chat's persona. Each entry is
-  // { src, full } — the 256² thumb for the column/chips, the uncropped ≤1024
-  // companion (avatarFull || avatar) for the click-to-expand lightbox. Same
+  // Avatar images: linked global character cards with one set (scenario ∪
+  // chat links — an UNLINKED card never speaks, so it must never lend its
+  // avatar), keyed by lowercase name, then the scenario's and the chat's
+  // character-type lore pieces, and finally the active chat's persona. Each
+  // entry is { src, full } — the 256² thumb for the column/chips, the
+  // uncropped ≤1024 companion (avatarFull || avatar) for the click-to-expand
+  // lightbox. A piece overlays by NAME: with an avatar it replaces the
+  // lower-priority entry, WITHOUT one it still shadows the name (a same-named
+  // chat/scenario piece wins the collision — its missing avatar is
+  // authoritative, never a fall-through to the card's image). Same
   // identity-stability care as characterColors (MessageItem's memo compares
   // props by identity).
   const characterAvatars = useMemo(() => {
+    const linked = new Set([...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]);
     const map = Object.fromEntries(
-      Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim())
+      Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim() && linked.has(c.id))
         .map(c => [c.name.trim().toLowerCase(), { src: c.avatar, full: c.avatarFull || c.avatar }]));
     // Deliberately NOT scoped by pieceVisibleAt: a same-name piece on a
     // hidden branch leaking its avatar is the only bleed vector, and such
     // cross-branch name collisions are vanishingly rare.
-    for (const p of chat?.lorePieces ?? []) {
-      if (p?.type === 'character' && p.avatar && (p.title ?? '').trim())
-        map[p.title.trim().toLowerCase()] = { src: p.avatar, full: p.avatarFull || p.avatar };
+    for (const p of [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]) {
+      if (p?.type !== 'character' || !(p.title ?? '').trim()) continue;
+      const key = p.title.trim().toLowerCase();
+      if (p.avatar) map[key] = { src: p.avatar, full: p.avatarFull || p.avatar };
+      else delete map[key]; // the winning piece has no image — show no image
     }
     if (persona?.avatar && persona.name?.trim())
       map[persona.name.trim().toLowerCase()] = { src: persona.avatar, full: persona.avatarFull || persona.avatar };
     return map;
-  }, [characters, chat?.lorePieces, persona]);
+  }, [characters, chatScenario, chat?.lorePieces, persona]);
   // The avatar column shows only when something this chat can speak as has an
-  // image: a linked character (scenario ∪ chat links), a chat-overlay
-  // character piece, or the active persona.
+  // image: a linked character (scenario ∪ chat links), a scenario- or
+  // chat-owned character piece, or the active persona.
   const chatHasAvatars = useMemo(() => {
     if (persona?.avatar) return true;
-    if ((chat?.lorePieces ?? []).some(p => p?.type === 'character' && p.avatar)) return true;
+    const pieceHas = [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]
+      .some(p => p?.type === 'character' && p.avatar);
+    if (pieceHas) return true;
     return [...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]
       .some(id => characters?.[id]?.avatar);
   }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona]);
@@ -822,7 +831,15 @@ function Main({ storage, storageKind, storageFailed }) {
     imgCtls.current.add(ctl);
     // patch: rebuild the chat with the pending entry at (nodeId, swipeIdx)
     // replaced by `entry`; returns false when the target vanished.
-    const patch = (makeEntry) => {
+    const patch = async (makeEntry) => {
+      // A live generation owns this chat's message tree: its per-token
+      // applyText and the finally's commit() rebuild `messages` from a
+      // start-of-generation snapshot and would silently revert this write on
+      // the next token (the rule regenImage/swipeImage/onEdit refuse on).
+      // The image result is already in hand and the merge below re-reads
+      // ref.current, so waiting out the stream costs nothing.
+      while (genRef.current?.chatId === chatId)
+        await new Promise(r => setTimeout(r, 250));
       const cur = ref.current.chats[chatId];
       const node = cur?.messages?.[nodeId];
       const swipe = node?.swipes?.[swipeIdx];
@@ -838,13 +855,13 @@ function Main({ storage, storageKind, storageFailed }) {
         model: st.imageModel, prompt, size: st.imageSize, prefix: st.imagePrefix,
         backend: st.imageBackend, workflow: st.imageWorkflow, negative: st.imageNegative, signal: ctl.signal });
       // keep the original `at` — and `pos` (where the model placed the block)
-      patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
+      await patch((entry) => ({ src, prompt, caption, at: entry.at, slot: entry.slot,
         ...(entry.pos !== undefined ? { pos: entry.pos } : {}) }));
     } catch (e) {
       const msg = describeApiError(e);
       console.warn(msg);
       setError(`Image generation failed: ${msg}`); // the sticky toast — a broken workflow must not fail silently
-      patch((entry) => {
+      await patch((entry) => {
         const out = {};
         for (const k of ['src', 'prompt', 'caption', 'at', 'pos', 'slot']) if (entry[k] !== undefined) out[k] = entry[k];
         out.error = msg; // string reason on the bubble's failure note (healImageEntry's reload debris stays boolean true)
@@ -928,7 +945,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // semantic embeddings, exact token count — can take a long time on a slow
     // backend, and the UI keys off this).
     const abort = new AbortController();
-    genRef.current = { abort };
+    genRef.current = { abort, chatId: chatObj.id };
     setError(null); // a fresh generation supersedes the last error toast
     setGenerating({ chatId: chatObj.id, nodeId });
     // The node being generated is excluded from the prompt unless continuing it.
@@ -1070,7 +1087,12 @@ function Main({ storage, storageKind, storageFailed }) {
     const effSamplers = Object.fromEntries(
       Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
         .filter(([k]) => allowedSamplerKeys.has(k)));
-    let work = chatObj;
+    let work = ref.current.chats[chatObj.id] ?? chatObj;
+    // ^ Re-base on the stored chat, not the caller's snapshot: a background
+    // merge-on-write (an image job's patch, enrichment) may have landed
+    // between the caller's read and the stream start. Callers upsert the
+    // chat carrying the new empty swipe before firing, so our node survives
+    // the re-base.
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
@@ -1569,17 +1591,21 @@ function Main({ storage, storageKind, storageFailed }) {
         // is force-injected (reason 'pov') so the model sees that definition.
         const scen = ref.current.scenarios[c.scenarioId];
         const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+        // mergedLorePieces order is scenario → linked globals → chat overlay;
+        // a same-name collision resolves the other way (chat wins, like the
+        // avatar map and speaker click-through) — search from the end.
+        const byPrio = chars.slice().reverse();
         const words = arg.split(/\s+/);
         let piece = null, name = '', text = '';
         for (let n = words.length; n >= 1 && !piece; n--) {
           const cand = words.slice(0, n).join(' ').toLowerCase();
-          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
+          piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
           if (piece) { name = piece.title.trim(); text = words.slice(n).join(' '); }
         }
         if (!piece) {
           const q = arg.toLowerCase();
-          piece = chars.find(p => (p.title ?? '').trim().toLowerCase() === q)
-            ?? chars.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
+          piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === q)
+            ?? byPrio.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
           name = piece?.title?.trim() || arg;
         }
         if (!generationReady(c)) return null;
@@ -2124,15 +2150,17 @@ function Main({ storage, storageKind, storageFailed }) {
         setError('Chat imported, but its scenario is not present in this browser.');
     } else {
       // Not a FictionPad export — try a character card (chara_card v1/v2/v3
-      // JSON, or the payload of a card PNG): becomes a linked scenario +
-      // global character pair (field mapping in parseCharacterCard).
+      // JSON, or the payload of a card PNG): always becomes a global
+      // character, plus a linked scenario only when the card carries
+      // scenario-level content (field mapping in parseCharacterCard).
       const card = parseCharacterCard(obj);
       if (!card)
         return setError('Unrecognized JSON: expected a FictionPad scenario, character, chat or character card export. Full backups import via Settings → Storage.');
       if (cardArt) Object.assign(card.character, cardArt); // a card PNG keeps its art as the avatar pair (256 thumb + ≤1024 full)
       upsertCharacter(card.character.id, normalizeCharacter(card.character));
-      upsertScenario(card.scenario.id, card.scenario);
-      setUi(u => ({ ...u, scenarioId: card.scenario.id, characterId: null }));
+      if (card.scenario) upsertScenario(card.scenario.id, card.scenario);
+      setUi(u => ({ ...u, scenarioId: card.scenario?.id ?? null,
+        characterId: card.scenario ? null : card.character.id }));
     }
   };
 

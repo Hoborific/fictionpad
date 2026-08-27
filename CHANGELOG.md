@@ -1230,3 +1230,15 @@ Note: this only changes the default prompt text; existing chats with a customize
 **Changed**
 
 - Saving a generated image from a multi-take slot now suffixes the take number (`name-2.webp`, `name-3.webp`, …) — re-rolls of one image used to all save under the same filename. The first take keeps the plain name; single-take and avatar saves are unchanged.
+
+### v4.11.6
+
+**Changed**
+
+- Character-card imports no longer create an empty shell scenario for a card that's just a character: a scenario is created only when the card carries scenario-level content (scenario text, system prompts, or a character_book — lore pieces can only live on a scenario). Tags and creator notes alone don't justify the shell. In particular, exporting a scenario-less character as a PNG card and re-importing it now round-trips as a bare character instead of a character plus a same-named empty scenario. Cards with real scenario content import exactly as before.
+
+**Fixed**
+
+- An image that finished generating while a message reply was streaming no longer stays a blank shimmer forever. Image jobs write their result merge-on-write, but the generation loop rebuilds the message tree from a start-of-generation snapshot on every streamed token, so a patch landing mid-stream was silently reverted — and on the next chat open the orphaned pending entry healed into a bogus "image unavailable" note. The image job now waits out any generation running on its chat before patching (the result is already in hand, so waiting costs nothing), and generation re-bases on the freshest stored chat at stream start.
+- Name collisions between a chat/scenario character and a global character card no longer leak the card's avatar onto the imageless piece: a chat-registered "Mia" with no portrait used to show the unlinked global card Mia's avatar in the chat column while its own editor (correctly) showed none. The avatar map is now scoped to linked cards only, folds scenario character pieces in (their avatars render at all now), and a higher-priority piece without an avatar shadows the same-named lower-priority entry instead of falling through to it. Linked cards shadowed into a chat by a tool update keep their portrait (the avatar pair now rides the derived lore piece, so avatar enrichment no longer re-renders one the card already has), and /pov resolves a same-name collision to the chat piece like every other surface.
+- The model picker's dropdown can be scrolled by touch again: rows used to commit on pointerdown, so a drag meant to scroll the list selected a model and closed the popover. Rows now pick on click (never fired after a scroll gesture) and the popover declares vertical panning.

@@ -653,6 +653,11 @@ function resolveCharacters(scenario, chat, charactersById) {
       keys: Array.isArray(c.keys) && c.keys.length ? c.keys : (c.name ? [c.name] : []),
       pinned: !!c.pinned, weight: c.weight ?? 0, links: [],
       enabled: c.enabled !== false, smart: !!c.smart,
+      // The avatar pair rides the derived piece so a tool update shadowing
+      // the card into a chat overlay keeps the portrait (and avatar
+      // enrichment doesn't re-render one the card already has).
+      ...(c.avatar ? { avatar: c.avatar } : {}),
+      ...(c.avatarFull ? { avatarFull: c.avatarFull } : {}),
       origin: 'character',
     });
   }
@@ -1787,7 +1792,16 @@ function parseCharacterCard(obj) {
     pinned: !!e?.constant, caseSensitive: !!e?.case_sensitive,
     enabled: e?.enabled !== false,
   }));
-  const scenario = normalizeScenario({
+  // A card with no scenario-level content imports as a BARE character — no
+  // empty same-named scenario shell (our own character-only PNG round trip
+  // stays a character; buildCharacterCard writes empty scenario fields for
+  // it). Scenario-worthy = scenario text, system prompts, or a
+  // character_book (lore pieces can only live on a scenario); tags and
+  // creator_notes alone don't justify the shell and drop with it, like
+  // other unsupported card bits.
+  const hasScenario = !!(card(raw.scenario) || card(raw.system_prompt)
+    || card(raw.post_history_instructions) || lorePieces.length);
+  const scenario = !hasScenario ? null : normalizeScenario({
     id: uid(), name,
     description: card(raw.creator_notes) || 'Imported from a character card.',
     tags: asArr(raw.tags).map(String),

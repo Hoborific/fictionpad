@@ -698,7 +698,7 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .mp-wrap .mp-toggle { flex: none; padding: 4px 8px; }
 .mp-wrap .mp-pop {
   position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
-  max-height: 40vh; overflow-y: auto;
+  max-height: 40vh; overflow-y: auto; touch-action: pan-y; /* drag scrolls, tap selects (rows pick on click) */
   background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
   padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
 }

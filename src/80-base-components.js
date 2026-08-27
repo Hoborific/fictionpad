@@ -149,7 +149,7 @@ function ModelPicker({ value, models, placeholder, onChange }) {
     ${open && shown.length > 0 && html`<div class="mp-pop">
       ${shown.map(m => html`<button type="button" key=${m}
         class=${`mp-item ${m === value ? 'cur' : ''}`}
-        onPointerDown=${(e) => { e.preventDefault(); pick(m); }}>${m}</button>`)}
+        onClick=${() => pick(m)}>${m}</button>`)}
     </div>`}
   </div>`;
 }
