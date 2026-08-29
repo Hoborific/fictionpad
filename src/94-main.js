@@ -816,7 +816,7 @@ function Main({ storage, storageKind, storageFailed }) {
             for (const u of memsOk)
               if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
                 work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note) };
           } else {
             for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
             for (const u of updatesOk)

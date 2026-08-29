@@ -1315,3 +1315,16 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 - Lore piece change-history rows are keyed stably — an appended revision no longer scrambles expanded rows.
 - Long-pressing a sidebar row tool button (✕/✎/⤓) no longer also opens the context menu.
 - Returning from the logit-bias editor reopens Settings on the tab you left, and the "N entries" label no longer goes stale.
+
+
+### v4.11.9
+
+**Fixed**
+
+- "Run maintenance now" is actually reachable: the button now renders in Chat options (the v4.11.8 wiring passed the handler into the panel surfaces but never threaded it through to the tab).
+- Auto-mode memory revisions now keep their change note (queue-mode accepts already did) — the Memory tab and Maintenance history show it either way.
+- Lore piece Change-history rows no longer risk duplicate React keys when two revisions share a timestamp (same-batch tool writes).
+
+**Changed**
+
+- README documents the maintenance pass and the `FICTIONPAD_UPSTREAM_TIMEOUT_MS` / `FICTIONPAD_MAX_BODY_MB` env knobs.

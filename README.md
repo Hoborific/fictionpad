@@ -12,7 +12,7 @@ Download `fictionpad.html` from any [release](../../releases) and open it locall
 - Full conversation control: swipes and branching, message editing, drafts, lore templates, full-text chat search, complete export/import, and SillyTavern-style character card import (PNG or JSON)
 - Generation introspection: token-probability heatmap with resampling, logit bias editor, sampler controls with per-chat overrides and per-scenario/character defaults, custom user-defined samplers, model reasoning ("thinking") display
 - Automatic context limits: detects each model's context length from `/v1/models` (vLLM, llama.cpp, OpenRouter) and sizes the context budget and response reserve to match — manual pinning and per-chat overrides included
-- Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation
+- Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation — plus a cadence-based maintenance pass that reviews the chat's lore and memory notes against the recent story and can propose new pieces, rewrite stale pieces (chat-scoped, branch-safe), and revise memory notes, all through a review queue (or fully automatic)
 - Personas: reusable user identities with per-chat pick and an optional default
 - Polish: themes (including Catppuccin), a mobile UI with swipe gestures, configurable date formats, chat previews and a context inspector showing exactly what was sent to the model
 - Runs fully client-side with IndexedDB persistence; the optional Node server adds LLM proxying and server-side session storage
@@ -53,7 +53,9 @@ All via environment variables:
 | `FICTIONPAD_TOKEN=secret` | Bearer token required on the storage and `/proxy` routes; set the same value as `serverToken` in the app. |
 | `FICTIONPAD_DB=/path/to.db` | SQLite storage path (default: `fictionpad.db` next to `server.mjs`). |
 | `FICTIONPAD_PROXY_ALLOW=host1,host2` | Comma-separated allowlist of `/proxy` target hosts (default: any host when auth is configured; loopback-only with no auth). |
-| `FICTIONPAD_CHECKPOINT_MS=60000` | WAL checkpoint interval in ms — the on-disk `.db` is always a recent complete snapshot; `GET /backup` (same auth as storage) checkpoints and streams it. |
+| `FICTIONPAD_CHECKPOINT_MS=60000` | WAL checkpoint interval in ms — the on-disk `.db` is always a recent complete snapshot; `GET /backup` (same auth as storage) checkpoints and streams a temp snapshot copy. |
+| `FICTIONPAD_UPSTREAM_TIMEOUT_MS=300000` | Total-duration cap in ms per proxied LLM call (streams included) — raise it for very slow backends. |
+| `FICTIONPAD_MAX_BODY_MB=64` | Request body cap in MB for storage and `/proxy` — image-heavy chats travel as JSON, so keep it well above a busy chat's size. |
 | `FICTIONPAD_AUTOBUILD=0` | Disable the background build of the self-contained app artifact when it's missing (default: build once at startup, never blocking). |
 
 Example, basic auth on a custom port:

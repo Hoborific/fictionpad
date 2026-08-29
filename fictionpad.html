@@ -962,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.8';
+const APP_VERSION = '4.11.9';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -5114,7 +5114,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
           <span>Change history (${piece.revisions.length})</span>
           <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
-            <${RevisionRow} key=${r.createdAt ?? 'orig'} rev=${r} n=${piece.revisions.length - i}
+            <${RevisionRow} key=${`${r.createdAt ?? 'orig'}-${i}`} rev=${r} n=${piece.revisions.length - i}
               onRestore=${(rev) => set({ content: rev.content ?? '', keys: [...(rev.keys ?? [])] })} />`)}
         </div>`}
       ${genOpen && html`
@@ -6484,7 +6484,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null, onRunMaintenance = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
@@ -6606,6 +6606,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
           </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        ${onRunMaintenance && scenario?.emergentLore !== 'off' && html`
+          <button class="btn small" title="Run the lore maintenance pass now (bypasses the cadence gate; no-op while a generation or aux call is busy)"
+            onClick=${() => onRunMaintenance()}>✦ Run maintenance now</button>`}
         ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
         <button class="btn small" title="Change log of maintenance writes — piece updates, tool registrations, memory revisions"
           onClick=${() => setHistOpen(true)}>Maintenance history</button>
@@ -8398,7 +8401,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -8411,13 +8414,14 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat}
+          onRunMaintenance=${onRunMaintenance} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -8429,7 +8433,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
     <//>`;
 }
 
@@ -8443,7 +8447,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -8460,7 +8464,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -9739,7 +9743,7 @@ function Main({ storage, storageKind, storageFailed }) {
             for (const u of memsOk)
               if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
                 work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note) };
           } else {
             for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
             for (const u of updatesOk)

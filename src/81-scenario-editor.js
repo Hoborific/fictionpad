@@ -222,7 +222,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
           <span>Change history (${piece.revisions.length})</span>
           <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
-            <${RevisionRow} key=${r.createdAt ?? 'orig'} rev=${r} n=${piece.revisions.length - i}
+            <${RevisionRow} key=${`${r.createdAt ?? 'orig'}-${i}`} rev=${r} n=${piece.revisions.length - i}
               onRestore=${(rev) => set({ content: rev.content ?? '', keys: [...(rev.keys ?? [])] })} />`)}
         </div>`}
       ${genOpen && html`

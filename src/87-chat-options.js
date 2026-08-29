@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null, onRunMaintenance = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
@@ -123,6 +123,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
           </div>`)}
       </div>
       <div style=${{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        ${onRunMaintenance && scenario?.emergentLore !== 'off' && html`
+          <button class="btn small" title="Run the lore maintenance pass now (bypasses the cadence gate; no-op while a generation or aux call is busy)"
+            onClick=${() => onRunMaintenance()}>✦ Run maintenance now</button>`}
         ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
         <button class="btn small" title="Change log of maintenance writes — piece updates, tool registrations, memory revisions"
           onClick=${() => setHistOpen(true)}>Maintenance history</button>
