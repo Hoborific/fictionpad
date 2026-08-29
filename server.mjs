@@ -37,8 +37,15 @@
 //   FICTIONPAD_CHECKPOINT_MS  interval for PRAGMA wal_checkpoint(TRUNCATE)
 //                       in ms (default 60000) — keeps the on-disk .db a
 //                       recent complete snapshot even without a shutdown.
-//   GET /backup       checkpoints the WAL, then streams the SQLite file as
-//                     an attachment (same auth as the storage routes).
+//   GET /backup       checkpoints the WAL, snapshots the .db to a temp copy,
+//                     then streams the copy as an attachment (same auth as the
+//                     storage routes).
+//   POST /gc-images   server-side image GC: deletes Images rows no stored
+//                     entity references (same auth + Origin guard as the
+//                     storage routes). A per-client sweep would delete rows
+//                     other clients sharing this server still cite.
+//   FICTIONPAD_UPSTREAM_TIMEOUT_MS  total-duration cap per /proxy upstream
+//                       call in ms (default 300000 — LLM streams can be long).
 //   FICTIONPAD_AUTOBUILD=0  disable the background build of
 //                       fictionpad.compiled.html when it's missing (default:
 //                       build once per process at startup, never blocking).
@@ -56,14 +63,16 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { copyFile, readFile, unlink } from 'node:fs/promises';
 import { existsSync, statSync, createReadStream } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
-const PORT = Number(process.argv[2]) || 8788;
+// Port 0 = let the OS pick (tests) — the startup log prints the bound port.
+const PORT = process.argv[2] === '0' ? 0 : Number(process.argv[2]) || 8788;
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.FICTIONPAD_DB || join(ROOT, 'fictionpad.db');
 const TOKEN = process.env.FICTIONPAD_TOKEN || null; // when set, storage routes need Bearer auth
@@ -71,7 +80,9 @@ const TOKEN = process.env.FICTIONPAD_TOKEN || null; // when set, storage routes 
 // URLs (avatars incl. the full-res avatarFull, generated-image takes), so a
 // busy chat JSON easily clears 8 MB — 64 MB default, env-overridable.
 const MAX_BODY = (Number(process.env.FICTIONPAD_MAX_BODY_MB) || 64) * 1024 * 1024;
-const UPSTREAM_TIMEOUT_MS = 5 * 60_000; // LLM streams can be long; 5 min ceiling
+// Total-duration cap per upstream /proxy call (streams included) — a hung
+// endpoint must not pin a socket forever. 5 min default, env-overridable.
+const UPSTREAM_TIMEOUT_MS = Number(process.env.FICTIONPAD_UPSTREAM_TIMEOUT_MS) || 5 * 60_000;
 
 // Whole-server HTTP Basic auth (LAN exposure): FICTIONPAD_AUTH=user:password.
 // Everything except /health requires it; checked before the Bearer token.
@@ -172,11 +183,7 @@ function maybeRehydrate(text, refs) {
 // recent complete snapshot, and a clean db.close() on shutdown — closing the
 // last WAL connection checkpoints and removes the -wal/-shm sidecars.
 const CHECKPOINT_MS = Number(process.env.FICTIONPAD_CHECKPOINT_MS) || 60_000;
-// A streaming /backup pins the .db file (its Content-Length was stat'd after
-// its own checkpoint) — a mid-stream checkpoint would grow the file under it.
-let backupsActive = 0;
 const checkpointTimer = setInterval(() => {
-  if (backupsActive > 0) return;
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); }
   catch (err) { console.warn(`WAL checkpoint failed: ${err?.message || err}`); }
 }, CHECKPOINT_MS);
@@ -348,18 +355,23 @@ async function handleRequest(req, res) {
   // is set (local dev default — see the startup warning).
   if (url.pathname === '/version' && req.method === 'GET') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
-    return sendJson(req, res, 200, { version: 1, storage: true, images: true });
+    return sendJson(req, res, 200, { version: 1, storage: true, images: true, gc: true });
   }
 
-  // Full-db backup: checkpoint the WAL first so the streamed .db is a
-  // complete snapshot, then send the raw file. Same auth as storage routes.
+  // Full-db backup: checkpoint the WAL, then snapshot the .db to a temp copy
+  // and stream THAT. Streaming the live file would race: a mid-stream
+  // auto-checkpoint or a second concurrent /backup's TRUNCATE can change the
+  // file size under the open read stream, corrupting the download against its
+  // stat'd Content-Length. The copy is stat'd after landing and unlinked when
+  // the response closes (completion, client disconnect, or error alike).
   if (url.pathname === '/backup') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     if (req.method !== 'GET') return sendJson(req, res, 405, { error: 'GET required' });
-    backupsActive++;
+    const tmpFile = join(tmpdir(), `fictionpad-backup-${process.pid}-${crypto.randomUUID()}.db`);
     try {
       db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-      const { size } = statSync(DB_PATH);
+      await copyFile(DB_PATH, tmpFile);
+      const { size } = statSync(tmpFile);
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       res.writeHead(200, {
         'Content-Type': 'application/octet-stream',
@@ -367,15 +379,53 @@ async function handleRequest(req, res) {
         'Content-Length': size,
         ...acaoFor(req),
       });
-      // 'close' fires on completion AND on client disconnect — either way the
-      // pin lifts and the periodic checkpoint may run again.
-      res.on('close', () => { backupsActive--; });
-      createReadStream(DB_PATH).pipe(res);
+      res.on('close', () => { unlink(tmpFile).catch(() => {}); });
+      createReadStream(tmpFile).pipe(res);
     } catch (err) {
-      backupsActive--;
+      await unlink(tmpFile).catch(() => {});
       return sendJson(req, res, 500, { error: `backup failed: ${err?.message || err}` });
     }
     return;
+  }
+
+  // Server-side image GC: entities keep images out-of-band as imgref:<id>
+  // sentinels, the payloads as Images rows. With server storage shared between
+  // clients, a per-client sweep (scanning only its own cache) would delete
+  // rows another client's entities still reference — so the sweep runs here,
+  // over EVERY stored entity. Meta is app/device settings, not entity state,
+  // and is excluded like the Images rows themselves.
+  if (url.pathname === '/gc-images') {
+    if (!originOk(req)) return sendJson(req, res, 403, { error: 'cross-site writes are not accepted (foreign Origin)' });
+    if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
+    if (req.method !== 'POST') return sendJson(req, res, 405, { error: 'POST required' });
+    const refs = new Set();
+    const collect = (value) => {
+      if (typeof value === 'string') {
+        const m = value.startsWith('imgref:') && IMGREF_RE.exec(value);
+        if (m) refs.add(m[1]);
+        return;
+      }
+      if (Array.isArray(value)) { for (const v of value) collect(v); return; }
+      if (value && typeof value === 'object') { for (const k of Object.keys(value)) collect(value[k]); }
+    };
+    try {
+      for (const row of db.prepare("SELECT store, key, data FROM kv WHERE store NOT IN ('Images', 'Meta')").all()) {
+        // Safe-fail, not skip: a row that fails to decode MIGHT reference
+        // images, so skipping it could orphan-delete live rows. Abort the
+        // whole sweep with a 500 instead — nothing is deleted.
+        try { collect(JSON.parse(gunzipSync(row.data).toString('utf8'))); }
+        catch (err) { throw new Error(`undecodable kv row ${row.store}/${row.key}: ${err?.message || err}`); }
+      }
+    } catch (err) {
+      console.warn(`gc-images aborted: ${err?.message || err}`);
+      return sendJson(req, res, 500, { error: `gc-images aborted: ${err?.message || err}` });
+    }
+    let deleted = 0;
+    const del = db.prepare('DELETE FROM kv WHERE store = ? AND key = ?');
+    for (const row of db.prepare('SELECT key FROM kv WHERE store = ?').all('Images')) {
+      if (!refs.has(row.key)) { del.run('Images', row.key); deleted++; }
+    }
+    return sendJson(req, res, 200, { deleted });
   }
 
   if (['/load', '/save', '/all', '/delete', '/list'].includes(url.pathname)) {
@@ -554,12 +604,13 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  const bound = server.address()?.port ?? PORT; // PORT 0 = OS-picked ephemeral port
   console.log(`FictionPad server running:`);
   const served = appFile();
-  console.log(`  app:     http://localhost:${PORT}/ (serving ${served})`);
+  console.log(`  app:     http://localhost:${bound}/ (serving ${served})`);
   if (served === 'fictionpad.html')
     console.warn('  note:    no compiled artifact yet — the dev build being served loads React/htm/marked from esm.sh at runtime.');
-  console.log(`  proxy:   http://localhost:${PORT}/proxy/<real-endpoint>`);
+  console.log(`  proxy:   http://localhost:${bound}/proxy/<real-endpoint>`);
   console.log(`  storage: SQLite kv at ${DB_PATH}`);
   if (BASIC_HEADER) console.log(`  auth:    basic (user ${BASIC_USER}) — FICTIONPAD_AUTH, whole server except /health`);
   if (TOKEN) console.log(`  auth:    FICTIONPAD_TOKEN required for storage + proxy routes`);

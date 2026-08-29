@@ -1261,3 +1261,57 @@ Note: this only changes the default prompt text; existing chats with a customize
 - Regenerating the root greeting (or `/pov` on a greeting-only chat) no longer overwrites the swipe you were viewing: generation entry points now write the appended swipe through the ref-syncing save path, so the generation re-base always sees it (the old code depended on a React flush that a fully synchronous prep never waits for).
 - Stopping a `/continue` during prep (or a prep error there) no longer deletes a real existing swipe — the empty-swipe discard now only touches state the caller actually appended.
 - Editing and saving a lore piece no longer strips the change notes from its Change history (the piece normalizer now carries revision notes through).
+
+
+### v4.11.8
+
+Full-codebase audit release: fixes across generation, storage, streaming, the server, and the new maintenance pass, plus the review-UI upgrades that grew out of them.
+
+**Added**
+
+- "Run maintenance now" action in Chat options: fires the lore maintenance pass on demand, bypassing the cadence gate; disabled while a generation or aux call is busy.
+- "Maintenance history" modal in Chat options: a read-only, newest-first change log of the chat's tool registrations, noted piece updates, and memory revisions.
+- Review queue upgrades: one shared pill derivation (`new` / `update` / `memory`) across Chat options and the Inspector; update proposals show a side-by-side was/now preview (stacked on narrow panes); Accept all / Dismiss all appear once several proposals are pending.
+- Memory tab: the superseded badge clicks through to the replacement card (scrolls + highlights it), revised cards show their change note, and superseded cards offer a restore action that clears the supersede marks (the pin toggle is no longer offered there — it had no visible effect).
+- Server image garbage collection: `POST /gc-images` scans all stored entities server-side and deletes unreferenced image rows, so one client can no longer sweep images another client still references (advertised as `gc` in `/version`; older servers keep the local sweep). A sweep also runs once after startup, and edits that drop an image reference (avatar cleared, swipe images purged) now schedule one — not just deletes.
+- New `FICTIONPAD_UPSTREAM_TIMEOUT_MS` env var to adjust the 5-minute total cap on proxied LLM calls.
+- Server accepts port `0` (OS-picked ephemeral port) and logs the bound port.
+- Expanded revision rows in the piece editor offer "Restore into draft" to copy that version's content/keys into the editor.
+- Applying a connection profile first confirms which groups (connection / models / samplers) it will change.
+- `node vendor.mjs` now fails fast on dependency version drift between `template.html`'s dev importmap and the `DEPS` pins.
+
+**Fixed**
+
+- Memory supersede across branches: re-superseding the same memory note on a sibling branch no longer resurrects the stale note on the first branch — supersede points are tracked per branch, and old data keeps working.
+- Memory revision semantics: a pinned note's pin now transfers to its revision (the superseded original stays only as rollback history), a full memory store evicts an ordinary note before a superseded one, and a store of nothing-but-pinned notes refuses the revision instead of silently dropping it.
+- The maintenance pass no longer rewrites long lore pieces from a truncated digest: truncated entries carry a visible marker, and in auto mode an update to a piece longer than the digest view drops to the review queue instead of being applied blind.
+- The maintenance pass no longer dies as an unhandled rejection when the digest build throws, and duplicate memory revisions targeting the same card in one pass are deduped.
+- Accepted memory revisions now honor the stored-note length cap (`memoryMaxChars`) and carry their change note into the Memory tab.
+- Tool updates (`update_character`, `add_lore` on an existing piece) treat an explicit empty keys list as "clear the keys" in both paths.
+- Memory "already recorded" context and the pass's memory digest skip superseded and off-branch cards, so a corrected fact is no longer suppressed by its stale predecessor.
+- Background memory/lore passes no longer re-sort the sidebar (touchless saves), and the lore cursor derives from the live chat at save time.
+- Saving a lore piece while a generation updated it no longer wipes the appended revisions — the save merges onto the live piece (a save onto a deleted piece is dropped instead of resurrecting it).
+- ✦ Generate no longer wipes draft fields with empty arrays (`lorePieces: []`, `tags: []`, `keys: []` leave existing values untouched), and generated lore pieces merge into the draft by title instead of replacing the whole list.
+- ✦-generated names are capped at 60 characters, matching the speaker-attribution limit.
+- Stop strings split across stream chunks no longer leak into reply text or the token-probability tape (client-side hold-back filter, flushed at stream end); whole-chunk/whole-token matches are still filtered anywhere in the stream.
+- The stop-strings retry is no longer unreachable after the stream_options retry — a backend rejecting both unknown fields gets both graceful degradations.
+- A completed image generation no longer waits forever behind a wedged generation; the deferred patch gives up after 10 minutes (with a console warning) and merges anyway.
+- The composer no longer re-fills with the just-sent text after an `/image` command.
+- Response suggestions fetched for one swipe no longer render under another swipe of the same reply.
+- Memory pills on chat messages no longer count branch-hidden and superseded cards.
+- The chat log no longer re-renders in full on every streamed token (branch-kid arrays keep identity for unchanged parents).
+- Storage migration upload no longer bypasses out-of-band image extraction — migrated chats store images in the Images store on capable servers instead of staying inline and risking the request body cap.
+- Image GC: a mid-sweep save can no longer lose a freshly referenced image (deletes re-check against current state).
+- Embedding cache is keyed per endpoint — switching embedding backends mid-session no longer reuses the old backend's vectors.
+- `/backup` downloads can no longer truncate or corrupt when a WAL checkpoint (or a second concurrent backup) resizes the database mid-stream; backups stream a stable temp snapshot.
+- ComfyUI: `"width": "{{width}}"`-style placeholders now land as real numbers (strict backends rejected the string form), and a polling fallback that could mark a job done with another run's image is gone.
+- Custom boolean samplers with a `false` default now show false when first enabled.
+- Number fields commit pending edits when the enclosing dialog closes via Escape or scrim click — typed values are no longer lost.
+- Picking a model from the dropdown now dismisses the on-screen keyboard on touch devices.
+- File pickers no longer hang when cancelled on browsers without `input.oncancel` (e.g. older Safari).
+- Re-cropping an avatar whose stored image is corrupted now shows an inline error instead of a dead Crop button.
+- The image lightbox preloads the other takes of a multi-take slot, so take flipping no longer flashes the previous image while decoding.
+- Scroll rails/fades re-sync on window resizes and async content growth, not just on scroll/render.
+- Lore piece change-history rows are keyed stably — an appended revision no longer scrambles expanded rows.
+- Long-pressing a sidebar row tool button (✕/✎/⤓) no longer also opens the context menu.
+- Returning from the logit-bias editor reopens Settings on the tab you left, and the "N entries" label no longer goes stale.

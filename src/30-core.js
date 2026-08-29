@@ -704,22 +704,45 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 }
 
 // Revise a memory without rewriting it: the stale card stays in the store,
-// marked with the supersede point (supAtMsg = the leaf the pass ran at) and a
-// link to its replacement (supBy); the revised text lands as a FRESH card
-// stamped like any new memory. The assembler hides a card whose supAtMsg is
-// on the active path, so the branch that superseded sees only the new text
-// while a stale-leaf branch (or a rewind) keeps the old card — derivation,
-// never deletion, same rule as lore revisions.
-function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+// marked with supersede point(s) and a link to its replacement; the revised
+// text lands as a FRESH card stamped like any new memory. The assembler hides
+// a card with ANY supersede point on the active path, so the branch that
+// superseded sees only the new text while a stale-leaf branch (or a rewind)
+// keeps the old card — derivation, never deletion, same rule as lore
+// revisions.
+// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch
+// re-superseding the same card appends its own point instead of overwriting,
+// so each branch hides the stale card from its own supersede on (a single
+// scalar point would resurrect the stale card on the first branch). supBy is
+// only the LATEST replacement id (Memory-tab badge/click-through). Legacy
+// scalar supAtMsg data reads as a one-element list via supPointsOf.
+const supPointsOf = (m) => Array.isArray(m?.supAtMsgs) ? m.supAtMsgs
+  : (m?.supAtMsg != null ? [m.supAtMsg] : []);
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null) {
+  const cur = store?.memories ?? [];
+  const old = cur.find(m => m?.id === id);
+  if (!old) return store; // unknown id — never invent a revision for nothing
   const newId = uid();
-  const memories = (store?.memories ?? []).map(m => (m && m.id === id)
-    ? { ...m, supBy: newId, ...(atMsg ? { supAtMsg: atMsg } : {}) } : m);
-  memories.push({ id: newId, text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) });
+  const note = String(revNote ?? '').trim().slice(0, 300) || null;
+  // The pin TRANSFERS to the replacement: the superseded original stays only
+  // as rollback history and rejoins the eviction pool.
+  const points = supPointsOf(old);
+  const marked = { ...old, pinned: false, supBy: newId,
+    supAtMsgs: (atMsg && !points.includes(atMsg)) ? [...points, atMsg] : points };
+  delete marked.supAtMsg; // migrated into the list
+  const memories = [...cur.map(m => (m && m.id === id) ? marked : m),
+    { id: newId, text, pinned: !!old.pinned, createdAt: now,
+      ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
+      ...(note ? { revNote: note } : {}) }];
   while (memories.length > cap) {
-    const idx = memories.findIndex(m => !m.pinned);
-    if (idx === -1) break;
-    memories.splice(idx, 1);
+    // Evict the oldest unpinned NON-superseded card first; a superseded card
+    // (rollback history) goes only when nothing else can. The fresh revision
+    // is never a candidate — evicting it would leave a dangling supBy. No
+    // candidate at all (everything else pinned) aborts the supersede instead.
+    const idx = memories.findIndex(m => m.id !== newId && !m.pinned && supPointsOf(m).length === 0);
+    const evict = idx !== -1 ? idx : memories.findIndex(m => m.id !== newId && !m.pinned);
+    if (evict === -1) return store;
+    memories.splice(evict, 1);
   }
   return { ...(store ?? {}), memories };
 }
@@ -931,11 +954,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // Branch visibility (same rule as the lore layer): a memory stamped with
   // atMsg (the leaf it was summarized under) injects only while that node is
   // on the active path; unstamped memories are global. A card superseded by
-  // the lore pass (supAtMsg on path) hides too — its replacement rides the
-  // same stamps, so each branch sees the newest revision it reached.
+  // the lore pass hides when ANY of its supAtMsgs points is on path (one
+  // point per branch that superseded it — sibling branches supersede the
+  // same card independently) — its replacement rides the same stamps, so
+  // each branch sees the newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
   const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
-  const memSuped = (m) => !memGone(m) && m?.supAtMsg != null && pathIds.has(m.supAtMsg);
+  const memSuped = (m) => !memGone(m) && supPointsOf(m).some(id => pathIds.has(id));
   const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
   const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
@@ -1158,7 +1183,11 @@ const imagePromptWithPrefix = (prefix, prompt) => {
 // {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
 // int per render — regen/takes must produce different images). Any NUMERIC
 // input key named seed/noise_seed is randomized too — a fixed seed in the
-// graph would make every take identical. Width/height get the same numeric
+// graph would make every take identical. A {{width}}/{{height}} placeholder
+// that IS the whole string value substitutes as a raw NUMBER (`"width":
+// "{{width}}"` lands as 1024, not "1024" — strict backends reject strings
+// for INT widget inputs); embedded occurrences stay string substitutions.
+// Width/height get the same numeric
 // treatment on EmptyLatent-style nodes when the axis has NO placeholder
 // anywhere in the graph: a stock "Save (API Format)" export carries plain
 // numbers, and without the overwrite imageSize would do nothing. An axis
@@ -1178,6 +1207,9 @@ function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width =
     .replaceAll('{{height}}', String(height))
     .replaceAll('{{seed}}', String(useSeed));
   const walk = (node, latentInputs = false) => {
+    // Whole-value size placeholders become real numbers (see header comment).
+    if (node === '{{width}}') return width;
+    if (node === '{{height}}') return height;
     if (typeof node === 'string') return sub(node);
     if (Array.isArray(node)) return node.map(v => walk(v));
     if (node && typeof node === 'object') {
@@ -1203,7 +1235,11 @@ const parseImageSize = (size) => {
 // status_str 'error' → done + message; otherwise the first output image
 // ({filename, subfolder, type}) across all node outputs wins.
 function comfyHistoryResult(history, promptId) {
-  const rec = (promptId ? history?.[promptId] : null) ?? Object.values(history ?? {})[0];
+  // The caller polls /history/{promptId} — a missing record means queued or
+  // unknown, NEVER another run's record (a multi-run history would otherwise
+  // mark the job done with the wrong image). The first-record fallback exists
+  // only for promptId-less whole-history reads.
+  const rec = promptId ? history?.[promptId] : Object.values(history ?? {})[0];
   if (!rec) return { done: false, error: null, image: null };
   const statusStr = rec?.status?.status_str;
   if (statusStr === 'error') {
@@ -1277,6 +1313,12 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
+// Pill label for a loreQueue entry — ONE derivation shared by the Chat
+// options review list and the Inspector's Suggested-lore rows. Memory
+// revisions and piece updates name themselves; everything else (tool
+// proposals, extraction fresh pieces) is a NEW piece.
+const queuePillOf = (q) => (q?.kind === 'memory' ? 'memory' : q?.updateOf ? 'update' : 'new');
+
 // Accept a queued UPDATE proposal (updateOf set): resolves the target piece
 // by title against the caller-supplied merged view and funnels through the
 // tool-update machinery — scenario/global targets are shadowed into the
@@ -1300,16 +1342,22 @@ function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, cr
 }
 
 // Accept a queued MEMORY revision (kind: 'memory'): the revised text lands as
-// a fresh stamped card and the stale one is marked superseded (see
-// supersedeMemory). A vanished target (evicted/user-deleted) just drops the
-// entry.
-function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP } = {}) {
+// a fresh stamped card (clamped to maxChars when given) and the stale one is
+// marked superseded (see supersedeMemory); the entry's change note rides the
+// new card as revNote for the Memory tab. A vanished target (evicted/
+// user-deleted) just drops the entry.
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
   const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
   if (!q) return chat;
   const store = chat.memoryStore ?? { memories: [], cursor: 0 };
   const exists = (store.memories ?? []).some(m => m?.id === q.memoryId);
+  const text = String(q.content ?? '');
   return { ...chat,
-    memoryStore: exists ? supersedeMemory(store, q.memoryId, q.content, now, cap, atLen, atMsg) : store,
+    memoryStore: exists
+      ? supersedeMemory(store, q.memoryId,
+          (Number.isFinite(maxChars) && maxChars > 0) ? text.slice(0, maxChars) : text,
+          now, cap, atLen, atMsg, q.note)
+      : store,
     loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
@@ -1380,7 +1428,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!content) return fail('update_character: content required (the full updated card)');
     const keys = Array.isArray(args.keys)
       ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
-      : null; // omitted → keep the current keys
+      : null; // omitted → keep the current keys; explicit [] clears them
     const haystack = Array.isArray(allPieces) ? allPieces : pieces;
     const existing = haystack.find(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
@@ -1402,8 +1450,12 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const content = String(args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
     if (!title) return fail('add_lore: title required');
     if (!content) return fail('add_lore: content required');
-    const keys = (Array.isArray(args.keys) ? args.keys : [])
-      .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+    // Omitted keys KEEP the current ones on an update; an explicitly-present
+    // array (even an EMPTY one) replaces them — same contract as
+    // update_character. New pieces fall back to [].
+    const keys = Array.isArray(args.keys)
+      ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
+      : null;
     // Dedupe by title across EVERYTHING the caller can see (same rationale as
     // register_character above) — a same-titled scenario/global piece would
     // otherwise be duplicated in the merged view and injected twice.
@@ -1411,19 +1463,19 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys.length ? keys : null) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
         `updated lore "${title}"`);
     if (existing)
       // Match lives outside the chat overlay: shadow it via an overlay copy
       // (fresh provenance → rewind drops the shadow again; rev 0 = original).
-      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys.length ? keys : null)],
+      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys)],
         `updated lore "${title}"`);
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
       return { ok: true, note: `queued lore "${title}" for review`,
-        chat: queueLorePiece(chat, { title, content, keys, source: 'tool', createdAt: now,
+        chat: queueLorePiece(chat, { title, content, keys: keys ?? [], source: 'tool', createdAt: now,
           ...(Number.isFinite(atLen) ? { atLen } : {}) }) };
-    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
+    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys: keys ?? [] }],
       `added lore "${title}"`);
   }
   return fail(`unknown tool "${call.name}"`);

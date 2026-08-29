@@ -1,6 +1,7 @@
 // FictionPad — server.mjs storage tests.
-// Spawns server.mjs on ephemeral ports with a temp FICTIONPAD_DB, asserts the
-// storage protocol over HTTP, then checks the on-disk gzip encoding directly.
+// Spawns server.mjs on OS-picked ephemeral ports (argv "0"; the bound port is
+// read from its startup log) with a temp FICTIONPAD_DB, asserts the storage
+// protocol over HTTP, then checks the on-disk gzip encoding directly.
 // Run: node tests/server.test.mjs
 
 import { spawn } from 'node:child_process';
@@ -35,32 +36,45 @@ async function waitReady(port) {
   throw new Error(`server on :${port} did not start`);
 }
 
-function startServer(port, env) {
-  return spawn(process.execPath, [SERVER, String(port)], {
+// argv "0" = OS-picked ephemeral port, so parallel runs never collide. The
+// server logs the bound port at startup ("app: http://localhost:N/") — read
+// it from stdout; child.port resolves to it.
+function startServer(env) {
+  const child = spawn(process.execPath, [SERVER, '0'], {
     // Never auto-build the compiled artifact from tests — the suite spawns
     // several servers per run, and the build is orthogonal to what they assert.
     env: { FICTIONPAD_AUTOBUILD: '0', ...process.env, ...env },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
+  child.port = new Promise((resolve, reject) => {
+    let buf = '';
+    child.stdout.on('data', (d) => {
+      const m = /localhost:(\d+)/.exec(buf += d);
+      if (m) resolve(Number(m[1]));
+    });
+    child.on('exit', () => reject(new Error('server exited before reporting its port')));
+  });
+  return child;
 }
 
 const stopServer = (child) => child && new Promise(r => { child.on('exit', r); child.kill(); });
 
 const tmp = mkdtempSync(join(tmpdir(), 'fp-server-test-'));
 const dbPath = join(tmp, 'test.db');
-const portA = 18931, portB = 18932, portC = 18933, portU = 18934, portD = 18935;
-const portE = 18936, portF = 18937;
-let a = null, b = null, c = null, d = null, e = null, f = null, upstream = null;
+let portA, portB, portC, portU, portD, portE, portF, portG;
+let a = null, b = null, c = null, d = null, e = null, f = null, g = null, upstream = null;
 let hangClosed = false;
 
 try {
-  a = startServer(portA, { FICTIONPAD_DB: dbPath });
-  b = startServer(portB, { FICTIONPAD_DB: join(tmp, 'auth.db'), FICTIONPAD_TOKEN: 'secret-tok' });
+  a = startServer({ FICTIONPAD_DB: dbPath });
+  b = startServer({ FICTIONPAD_DB: join(tmp, 'auth.db'), FICTIONPAD_TOKEN: 'secret-tok' });
+  [portA, portB] = await Promise.all([a.port, b.port]);
   await Promise.all([waitReady(portA), waitReady(portB)]);
 
   // /version shape
   const v = await (await fetch(`http://127.0.0.1:${portA}/version`)).json();
-  ok(v.version === 1 && v.storage === true && v.images === true, '/version → {version:1, storage:true, images:true}');
+  ok(v.version === 1 && v.storage === true && v.images === true && v.gc === true,
+    '/version → {version:1, storage:true, images:true, gc:true}');
 
   // save → load roundtrip (incl. unicode + nesting)
   const entity = { id: 'abc', name: 'Tést ☃', nested: { arr: [1, 2, 3], flag: true } };
@@ -152,11 +166,12 @@ try {
   ok((await fetch(`http://127.0.0.1:${portB}/health`)).ok, 'token: /health stays open');
 
   // ---- whole-server Basic auth (server C: FICTIONPAD_AUTH + FICTIONPAD_TOKEN) ----
-  c = startServer(portC, {
+  c = startServer({
     FICTIONPAD_DB: join(tmp, 'basic.db'),
     FICTIONPAD_AUTH: 'alice:wonderland',
     FICTIONPAD_TOKEN: 'secret-tok',
   });
+  portC = await c.port;
   await waitReady(portC);
   const basic = { Authorization: `Basic ${Buffer.from('alice:wonderland').toString('base64')}` };
   const basicWrong = { Authorization: `Basic ${Buffer.from('alice:nope').toString('base64')}` };
@@ -199,6 +214,8 @@ try {
   ok(cd.includes('attachment') && /filename="fictionpad-backup-.+\.db"/.test(cd),
     '/backup Content-Disposition carries a dated .db filename');
   const bakBuf = Buffer.from(await bak.arrayBuffer());
+  ok(bak.headers.get('content-length') === String(bakBuf.length),
+    '/backup Content-Length matches the streamed body byte count');
   ok(bakBuf.length > 100 && bakBuf.subarray(0, 15).toString('utf8') === 'SQLite format 3' && bakBuf[15] === 0,
     '/backup body is a SQLite database file');
   // The row saved moments ago lives only in the WAL until a checkpoint — its
@@ -262,6 +279,45 @@ try {
   ok((await post(portB, '/save', { store: 'Meta', key: 'csrf', data: {} }, evil)).status === 403,
     'CSRF: guard runs before auth — foreign Origin → 403 even on the token server');
 
+  // ---- /gc-images (server-side sweep over ALL stored entities) ----
+  // The leftover corrupt Scenarios/bogus row would abort the sweep by design
+  // (an undecodable row might reference images) — remove it first.
+  await post(portA, '/delete', { store: 'Scenarios', key: 'bogus' });
+  {
+    const refImg = 'aaaa1111bbbb2222', orphanImg = 'cccc3333dddd4444';
+    await post(portA, '/save', { store: 'Images', key: refImg, data: 'data:image/webp;base64,REFERENCED' });
+    await post(portA, '/save', { store: 'Images', key: orphanImg, data: 'data:image/webp;base64,ORPHAN' });
+    await post(portA, '/save', { store: 'Chats', key: 'gc-chat', data: { id: 'gc-chat', msgs: [{ pic: `imgref:${refImg}` }] } });
+    const gc = await post(portA, '/gc-images');
+    ok(gc.status === 200, '/gc-images → 200');
+    ok((await gc.json()).deleted === 1, '/gc-images deletes exactly the orphan row');
+    const imgs = (await (await post(portA, '/all', { store: 'Images' })).json()).entries ?? {};
+    ok(imgs[refImg] === 'data:image/webp;base64,REFERENCED', '/gc-images keeps the referenced image row');
+    ok(!(orphanImg in imgs), '/gc-images removes the unreferenced image row');
+    // Meta is excluded from the reference scan but must never be swept.
+    ok((await post(portA, '/load', { store: 'Meta', key: 'bkp' })).ok, '/gc-images leaves Meta rows alone');
+    ok((await fetch(`http://127.0.0.1:${portA}/gc-images`)).status === 405, '/gc-images rejects GET (405)');
+    ok((await post(portA, '/gc-images', {}, evil)).status === 403, '/gc-images: foreign Origin → 403');
+    ok((await post(portB, '/gc-images')).status === 401, '/gc-images: token server without Bearer → 401');
+    ok((await post(portB, '/gc-images', {}, auth)).ok, '/gc-images: token server with Bearer → 200');
+    await post(portA, '/delete', { store: 'Chats', key: 'gc-chat' });
+    await post(portA, '/delete', { store: 'Images', key: refImg });
+  }
+
+  // ---- request body cap (FICTIONPAD_MAX_BODY_MB) ----
+  g = startServer({ FICTIONPAD_DB: join(tmp, 'cap.db'), FICTIONPAD_MAX_BODY_MB: '1' });
+  portG = await g.port;
+  await waitReady(portG);
+  {
+    const big = { store: 'Meta', key: 'big', data: { blob: 'x'.repeat(1024 * 1024) } }; // > 1 MB as JSON
+    ok((await post(portG, '/save', big)).status === 413, 'body cap: oversized /save → 413');
+    ok((await post(portG, '/load', { store: 'Meta', key: 'big' })).status === 404,
+      'body cap: the oversized write did not land');
+    ok((await post(portG, '/save', { store: 'Meta', key: 'small', data: { blob: 'y'.repeat(1024) } })).ok,
+      'body cap: a body under the cap is still accepted');
+    ok((await fetch(`http://127.0.0.1:${portG}/health`)).ok, 'server survives an oversized body');
+  }
+
   // ---- proxy credential hygiene (mock upstream echoes headers) ----
   upstream = http.createServer((req, res) => {
     if (req.url === '/redirect') {
@@ -293,7 +349,8 @@ try {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(req.headers));
   });
-  await new Promise(r => upstream.listen(portU, '127.0.0.1', r));
+  await new Promise(r => upstream.listen(0, '127.0.0.1', r));
+  portU = upstream.address().port; // in-process server: read the OS-picked port directly
   const viaProxy = (headers) => fetch(`http://127.0.0.1:${portC}/proxy/http://127.0.0.1:${portU}/echo`, { headers });
 
   const echoed1 = await (await viaProxy({ ...basic, cookie: 'session=abc' })).json();
@@ -330,11 +387,12 @@ try {
 
   // Allowlist server (D): FICTIONPAD_PROXY_ALLOW=127.0.0.1 — host must match,
   // regardless of loopback status; Bearer auth still applies.
-  d = startServer(portD, {
+  d = startServer({
     FICTIONPAD_DB: join(tmp, 'allow.db'),
     FICTIONPAD_TOKEN: 'secret-tok',
     FICTIONPAD_PROXY_ALLOW: '127.0.0.1',
   });
+  portD = await d.port;
   await waitReady(portD);
   ok((await proxyTo(portD, loop, auth)).ok, 'proxy policy: allowlisted host → 200');
   const offList = await proxyTo(portD, `http://localhost:${portU}/echo`, auth);
@@ -393,7 +451,8 @@ try {
   // Periodic TRUNCATE checkpoint (short interval via FICTIONPAD_CHECKPOINT_MS):
   // after a write, the -wal sidecar is truncated back to zero without a
   // restart, so the on-disk .db is always a recent complete snapshot.
-  e = startServer(portE, { FICTIONPAD_DB: join(tmp, 'ckpt.db'), FICTIONPAD_CHECKPOINT_MS: '200' });
+  e = startServer({ FICTIONPAD_DB: join(tmp, 'ckpt.db'), FICTIONPAD_CHECKPOINT_MS: '200' });
+  portE = await e.port;
   await waitReady(portE);
   await post(portE, '/save', { store: 'Meta', key: 'ck', data: { n: 1 } });
   {
@@ -408,7 +467,8 @@ try {
 
   // Graceful shutdown: SIGTERM closes the db — closing the last WAL connection
   // checkpoints and removes the -wal/-shm sidecars — and exits 0.
-  f = startServer(portF, { FICTIONPAD_DB: join(tmp, 'sig.db') });
+  f = startServer({ FICTIONPAD_DB: join(tmp, 'sig.db') });
+  portF = await f.port;
   await waitReady(portF);
   await post(portF, '/save', { store: 'Chats', key: 's1', data: { id: 's1' } });
   const sigDb = join(tmp, 'sig.db');
@@ -424,7 +484,7 @@ try {
     raw.close();
   }
 } finally {
-  await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d), stopServer(e), stopServer(f)]);
+  await Promise.all([stopServer(a), stopServer(b), stopServer(c), stopServer(d), stopServer(e), stopServer(f), stopServer(g)]);
   upstream?.close();
 }
 

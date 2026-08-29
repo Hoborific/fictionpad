@@ -6,7 +6,12 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
   // oldest first. Keyed on the messages map so identities stay stable across
-  // unrelated re-renders (MessageItem memo compares prop identities).
+  // unrelated re-renders (MessageItem memo compares prop identities). The map
+  // identity changes per streamed token, so kid arrays are cached: when every
+  // child node object is unchanged (only the streaming node gets a fresh
+  // identity per token) the previous array is reused, keeping branchKids
+  // identity stable for every unaffected parent.
+  const kidsCacheRef = useRef(new Map()); // parentId → last kids array
   const kidsByParent = useMemo(() => {
     const map = new Map();
     for (const n of Object.values(chat?.messages ?? {})) {
@@ -14,19 +19,35 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       if (!map.has(n.parentId)) map.set(n.parentId, []);
       map.get(n.parentId).push(n);
     }
-    for (const kids of map.values())
+    const prev = kidsCacheRef.current;
+    const cache = new Map();
+    for (const [pid, kids] of map) {
       kids.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1));
+      const old = prev.get(pid);
+      const stable = old && old.length === kids.length && kids.every((k, i) => k === old[i]) ? old : kids;
+      cache.set(pid, stable);
+      map.set(pid, stable);
+    }
+    kidsCacheRef.current = cache;
     return map;
   }, [chat?.messages]);
   // Memory pills: path position → count of memories stamped there (atLen), so
   // the message where an auto-summary fired shows it and can jump to the
-  // Memory tab. Rewind trims the store, so stale pills vanish on their own.
+  // Memory tab. Only cards visible on this path count — branch-hidden
+  // (off-path atMsg) and superseded (a supPointsOf point on path) ones hide
+  // by derivation; rewind never deletes them, so without the filter stale
+  // pills would linger.
   const memByLen = useMemo(() => {
     const m = new Map();
-    for (const mem of chat?.memoryStore?.memories ?? [])
-      if (Number.isFinite(mem?.atLen)) m.set(mem.atLen, (m.get(mem.atLen) ?? 0) + 1);
+    const pathIds = new Set(path.map(n => n.id));
+    for (const mem of chat?.memoryStore?.memories ?? []) {
+      if (!Number.isFinite(mem?.atLen)) continue;
+      if (mem.atMsg != null && !pathIds.has(mem.atMsg)) continue;
+      if (supPointsOf(mem).some(id => pathIds.has(id))) continue;
+      m.set(mem.atLen, (m.get(mem.atLen) ?? 0) + 1);
+    }
     return m;
-  }, [chat?.memoryStore]);
+  }, [chat?.memoryStore, path]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
   // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
   // unpin/re-pin themselves via the scroll listener.
@@ -190,6 +211,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   latestRef.current = { chat, generating, auxBusy };
   const onComposerSubmit = (text) => {
     const chatId = chat?.id;
+    const sentAt = Date.now();
     const res = onSubmitInput(text);
     if (res || !chatId) return res; // hint shown, draft kept by the Composer
     setTimeout(() => {
@@ -197,9 +219,15 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       const p = cur.chat ? getActivePath(cur.chat.messages, cur.chat.activeLeafId) : [];
       // Accepted = a generation/aux pass started, or the user message landed
       // in the tree (runGeneration can still bail after the append).
-      const appended = p[p.length - 1]?.role === 'assistant'
+      const leafNow = p[p.length - 1];
+      const appended = leafNow?.role === 'assistant'
         && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
-      if (cur.generating || cur.auxBusy.length || appended) return;
+      // /image appends only an assistant node whose swipe carries a pending
+      // image entry — no generation, no aux, no user text — accept that too.
+      const imgJob = leafNow?.role === 'assistant'
+        && (leafNow.swipes?.[leafNow.activeSwipe ?? 0]?.images ?? [])
+          .some(e => e && (e.pending || (e.at ?? 0) >= sentAt));
+      if (cur.generating || cur.auxBusy.length || appended || imgJob) return;
       draftsRef.current.set(chatId, text); // rejected — restore the draft
       if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
     }, 0);
@@ -213,8 +241,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     </div></div></div>`;
   const personaName = persona?.name?.trim() || 'User';
   const leaf = path[path.length - 1];
+  // Swipe is part of the match: suggestions fetched for one take must not
+  // render under another take of the same leaf (swiped mid-flight).
   const showSugg = !generating && leaf?.role === 'assistant'
-    && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
+    && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id
+    && suggestions?.swipe === leaf.activeSwipe;
   // Impersonate chip: below the suggestion chips when those are on, the only
   // chip otherwise. Click-triggered only — no aux call until asked.
   // genElsewhere: a generation is running in ANOTHER chat — one at a time is

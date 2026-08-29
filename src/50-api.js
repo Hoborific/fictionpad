@@ -173,6 +173,34 @@ async function* parseEventStream(body) {
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
+  // Client-side stop filter (fallback — backends normally strip server-side).
+  // A stop string split across chunks must not leak into the display text or
+  // the tape, so the stream holds back the longest tail that could still grow
+  // INTO a stop string (bounded by the longest one) and emits only the text
+  // before it; the tail flushes at stream end, minus any complete stop
+  // string it turned out to hold. (On abort the held tail is simply dropped.)
+  const stopList = stopSet ? [...stopSet].filter(s => typeof s === 'string' && s) : null;
+  const maxStop = stopList?.length ? Math.max(...stopList.map(s => s.length)) : 0;
+  // Longest suffix of s (≤ maxStop chars) that starts some stop string —
+  // equality counts, so a stop string arriving whole at the tail is held too.
+  const stopTail = maxStop ? (s) => {
+    for (let len = Math.min(s.length, maxStop); len > 0; len--) {
+      const tail = s.slice(-len);
+      for (const st of stopList) if (st.startsWith(tail)) return tail;
+    }
+    return '';
+  } : null;
+  // Earliest index any stop string occurs at in s, -1 when none (flush cut).
+  const stopCut = maxStop ? (s) => {
+    let cut = -1;
+    for (const st of stopList) {
+      const i = s.indexOf(st);
+      if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+    }
+    return cut;
+  } : null;
+  let heldText = '';  // held-back content tail (split stop-string guard)
+  const lpHeld = [];  // the same guard for the logprob tape
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -225,18 +253,71 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       yield { done: true, finishReason: choice.finish_reason };
       if (!deltaText) continue;
     }
-    if (deltaText && !stopSet?.has(deltaText)) yield { content: deltaText };
+    if (deltaText) {
+      if (!stopTail) yield { content: deltaText };
+      // A chunk that IS exactly a stop string is dropped outright, anywhere in
+      // the stream — the hold-back guard only covers split/tail cases and
+      // would re-emit an exact match once more text follows.
+      else if (stopSet.has(deltaText) && !heldText) { /* dropped */ }
+      else {
+        const combined = heldText + deltaText;
+        heldText = stopTail(combined);
+        if (combined.length > heldText.length)
+          yield { content: combined.slice(0, combined.length - heldText.length) };
+      }
+    }
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
     if (Array.isArray(lpContent) && lpContent.length) {
-      const tape = lpContent.filter(t => t?.token && !stopSet?.has(t.token)).map(t => ({
-        token: t.token,
-        logprob: t.logprob ?? null,
-        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
-          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-      }));
-      if (tape.length) yield { lp: tape };
+      const tape = [];
+      for (const t of lpContent) {
+        if (!t?.token) continue;
+        if (stopSet?.has(t.token)) continue; // whole-token stop match, anywhere in the stream
+        tape.push({
+          token: t.token,
+          logprob: t.logprob ?? null,
+          top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
+            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+        });
+      }
+      if (tape.length) {
+        if (!stopTail) yield { lp: tape };
+        else {
+          // Hold back enough trailing entries to cover a stop string still
+          // split across them; release the rest — their text can no longer
+          // be part of one.
+          lpHeld.push(...tape);
+          let total = 0;
+          for (const e of lpHeld) total += e.token.length;
+          const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
+          let n = 0;
+          while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
+            total -= lpHeld[n++].token.length;
+          if (n) yield { lp: lpHeld.splice(0, n) };
+        }
+      }
     }
+  }
+  // Stream end: flush the held tails. A complete stop string inside is the
+  // backend's unstripped stop marker — cut from its first occurrence; a
+  // shorter tail is real text that merely prefixed a stop string.
+  if (heldText) {
+    const cut = stopCut(heldText);
+    const out = cut === -1 ? heldText : heldText.slice(0, cut);
+    if (out) yield { content: out };
+  }
+  if (lpHeld.length) {
+    const joined = lpHeld.map(e => e.token).join('');
+    const cut = stopCut(joined);
+    let out = lpHeld;
+    if (cut !== -1) {
+      // Keep the entries starting before the cut; a token straddling the
+      // boundary is approximated away by the global alignment pass.
+      out = [];
+      let acc = 0;
+      for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
+    }
+    if (out.length) yield { lp: out };
   }
 }
 
@@ -424,7 +505,9 @@ async function getTokenCount({ endpoint, apiKey, serverToken, model, text, signa
 // ---- /embeddings (OpenAI-style; semantic lore activation) ----
 // Similarity threshold for smart lore activation — tune in one place.
 const SEMANTIC_THRESHOLD = 0.55;
-// Session-lifetime cache for piece embeddings: model|hash(text) → vector.
+// Session-lifetime cache for piece embeddings: endpoint|model|hash(text) →
+// vector. Endpoint is in the key like tokenizeCache — switching embedding
+// backends mid-session must not reuse the old backend's vectors.
 const embedCache = new Map();
 const textHash = (s) => {
   let h = 0;
@@ -456,7 +539,7 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
 
 // Cached single-text embedding (piece match texts change rarely).
 async function embedCached({ endpoint, apiKey, serverToken, model, text, signal }) {
-  const key = `${model}|${textHash(text)}`;
+  const key = `${endpoint}|${model}|${textHash(text)}`;
   if (embedCache.has(key)) return embedCache.get(key);
   if (embedCache.size > 500) embedCache.clear();
   const [vec] = await embed({ endpoint, apiKey, serverToken, model, inputs: [text], signal });

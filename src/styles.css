@@ -626,6 +626,7 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   padding: 6px 8px; margin-bottom: 6px; background: var(--c-bg-2);
 }
 .mem-item .row, .lore-item-row .row { display: flex; gap: 4px; align-items: center; }
+.mem-item.hi { border-color: var(--c-accent); } /* jump target flash (superseded badge click-through) */
 .mem-item .text { margin-top: 4px; color: var(--c-dim); white-space: pre-wrap; }
 .lore-item-row .ir-preview {
   margin-top: 2px; font-size: 12px; color: var(--c-dim);

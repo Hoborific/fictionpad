@@ -144,6 +144,33 @@ const mode = process.argv[2] ?? '';
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
+// Pin-drift guard: template.html's dev importmap hardcodes the same esm.sh
+// dependency versions as DEPS — bumping one without the other would make the
+// dev build and the compiled artifact run different versions. Parse
+// name@version from both and fail on any mismatch. A template entry with no
+// DEPS counterpart is drift too (the compiled importmap would silently lack
+// it); the reverse (DEPS-only entries like the transitive scheduler) is fine.
+// Skipped under --rehash, which exists precisely for the mid-bump state.
+async function checkPinDrift() {
+  const template = await readFile(TEMPLATE, 'utf8');
+  const pinOf = (url) => /esm\.sh\/(@?[^@/]+)@([^/"]+)/.exec(url)?.slice(1);
+  const depsByName = new Map(DEPS.map(d => pinOf(d.url)));
+  const mismatches = [];
+  for (const m of template.matchAll(/"([^"]+)":\s*"https:\/\/esm\.sh\/(@?[^@/]+)@([^/"]+)/g)) {
+    const [, spec, name, version] = m;
+    const pinned = depsByName.get(name);
+    if (!pinned)
+      mismatches.push(`${spec}: template.html imports ${name}@${version} but vendor.mjs DEPS has no ${name} entry — the compiled artifact would lack it`);
+    else if (pinned !== version)
+      mismatches.push(`${spec}: template.html pins ${name}@${version}, vendor.mjs DEPS pins ${name}@${pinned}`);
+  }
+  if (mismatches.length)
+    throw new Error('dependency pin drift between template.html and vendor.mjs DEPS ' +
+      '(the dev build and the compiled artifact would run different versions):\n  ' +
+      mismatches.join('\n  ') + '\nUpdate one side to match the other.');
+}
+if (mode !== '--rehash') await checkPinDrift();
+
 async function loadDep(dep) {
   const path = join(CACHE, dep.file);
   if (!existsSync(path)) {

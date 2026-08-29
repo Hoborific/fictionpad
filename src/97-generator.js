@@ -19,7 +19,9 @@ function extractGenJSON(out) {
   } catch { return null; }
 }
 
-const GEN_NAME_MAX = 100;
+// Aligned with TOOL_NAME_MAX (60) — the speaker-attribution cap: a longer
+// generated name could never be detected as a `Name:` prefix.
+const GEN_NAME_MAX = TOOL_NAME_MAX;
 const GEN_META_MAX = 300;   // description
 const GEN_FIELD_MAX = 8000; // scenarioInstructions / backstory / greeting / card content
 const GEN_PIECE_CAP = 20;   // lore pieces per generated scenario
@@ -43,7 +45,9 @@ const sanitizeGenPiece = (p) => ({
 });
 
 // Only fields present (and non-empty) in the model's reply land in the patch;
-// everything else keeps the draft's current value.
+// everything else keeps the draft's current value. Arrays follow the same
+// no-wipe rule as strings: an empty array never enters the patch, so a thin
+// reply can't clear the draft's tags or lore pieces.
 function sanitizeScenarioGen(obj) {
   const patch = {};
   for (const [key, max] of [['name', GEN_NAME_MAX], ['description', GEN_META_MAX],
@@ -51,13 +55,34 @@ function sanitizeScenarioGen(obj) {
     const s = genStr(obj[key], max);
     if (s) patch[key] = s;
   }
-  if (Array.isArray(obj.tags))
-    patch.tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
-  if (Array.isArray(obj.lorePieces))
-    patch.lorePieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
+  if (Array.isArray(obj.tags)) {
+    const tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
+    if (tags.length) patch.tags = tags;
+  }
+  if (Array.isArray(obj.lorePieces)) {
+    const pieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
       .map(p => ({ ...newLorePiece(), ...sanitizeGenPiece(p) })) // fresh id + flag defaults
       .filter(p => p.title && p.content);
+    // The editor merges these into its draft BY TITLE (mergeGenPieces) —
+    // never a wholesale replace, so a partial reply can't wipe pieces.
+    if (pieces.length) patch.lorePieces = pieces;
+  }
   return patch;
+}
+
+// Merge generated pieces into the draft's BY TITLE (case-insensitive): a
+// title match updates that piece's content/keys in place (id, flags and
+// editor-only fields survive), new titles append.
+function mergeGenPieces(current, generated) {
+  const out = [...(current ?? [])];
+  const idx = new Map(out.map((p, i) => [String(p.title ?? '').trim().toLowerCase(), i]));
+  for (const g of generated ?? []) {
+    const t = String(g.title ?? '').trim().toLowerCase();
+    const i = idx.get(t);
+    if (i == null) { idx.set(t, out.length); out.push(g); }
+    else out[i] = { ...out[i], content: g.content, keys: g.keys };
+  }
+  return out;
 }
 
 // Single lore piece (✦ on a scenario-editor card or the chat piece editor
@@ -68,7 +93,7 @@ function sanitizePieceGen(obj) {
   const patch = {};
   if (p.title) patch.title = p.title;
   if (p.content) patch.content = p.content;
-  if (Array.isArray(obj?.keys)) patch.keys = p.keys;
+  if (Array.isArray(obj?.keys) && p.keys.length) patch.keys = p.keys; // no-wipe rule for arrays too
   if (typeof obj?.pinned === 'boolean') patch.pinned = p.pinned;
   if (obj?.type === 'character' || obj?.type === 'lore') patch.type = p.type;
   return patch;
@@ -80,7 +105,7 @@ function sanitizeCharacterGen(obj) {
     const s = genStr(obj[key], max);
     if (s) patch[key] = s;
   }
-  if (Array.isArray(obj.keys)) patch.keys = genKeys(obj.keys);
+  if (Array.isArray(obj.keys) && genKeys(obj.keys).length) patch.keys = genKeys(obj.keys);
   // Optional speaker-name colour override — hex only, anything else dropped.
   const col = String(obj.color ?? '').trim();
   if (/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(col)) patch.color = col.toLowerCase();

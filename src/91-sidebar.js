@@ -83,6 +83,8 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   const chatMatches = chatQuery ? new Map(chatList.map(c => [c.id, matchFor(c)])) : null;
   const shownChats = chatQuery ? chatList.filter(c => chatMatches.get(c.id).hit) : pinnedChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
+  // The rows' tool buttons stop pointerdown propagation (see .tools below), so
+  // a long hold on ✕/✎/⤓ never arms this timer — only the button click fires.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
   const lpStart = (e, id, onMenu = onChatContextMenu) => {
@@ -138,7 +140,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} />`}
               <span class="name">${s.name}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat from this scenario"
                     onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✚</button>
@@ -166,7 +168,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} />`}
               <span class="name">${c.name}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat with this character"
                     onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✚</button>
@@ -204,7 +206,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               ${chatAvatarEl(c)}
               <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="Inspector"
                     onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>

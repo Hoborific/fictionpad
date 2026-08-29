@@ -165,8 +165,11 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGen
 }
 
 // One past version of a tool-updated piece (update_character): collapsed to a
-// stamped one-liner, expands to that version's full card text + keys.
-function RevisionRow({ rev, n }) {
+// stamped one-liner, expands to that version's full card text + keys. An
+// expanded row offers "restore into draft" — the version's content/keys are
+// copied into the editor draft via the shared set() (dirty flag included), so
+// the change-history loop closes through the normal Save flow.
+function RevisionRow({ rev, n, onRestore = null }) {
   const [open, setOpen] = useState(false);
   const stamp = rev.createdAt ? new Date(rev.createdAt).toLocaleString() : 'original';
   return html`
@@ -177,7 +180,11 @@ function RevisionRow({ rev, n }) {
         <span class="hint">${rev.atLen != null ? `msg ${rev.atLen} · ` : ''}${stamp}</span>
       </div>
       ${!open && html`<div class="ir-preview">${toPreview(rev.content, 140)}</div>`}
-      ${open && html`<div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
+      ${open && html`
+        <div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>
+        ${onRestore && html`<button class="btn small" style=${{ marginTop: '6px' }}
+          title="Copy this version's content and keys into the draft above — Save applies them"
+          onClick=${() => onRestore(rev)}>Restore into draft</button>`}`}
     </div>`;
 }
 
@@ -215,7 +222,8 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
           <span>Change history (${piece.revisions.length})</span>
           <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
-            <${RevisionRow} key=${i} rev=${r} n=${piece.revisions.length - i} />`)}
+            <${RevisionRow} key=${r.createdAt ?? 'orig'} rev=${r} n=${piece.revisions.length - i}
+              onRestore=${(rev) => set({ content: rev.content ?? '', keys: [...(rev.keys ?? [])] })} />`)}
         </div>`}
       ${genOpen && html`
         <${GeneratorModal} title=${`Generate — ${draft.title || 'lore piece'}`} busy=${genBusy} error=${genError}
@@ -311,7 +319,12 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
-      set(await onGenerate('scenario', promptText, draft));
+      const patch = await onGenerate('scenario', promptText, draft);
+      // Generated pieces merge into the draft by title — never a wholesale
+      // replace (the sanitizer already omits empty/missing arrays entirely).
+      if (Array.isArray(patch.lorePieces))
+        patch.lorePieces = mergeGenPieces(draft.lorePieces, patch.lorePieces);
+      set(patch);
       setGenOpen(false);
     } catch (e) { setGenError(e?.message ?? String(e)); }
     finally { setGenBusy(false); }

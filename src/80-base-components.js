@@ -69,10 +69,11 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
 // handler writes CSS vars only — no re-render per scroll event.
 function RailScroll({ className, children }) {
   const wrapRef = useRef(null);
+  const bodyRef = useRef(null);
   const sync = () => {
     const wrap = wrapRef.current;
-    const el = wrap?.firstElementChild;
-    if (!el) return;
+    const el = bodyRef.current;
+    if (!wrap || !el) return;
     const scrollable = el.scrollHeight > el.clientHeight + 2;
     wrap.dataset.scrollable = scrollable ? '1' : '';
     wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
@@ -82,8 +83,19 @@ function RailScroll({ className, children }) {
     }
   };
   useEffect(sync); // every render — cheap DOM reads, covers content/resize changes
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    // Extent cues otherwise only re-sync on render/scroll: watch the box
+    // (window resizes) and its content (async growth — images, fonts) so the
+    // rail thumb/fade track without a scroll event.
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  }, []);
   return html`<div class="rail-wrap" ref=${wrapRef}>
-    <div class=${`rail-body ${className ?? ''}`} onScroll=${sync}>${children}</div>
+    <div class=${`rail-body ${className ?? ''}`} ref=${bodyRef} onScroll=${sync}>${children}</div>
     <div class="rail"><div class="rail-thumb" /></div>
   </div>`;
 }
@@ -92,6 +104,10 @@ function RailScroll({ className, children }) {
 // blur/Enter — clamping on every keystroke fights mid-edit input (typing "3"
 // into a min-5 field would snap to 5 before the "0" for "30" arrives).
 // While focused, the text is authoritative; unfocused, it follows the prop.
+// A typed-but-unblurred edit also survives the enclosing modal closing under
+// it (Escape/scrim): commit runs on Escape (target-phase keydown fires before
+// the modal's window-level close handler) and once on unmount — commit()
+// no-ops when the value is unchanged.
 function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
   const [text, setText] = useState(String(value ?? ''));
   const [focused, setFocused] = useState(false);
@@ -109,11 +125,17 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     if (n !== value) onCommit(n);
     setText(String(n ?? ''));
   };
+  const commitRef = useRef(commit);
+  commitRef.current = commit; // the unmount cleanup always sees the live closure
+  useEffect(() => () => commitRef.current(), []);
   return html`<input type="number" min=${min} max=${max} step=${step} placeholder=${placeholder} value=${text}
     onFocus=${() => setFocused(true)}
     onInput=${(e) => setText(e.target.value)}
     onBlur=${() => { setFocused(false); commit(); }}
-    onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
+    onKeyDown=${(e) => {
+      if (e.key === 'Enter') e.currentTarget.blur();
+      else if (e.key === 'Escape') commit();
+    }} />`;
 }
 
 // Text input with a model dropdown. The native <datalist> popup truncates
@@ -125,6 +147,7 @@ function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
   const wrapRef = useRef(null);
+  const inputRef = useRef(null);
   useEffect(() => {
     if (!open) return;
     const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
@@ -134,9 +157,11 @@ function ModelPicker({ value, models, placeholder, onChange }) {
   const all = models ?? [];
   const q = (value ?? '').toLowerCase();
   const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
-  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); };
+  // Blur after a pick so the mobile keyboard dismisses over the confirmed
+  // choice instead of staying up with the list already closed.
+  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); inputRef.current?.blur(); };
   return html`<div class="mp-wrap" ref=${wrapRef}>
-    <input type="text" value=${value ?? ''} placeholder=${placeholder}
+    <input type="text" ref=${inputRef} value=${value ?? ''} placeholder=${placeholder}
       onFocus=${() => { setTyping(false); if (all.length) setOpen(true); }}
       onInput=${(e) => { setTyping(true); setOpen(true); onChange(e.target.value); }}
       onKeyDown=${(e) => {

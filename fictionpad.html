@@ -645,6 +645,7 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
   padding: 6px 8px; margin-bottom: 6px; background: var(--c-bg-2);
 }
 .mem-item .row, .lore-item-row .row { display: flex; gap: 4px; align-items: center; }
+.mem-item.hi { border-color: var(--c-accent); } /* jump target flash (superseded badge click-through) */
 .mem-item .text { margin-top: 4px; color: var(--c-dim); white-space: pre-wrap; }
 .lore-item-row .ir-preview {
   margin-top: 2px; font-size: 12px; color: var(--c-dim);
@@ -961,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.7';
+const APP_VERSION = '4.11.8';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1938,22 +1939,45 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 }
 
 // Revise a memory without rewriting it: the stale card stays in the store,
-// marked with the supersede point (supAtMsg = the leaf the pass ran at) and a
-// link to its replacement (supBy); the revised text lands as a FRESH card
-// stamped like any new memory. The assembler hides a card whose supAtMsg is
-// on the active path, so the branch that superseded sees only the new text
-// while a stale-leaf branch (or a rewind) keeps the old card — derivation,
-// never deletion, same rule as lore revisions.
-function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+// marked with supersede point(s) and a link to its replacement; the revised
+// text lands as a FRESH card stamped like any new memory. The assembler hides
+// a card with ANY supersede point on the active path, so the branch that
+// superseded sees only the new text while a stale-leaf branch (or a rewind)
+// keeps the old card — derivation, never deletion, same rule as lore
+// revisions.
+// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch
+// re-superseding the same card appends its own point instead of overwriting,
+// so each branch hides the stale card from its own supersede on (a single
+// scalar point would resurrect the stale card on the first branch). supBy is
+// only the LATEST replacement id (Memory-tab badge/click-through). Legacy
+// scalar supAtMsg data reads as a one-element list via supPointsOf.
+const supPointsOf = (m) => Array.isArray(m?.supAtMsgs) ? m.supAtMsgs
+  : (m?.supAtMsg != null ? [m.supAtMsg] : []);
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null) {
+  const cur = store?.memories ?? [];
+  const old = cur.find(m => m?.id === id);
+  if (!old) return store; // unknown id — never invent a revision for nothing
   const newId = uid();
-  const memories = (store?.memories ?? []).map(m => (m && m.id === id)
-    ? { ...m, supBy: newId, ...(atMsg ? { supAtMsg: atMsg } : {}) } : m);
-  memories.push({ id: newId, text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) });
+  const note = String(revNote ?? '').trim().slice(0, 300) || null;
+  // The pin TRANSFERS to the replacement: the superseded original stays only
+  // as rollback history and rejoins the eviction pool.
+  const points = supPointsOf(old);
+  const marked = { ...old, pinned: false, supBy: newId,
+    supAtMsgs: (atMsg && !points.includes(atMsg)) ? [...points, atMsg] : points };
+  delete marked.supAtMsg; // migrated into the list
+  const memories = [...cur.map(m => (m && m.id === id) ? marked : m),
+    { id: newId, text, pinned: !!old.pinned, createdAt: now,
+      ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
+      ...(note ? { revNote: note } : {}) }];
   while (memories.length > cap) {
-    const idx = memories.findIndex(m => !m.pinned);
-    if (idx === -1) break;
-    memories.splice(idx, 1);
+    // Evict the oldest unpinned NON-superseded card first; a superseded card
+    // (rollback history) goes only when nothing else can. The fresh revision
+    // is never a candidate — evicting it would leave a dangling supBy. No
+    // candidate at all (everything else pinned) aborts the supersede instead.
+    const idx = memories.findIndex(m => m.id !== newId && !m.pinned && supPointsOf(m).length === 0);
+    const evict = idx !== -1 ? idx : memories.findIndex(m => m.id !== newId && !m.pinned);
+    if (evict === -1) return store;
+    memories.splice(evict, 1);
   }
   return { ...(store ?? {}), memories };
 }
@@ -2165,11 +2189,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // Branch visibility (same rule as the lore layer): a memory stamped with
   // atMsg (the leaf it was summarized under) injects only while that node is
   // on the active path; unstamped memories are global. A card superseded by
-  // the lore pass (supAtMsg on path) hides too — its replacement rides the
-  // same stamps, so each branch sees the newest revision it reached.
+  // the lore pass hides when ANY of its supAtMsgs points is on path (one
+  // point per branch that superseded it — sibling branches supersede the
+  // same card independently) — its replacement rides the same stamps, so
+  // each branch sees the newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
   const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
-  const memSuped = (m) => !memGone(m) && m?.supAtMsg != null && pathIds.has(m.supAtMsg);
+  const memSuped = (m) => !memGone(m) && supPointsOf(m).some(id => pathIds.has(id));
   const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
   const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
@@ -2392,7 +2418,11 @@ const imagePromptWithPrefix = (prefix, prompt) => {
 // {{width}}/{{height}} (parsed from settings.imageSize), {{seed}} (one random
 // int per render — regen/takes must produce different images). Any NUMERIC
 // input key named seed/noise_seed is randomized too — a fixed seed in the
-// graph would make every take identical. Width/height get the same numeric
+// graph would make every take identical. A {{width}}/{{height}} placeholder
+// that IS the whole string value substitutes as a raw NUMBER (`"width":
+// "{{width}}"` lands as 1024, not "1024" — strict backends reject strings
+// for INT widget inputs); embedded occurrences stay string substitutions.
+// Width/height get the same numeric
 // treatment on EmptyLatent-style nodes when the axis has NO placeholder
 // anywhere in the graph: a stock "Save (API Format)" export carries plain
 // numbers, and without the overwrite imageSize would do nothing. An axis
@@ -2412,6 +2442,9 @@ function substituteComfyWorkflow(workflow, { prompt = '', negative = '', width =
     .replaceAll('{{height}}', String(height))
     .replaceAll('{{seed}}', String(useSeed));
   const walk = (node, latentInputs = false) => {
+    // Whole-value size placeholders become real numbers (see header comment).
+    if (node === '{{width}}') return width;
+    if (node === '{{height}}') return height;
     if (typeof node === 'string') return sub(node);
     if (Array.isArray(node)) return node.map(v => walk(v));
     if (node && typeof node === 'object') {
@@ -2437,7 +2470,11 @@ const parseImageSize = (size) => {
 // status_str 'error' → done + message; otherwise the first output image
 // ({filename, subfolder, type}) across all node outputs wins.
 function comfyHistoryResult(history, promptId) {
-  const rec = (promptId ? history?.[promptId] : null) ?? Object.values(history ?? {})[0];
+  // The caller polls /history/{promptId} — a missing record means queued or
+  // unknown, NEVER another run's record (a multi-run history would otherwise
+  // mark the job done with the wrong image). The first-record fallback exists
+  // only for promptId-less whole-history reads.
+  const rec = promptId ? history?.[promptId] : Object.values(history ?? {})[0];
   if (!rec) return { done: false, error: null, image: null };
   const statusStr = rec?.status?.status_str;
   if (statusStr === 'error') {
@@ -2511,6 +2548,12 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
+// Pill label for a loreQueue entry — ONE derivation shared by the Chat
+// options review list and the Inspector's Suggested-lore rows. Memory
+// revisions and piece updates name themselves; everything else (tool
+// proposals, extraction fresh pieces) is a NEW piece.
+const queuePillOf = (q) => (q?.kind === 'memory' ? 'memory' : q?.updateOf ? 'update' : 'new');
+
 // Accept a queued UPDATE proposal (updateOf set): resolves the target piece
 // by title against the caller-supplied merged view and funnels through the
 // tool-update machinery — scenario/global targets are shadowed into the
@@ -2534,16 +2577,22 @@ function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, cr
 }
 
 // Accept a queued MEMORY revision (kind: 'memory'): the revised text lands as
-// a fresh stamped card and the stale one is marked superseded (see
-// supersedeMemory). A vanished target (evicted/user-deleted) just drops the
-// entry.
-function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP } = {}) {
+// a fresh stamped card (clamped to maxChars when given) and the stale one is
+// marked superseded (see supersedeMemory); the entry's change note rides the
+// new card as revNote for the Memory tab. A vanished target (evicted/
+// user-deleted) just drops the entry.
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
   const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
   if (!q) return chat;
   const store = chat.memoryStore ?? { memories: [], cursor: 0 };
   const exists = (store.memories ?? []).some(m => m?.id === q.memoryId);
+  const text = String(q.content ?? '');
   return { ...chat,
-    memoryStore: exists ? supersedeMemory(store, q.memoryId, q.content, now, cap, atLen, atMsg) : store,
+    memoryStore: exists
+      ? supersedeMemory(store, q.memoryId,
+          (Number.isFinite(maxChars) && maxChars > 0) ? text.slice(0, maxChars) : text,
+          now, cap, atLen, atMsg, q.note)
+      : store,
     loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
@@ -2614,7 +2663,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!content) return fail('update_character: content required (the full updated card)');
     const keys = Array.isArray(args.keys)
       ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
-      : null; // omitted → keep the current keys
+      : null; // omitted → keep the current keys; explicit [] clears them
     const haystack = Array.isArray(allPieces) ? allPieces : pieces;
     const existing = haystack.find(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
@@ -2636,8 +2685,12 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const content = String(args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
     if (!title) return fail('add_lore: title required');
     if (!content) return fail('add_lore: content required');
-    const keys = (Array.isArray(args.keys) ? args.keys : [])
-      .map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+    // Omitted keys KEEP the current ones on an update; an explicitly-present
+    // array (even an EMPTY one) replaces them — same contract as
+    // update_character. New pieces fall back to [].
+    const keys = Array.isArray(args.keys)
+      ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
+      : null;
     // Dedupe by title across EVERYTHING the caller can see (same rationale as
     // register_character above) — a same-titled scenario/global piece would
     // otherwise be duplicated in the merged view and injected twice.
@@ -2645,19 +2698,19 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys.length ? keys : null) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
         `updated lore "${title}"`);
     if (existing)
       // Match lives outside the chat overlay: shadow it via an overlay copy
       // (fresh provenance → rewind drops the shadow again; rev 0 = original).
-      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys.length ? keys : null)],
+      return save([...pieces, withRevision({ ...existing, ...provenance }, existing, content, keys)],
         `updated lore "${title}"`);
     // Emergent-lore 'queue' mode: new titles wait for user review.
     if (queueLore)
       return { ok: true, note: `queued lore "${title}" for review`,
-        chat: queueLorePiece(chat, { title, content, keys, source: 'tool', createdAt: now,
+        chat: queueLorePiece(chat, { title, content, keys: keys ?? [], source: 'tool', createdAt: now,
           ...(Number.isFinite(atLen) ? { atLen } : {}) }) };
-    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys }],
+    return save([...pieces, { ...base, ...provenance, id: uid(), type: 'lore', title, content, keys: keys ?? [] }],
       `added lore "${title}"`);
   }
   return fail(`unknown tool "${call.name}"`);
@@ -3351,6 +3404,18 @@ function applyProfile(st, profile) {
 // ============================================================================
 const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
 
+// True when `next` references fewer distinct in-memory image URLs than `prev`
+// — the overwrite may have orphaned a stored image, so the caller sweeps.
+function imageRefDropped(prev, next) {
+  const before = new Set();
+  collectImageUrls(prev, before);
+  if (!before.size) return false;
+  const after = new Set();
+  collectImageUrls(next, after);
+  for (const u of before) if (!after.has(u)) return true;
+  return false;
+}
+
 class AbstractStorage extends EventTarget {
   constructor() {
     super();
@@ -3375,9 +3440,14 @@ class AbstractStorage extends EventTarget {
   getAll(store) { return this.cache[store] ?? {}; }
   get(store, key) { return this.cache[store]?.[key]; }
   set(store, key, value) {
+    const prev = this.cache[store][key];
     this.cache[store][key] = value;
     this.saveQueue.set(`${store}/${key}`, { op: 'put', store, key, value });
     this.#schedule();
+    // Overwrites trigger GC too (not just remove()): an edit that drops the
+    // last in-entity reference to a stored image — avatar cleared, swipe
+    // images purged — must not leave the row orphaned.
+    if (prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   remove(store, key) {
@@ -3401,11 +3471,13 @@ class AbstractStorage extends EventTarget {
     await this.persistPut(store, key, entity);
   }
   // Image GC: a reference scan, never refcounting. Debounced behind deletes
-  // (and after the flush that lands them): walk the whole cache (data URLs
-  // are rehydrated there) and drop every stored image no entity references.
-  // Cache is the single source of truth, so a live — or merely queued —
-  // entity's images can never be reclaimed. Inline mode: nothing stored
-  // out-of-band, sweep stays a no-op.
+  // and reference-dropping overwrites (and after the flush that lands them):
+  // walk the whole cache (data URLs are rehydrated there) and drop every
+  // stored image no entity references. Cache is the single source of truth,
+  // so a live — or merely queued — entity's images can never be reclaimed.
+  // Inline mode: nothing stored out-of-band, sweep stays a no-op. The server
+  // adapter overrides collectImages with a server-side sweep when /version
+  // advertises the gc capability.
   #scheduleImageGc() {
     if (!this.imagesEnabled) return;
     clearTimeout(this.gcTimer);
@@ -3414,12 +3486,25 @@ class AbstractStorage extends EventTarget {
       await this.collectImages();
     }, 2000);
   }
-  async collectImages() {
+  // Boot sweep: one pass shortly after init bounds orphan growth (crashed
+  // sessions, pre-GC builds). Rides the debounced scheduler — fire-and-forget,
+  // flush-first, and failures just leave the orphans for the next sweep.
+  scheduleBootImageGc() { this.#scheduleImageGc(); }
+  // Distinct image URLs referenced anywhere in the live cache right now.
+  referencedImageUrls() {
     const referenced = new Set();
     for (const s of STORES)
       for (const v of Object.values(this.cache[s])) collectImageUrls(v, referenced);
+    return referenced;
+  }
+  async collectImages() {
+    const referenced = this.referencedImageUrls();
     for (const [id, dataUrl] of [...this.images]) {
       if (referenced.has(dataUrl)) continue;
+      // The snapshot above predates the async delete loop: re-check against
+      // the CURRENT cache before each delete, so an entity saved mid-sweep
+      // can't lose an image it just started referencing (GC-vs-persist race).
+      if (this.referencedImageUrls().has(dataUrl)) continue;
       try {
         await this.persistDeleteImage(id);
         this.images.delete(id);
@@ -3497,8 +3582,6 @@ class AbstractStorage extends EventTarget {
     this._savestate = detail;
     this.dispatchEvent(new CustomEvent('savestate', { detail }));
   }
-  async persistPut() {}
-  async persistDelete() {}
 }
 
 class IndexedDBAdapter extends AbstractStorage {
@@ -3533,6 +3616,7 @@ class IndexedDBAdapter extends AbstractStorage {
       if (navigator.storage?.persist && !(await navigator.storage.persisted()))
         await navigator.storage.persist();
     } catch {}
+    this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   #readAll(store) {
     return new Promise((resolve, reject) => {
@@ -3617,6 +3701,11 @@ class ServerDBAdapter extends AbstractStorage {
     // the capability the adapter stays in inline mode (entities persist
     // verbatim, no 'unknown store' 400s) — today's behavior, just fat saves.
     this.imagesEnabled = info.images === true;
+    // Server-side image GC: the server scans ALL stored entities (every
+    // device's) for imgref refs and deletes unreferenced Images rows in one
+    // POST /gc-images. Without the capability collectImages() below falls
+    // back to the local cache-scan sweep (old servers).
+    this.gcEnabled = info.gc === true;
     // Images first: entities are rehydrated from them (imgref: → data URL).
     if (this.imagesEnabled)
       this.images = new Map(Object.entries(await this.remoteAll('Images')));
@@ -3628,15 +3717,28 @@ class ServerDBAdapter extends AbstractStorage {
         for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);
       this.cache[s] = all;
     }
+    this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   persistPut(store, key, value) { return this.#post('/save', { store, key, data: value }); }
   persistDelete(store, key) { return this.#post('/delete', { store, key }); }
   persistImage(id, dataUrl) { return this.#post('/save', { store: 'Images', key: id, data: dataUrl }); }
   persistDeleteImage(id) { return this.#post('/delete', { store: 'Images', key: id }); }
-  // Used by the settings migration helpers. No refs hint: the server
-  // rehydrates, so migrated entities always travel self-contained (inline).
+  // With the gc capability the sweep runs server-side (one POST, covers every
+  // device's entities); the local cache-scan stays the fallback for older
+  // servers. Afterwards prune the local mirror by the same reference scan, so
+  // a later save can't reference a row the server just dropped.
+  async collectImages() {
+    if (!this.gcEnabled) return super.collectImages();
+    try {
+      await this.#post('/gc-images', {});
+      const referenced = this.referencedImageUrls();
+      for (const [id, dataUrl] of this.images)
+        if (!referenced.has(dataUrl)) this.images.delete(id);
+    } catch (e) { console.error('FictionPad: image GC failed', e); }
+  }
+  // Used by init and the settings migration helpers. No refs hint: the server
+  // rehydrates, so pulled entities always travel self-contained (inline).
   async remoteAll(store, opts) { return (await this.#post('/all', { store, ...opts })).entries ?? {}; }
-  async remoteSave(store, key, data) { await this.#post('/save', { store, key, data }); }
 }
 
 // ============================================================================
@@ -3814,6 +3916,34 @@ async function* parseEventStream(body) {
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
+  // Client-side stop filter (fallback — backends normally strip server-side).
+  // A stop string split across chunks must not leak into the display text or
+  // the tape, so the stream holds back the longest tail that could still grow
+  // INTO a stop string (bounded by the longest one) and emits only the text
+  // before it; the tail flushes at stream end, minus any complete stop
+  // string it turned out to hold. (On abort the held tail is simply dropped.)
+  const stopList = stopSet ? [...stopSet].filter(s => typeof s === 'string' && s) : null;
+  const maxStop = stopList?.length ? Math.max(...stopList.map(s => s.length)) : 0;
+  // Longest suffix of s (≤ maxStop chars) that starts some stop string —
+  // equality counts, so a stop string arriving whole at the tail is held too.
+  const stopTail = maxStop ? (s) => {
+    for (let len = Math.min(s.length, maxStop); len > 0; len--) {
+      const tail = s.slice(-len);
+      for (const st of stopList) if (st.startsWith(tail)) return tail;
+    }
+    return '';
+  } : null;
+  // Earliest index any stop string occurs at in s, -1 when none (flush cut).
+  const stopCut = maxStop ? (s) => {
+    let cut = -1;
+    for (const st of stopList) {
+      const i = s.indexOf(st);
+      if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+    }
+    return cut;
+  } : null;
+  let heldText = '';  // held-back content tail (split stop-string guard)
+  const lpHeld = [];  // the same guard for the logprob tape
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -3866,18 +3996,71 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
       yield { done: true, finishReason: choice.finish_reason };
       if (!deltaText) continue;
     }
-    if (deltaText && !stopSet?.has(deltaText)) yield { content: deltaText };
+    if (deltaText) {
+      if (!stopTail) yield { content: deltaText };
+      // A chunk that IS exactly a stop string is dropped outright, anywhere in
+      // the stream — the hold-back guard only covers split/tail cases and
+      // would re-emit an exact match once more text follows.
+      else if (stopSet.has(deltaText) && !heldText) { /* dropped */ }
+      else {
+        const combined = heldText + deltaText;
+        heldText = stopTail(combined);
+        if (combined.length > heldText.length)
+          yield { content: combined.slice(0, combined.length - heldText.length) };
+      }
+    }
     // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
     const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
     if (Array.isArray(lpContent) && lpContent.length) {
-      const tape = lpContent.filter(t => t?.token && !stopSet?.has(t.token)).map(t => ({
-        token: t.token,
-        logprob: t.logprob ?? null,
-        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
-          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-      }));
-      if (tape.length) yield { lp: tape };
+      const tape = [];
+      for (const t of lpContent) {
+        if (!t?.token) continue;
+        if (stopSet?.has(t.token)) continue; // whole-token stop match, anywhere in the stream
+        tape.push({
+          token: t.token,
+          logprob: t.logprob ?? null,
+          top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
+            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+        });
+      }
+      if (tape.length) {
+        if (!stopTail) yield { lp: tape };
+        else {
+          // Hold back enough trailing entries to cover a stop string still
+          // split across them; release the rest — their text can no longer
+          // be part of one.
+          lpHeld.push(...tape);
+          let total = 0;
+          for (const e of lpHeld) total += e.token.length;
+          const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
+          let n = 0;
+          while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
+            total -= lpHeld[n++].token.length;
+          if (n) yield { lp: lpHeld.splice(0, n) };
+        }
+      }
     }
+  }
+  // Stream end: flush the held tails. A complete stop string inside is the
+  // backend's unstripped stop marker — cut from its first occurrence; a
+  // shorter tail is real text that merely prefixed a stop string.
+  if (heldText) {
+    const cut = stopCut(heldText);
+    const out = cut === -1 ? heldText : heldText.slice(0, cut);
+    if (out) yield { content: out };
+  }
+  if (lpHeld.length) {
+    const joined = lpHeld.map(e => e.token).join('');
+    const cut = stopCut(joined);
+    let out = lpHeld;
+    if (cut !== -1) {
+      // Keep the entries starting before the cut; a token straddling the
+      // boundary is approximated away by the global alignment pass.
+      out = [];
+      let acc = 0;
+      for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
+    }
+    if (out.length) yield { lp: out };
   }
 }
 
@@ -4065,7 +4248,9 @@ async function getTokenCount({ endpoint, apiKey, serverToken, model, text, signa
 // ---- /embeddings (OpenAI-style; semantic lore activation) ----
 // Similarity threshold for smart lore activation — tune in one place.
 const SEMANTIC_THRESHOLD = 0.55;
-// Session-lifetime cache for piece embeddings: model|hash(text) → vector.
+// Session-lifetime cache for piece embeddings: endpoint|model|hash(text) →
+// vector. Endpoint is in the key like tokenizeCache — switching embedding
+// backends mid-session must not reuse the old backend's vectors.
 const embedCache = new Map();
 const textHash = (s) => {
   let h = 0;
@@ -4097,7 +4282,7 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
 
 // Cached single-text embedding (piece match texts change rarely).
 async function embedCached({ endpoint, apiKey, serverToken, model, text, signal }) {
-  const key = `${model}|${textHash(text)}`;
+  const key = `${endpoint}|${model}|${textHash(text)}`;
   if (embedCache.has(key)) return embedCache.get(key);
   if (embedCache.size > 500) embedCache.clear();
   const [vec] = await embed({ endpoint, apiKey, serverToken, model, inputs: [text], signal });
@@ -4370,10 +4555,19 @@ function pickFile(accept) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
-    input.onchange = () => resolve(input.files?.[0] ?? null);
-    // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+);
-    // without this the promise never settles and imports silently hang.
-    input.oncancel = () => resolve(null);
+    let timer = null;
+    // Fallback for browsers without input.oncancel (older WebKit): the picker
+    // holds focus, so the window regaining it with no change event within a
+    // beat means the dialog was dismissed — settle null.
+    const onFocus = () => { timer = setTimeout(() => settle(null), 400); };
+    const cleanup = () => { clearTimeout(timer); window.removeEventListener('focus', onFocus); };
+    const settle = (file) => { cleanup(); resolve(file); };
+    input.onchange = () => settle(input.files?.[0] ?? null);
+    // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+) —
+    // the fast path. Without either hook the promise never settles and
+    // imports silently hang.
+    input.oncancel = () => settle(null);
+    window.addEventListener('focus', onFocus);
     input.click();
   });
 }
@@ -4489,7 +4683,7 @@ const enabledSamplers = (st) => Object.fromEntries(
 // strings, NumInput otherwise. Shared by every surface that edits a sampler
 // set (per-chat overrides, scenario defaults), so the rows can't drift.
 const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
-  ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
+  ? html`<select value=${String(value ?? f.def ?? true)} onChange=${(e) => onChange(e.target.value === 'true')}>
       <option value="true">true</option><option value="false">false</option></select>`
   : f.type === 'string'
     ? (f.options?.length
@@ -4586,10 +4780,11 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
 // handler writes CSS vars only — no re-render per scroll event.
 function RailScroll({ className, children }) {
   const wrapRef = useRef(null);
+  const bodyRef = useRef(null);
   const sync = () => {
     const wrap = wrapRef.current;
-    const el = wrap?.firstElementChild;
-    if (!el) return;
+    const el = bodyRef.current;
+    if (!wrap || !el) return;
     const scrollable = el.scrollHeight > el.clientHeight + 2;
     wrap.dataset.scrollable = scrollable ? '1' : '';
     wrap.dataset.atBottom = (!scrollable || el.scrollTop + el.clientHeight >= el.scrollHeight - 2) ? '1' : '';
@@ -4599,8 +4794,19 @@ function RailScroll({ className, children }) {
     }
   };
   useEffect(sync); // every render — cheap DOM reads, covers content/resize changes
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    // Extent cues otherwise only re-sync on render/scroll: watch the box
+    // (window resizes) and its content (async growth — images, fonts) so the
+    // rail thumb/fade track without a scroll event.
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  }, []);
   return html`<div class="rail-wrap" ref=${wrapRef}>
-    <div class=${`rail-body ${className ?? ''}`} onScroll=${sync}>${children}</div>
+    <div class=${`rail-body ${className ?? ''}`} ref=${bodyRef} onScroll=${sync}>${children}</div>
     <div class="rail"><div class="rail-thumb" /></div>
   </div>`;
 }
@@ -4609,6 +4815,10 @@ function RailScroll({ className, children }) {
 // blur/Enter — clamping on every keystroke fights mid-edit input (typing "3"
 // into a min-5 field would snap to 5 before the "0" for "30" arrives).
 // While focused, the text is authoritative; unfocused, it follows the prop.
+// A typed-but-unblurred edit also survives the enclosing modal closing under
+// it (Escape/scrim): commit runs on Escape (target-phase keydown fires before
+// the modal's window-level close handler) and once on unmount — commit()
+// no-ops when the value is unchanged.
 function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
   const [text, setText] = useState(String(value ?? ''));
   const [focused, setFocused] = useState(false);
@@ -4626,11 +4836,17 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     if (n !== value) onCommit(n);
     setText(String(n ?? ''));
   };
+  const commitRef = useRef(commit);
+  commitRef.current = commit; // the unmount cleanup always sees the live closure
+  useEffect(() => () => commitRef.current(), []);
   return html`<input type="number" min=${min} max=${max} step=${step} placeholder=${placeholder} value=${text}
     onFocus=${() => setFocused(true)}
     onInput=${(e) => setText(e.target.value)}
     onBlur=${() => { setFocused(false); commit(); }}
-    onKeyDown=${(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />`;
+    onKeyDown=${(e) => {
+      if (e.key === 'Enter') e.currentTarget.blur();
+      else if (e.key === 'Escape') commit();
+    }} />`;
 }
 
 // Text input with a model dropdown. The native <datalist> popup truncates
@@ -4642,6 +4858,7 @@ function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
   const wrapRef = useRef(null);
+  const inputRef = useRef(null);
   useEffect(() => {
     if (!open) return;
     const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
@@ -4651,9 +4868,11 @@ function ModelPicker({ value, models, placeholder, onChange }) {
   const all = models ?? [];
   const q = (value ?? '').toLowerCase();
   const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
-  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); };
+  // Blur after a pick so the mobile keyboard dismisses over the confirmed
+  // choice instead of staying up with the list already closed.
+  const pick = (m) => { onChange(m); setTyping(false); setOpen(false); inputRef.current?.blur(); };
   return html`<div class="mp-wrap" ref=${wrapRef}>
-    <input type="text" value=${value ?? ''} placeholder=${placeholder}
+    <input type="text" ref=${inputRef} value=${value ?? ''} placeholder=${placeholder}
       onFocus=${() => { setTyping(false); if (all.length) setOpen(true); }}
       onInput=${(e) => { setTyping(true); setOpen(true); onChange(e.target.value); }}
       onKeyDown=${(e) => {
@@ -4838,8 +5057,11 @@ function LorePieceCard({ piece, allPieces, onChange, onRemove, onGenerate, onGen
 }
 
 // One past version of a tool-updated piece (update_character): collapsed to a
-// stamped one-liner, expands to that version's full card text + keys.
-function RevisionRow({ rev, n }) {
+// stamped one-liner, expands to that version's full card text + keys. An
+// expanded row offers "restore into draft" — the version's content/keys are
+// copied into the editor draft via the shared set() (dirty flag included), so
+// the change-history loop closes through the normal Save flow.
+function RevisionRow({ rev, n, onRestore = null }) {
   const [open, setOpen] = useState(false);
   const stamp = rev.createdAt ? new Date(rev.createdAt).toLocaleString() : 'original';
   return html`
@@ -4850,7 +5072,11 @@ function RevisionRow({ rev, n }) {
         <span class="hint">${rev.atLen != null ? `msg ${rev.atLen} · ` : ''}${stamp}</span>
       </div>
       ${!open && html`<div class="ir-preview">${toPreview(rev.content, 140)}</div>`}
-      ${open && html`<div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
+      ${open && html`
+        <div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>
+        ${onRestore && html`<button class="btn small" style=${{ marginTop: '6px' }}
+          title="Copy this version's content and keys into the draft above — Save applies them"
+          onClick=${() => onRestore(rev)}>Restore into draft</button>`}`}
     </div>`;
 }
 
@@ -4888,7 +5114,8 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
           <span>Change history (${piece.revisions.length})</span>
           <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
-            <${RevisionRow} key=${i} rev=${r} n=${piece.revisions.length - i} />`)}
+            <${RevisionRow} key=${r.createdAt ?? 'orig'} rev=${r} n=${piece.revisions.length - i}
+              onRestore=${(rev) => set({ content: rev.content ?? '', keys: [...(rev.keys ?? [])] })} />`)}
         </div>`}
       ${genOpen && html`
         <${GeneratorModal} title=${`Generate — ${draft.title || 'lore piece'}`} busy=${genBusy} error=${genError}
@@ -4984,7 +5211,12 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
-      set(await onGenerate('scenario', promptText, draft));
+      const patch = await onGenerate('scenario', promptText, draft);
+      // Generated pieces merge into the draft by title — never a wholesale
+      // replace (the sanitizer already omits empty/missing arrays entirely).
+      if (Array.isArray(patch.lorePieces))
+        patch.lorePieces = mergeGenPieces(draft.lorePieces, patch.lorePieces);
+      set(patch);
       setGenOpen(false);
     } catch (e) { setGenError(e?.message ?? String(e)); }
     finally { setGenBusy(false); }
@@ -5283,6 +5515,15 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     </div>`;
 }
 
+// Grouping of the PROFILE_FIELDS allowlist (30-core) into the user-facing
+// buckets a profile Apply confirm names.
+const PROFILE_GROUPS = [
+  ['connection', ['endpoint', 'apiKey', 'auxEndpoint', 'auxApiKey', 'genEndpoint', 'genApiKey',
+    'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey']],
+  ['models', ['model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel']],
+  ['samplers', ['samplers', 'disabledSamplers', 'customSamplers']],
+];
+
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft, initialTab }) {
   const [draft, setDraft] = useState(() => {
@@ -5315,7 +5556,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
-  const lbCount = Object.keys(draft.logitBias ?? {}).length;
+  // Logit-bias edits land in LIVE settings during the detour (the stashed
+  // draft's map is pre-detour), so the count reads the live map first.
+  const lbCount = Object.keys(settings?.logitBias ?? draft.logitBias ?? {}).length;
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
@@ -5397,7 +5640,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   };
   const applySelectedProfile = () => {
     const p = profiles.find(x => x.id === profileSel);
-    if (p) set(applyProfile({}, p));
+    if (!p) return;
+    // Say up front which PROFILE_FIELDS groups actually move.
+    const changed = PROFILE_GROUPS.filter(([, keys]) =>
+      keys.some(k => JSON.stringify(draft[k]) !== JSON.stringify(p.fields?.[k]))).map(([g]) => g);
+    if (!confirm(changed.length
+      ? `Apply profile "${p.name}"? This changes: ${changed.join(', ')}.`
+      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`)) return;
+    set(applyProfile({}, p));
   };
   const deleteSelectedProfile = () => {
     const p = profiles.find(x => x.id === profileSel);
@@ -5710,7 +5960,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.')}
         ${section('Logit bias', html`
           <div>
-            <button class="btn small" onClick=${() => onOpenLogitBias(draft)}>Edit logit bias…</button>
+            <button class="btn small" onClick=${() => onOpenLogitBias(draft, tab)}>Edit logit bias…</button>
             <span class="hint" style=${{ marginLeft: '8px' }}>${lbCount} ${lbCount === 1 ? 'entry' : 'entries'}</span>
           </div>`)}`}
 
@@ -6049,7 +6299,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
     <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
       ${loreQueue.map(q => html`
         <${InspectorRow} key=${q.id}
-          pills=${[{ text: q.kind === 'memory' ? 'memory' : q.updateOf ? 'update' : q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
+          pills=${[{ text: queuePillOf(q), cls: '' }]}
           title=${q.title || '(untitled)'}
           preview=${toPreview(q.content, 140)}
           content=${`${q.note ? `[change] ${q.note}\n\n` : ''}${q.content ?? ''}${q.oldContent != null ? `\n\n[was] ${q.oldContent}` : ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
@@ -6183,9 +6433,24 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
 // COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
 // ============================================================================
 function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat, memoryEvery, cap }) {
+  const [hi, setHi] = useState(null); // card id flashed by a supersede-badge jump
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } }, { touch: false });
+  // Superseded badge → scroll to the replacement card and flash its border.
+  const jumpTo = (id) => {
+    setHi(id);
+    if (typeof document !== 'undefined')
+      document.getElementById(`mem-${id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  // Restore a superseded card: drop the supersede marks so the note shows
+  // again on branches where the supersede point had hidden it. The newer
+  // replacement card is untouched.
+  const restore = (m) => setStore(chat.memoryStore.memories.map(x => {
+    if (x.id !== m.id) return x;
+    const { supBy, supAtMsgs, supAtMsg, ...rest } = x;
+    return rest;
+  }));
   return html`
     <div>
       <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
@@ -6197,25 +6462,31 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
       </div>
       ${memories.length === 0 && html`<div class="hint">No memories yet. They are created automatically as the chat grows, and are versioned with the chat (branches fork them, rewinds roll them back).</div>`}
       ${memories.map(m => html`
-        <div class="mem-item" key=${m.id}>
+        <div class="mem-item ${hi === m.id ? 'hi' : ''}" key=${m.id} id=${`mem-${m.id}`}>
           <div class="row">
-            ${m.pinned && html`<span class="pill pinned">pinned</span>`}
-            ${m.supBy && html`<span class="pill" title="Revised by the lore pass — hidden from context on branches past the revision point; the original text is kept for rewind and older branches">superseded</span>`}
+            ${m.pinned && !m.supBy && html`<span class="pill pinned">pinned</span>`}
+            ${m.supBy && html`<span class="pill" role="button" style=${{ cursor: 'pointer' }}
+              title="Revised by the lore pass — hidden from context on branches past the revision point; the original text is kept for rewind and older branches. Click to jump to the replacement."
+              onClick=${() => jumpTo(m.supBy)}>superseded</span>`}
             <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt, dateFormat)}</span>
-            <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
-              ${m.pinned ? 'unpin' : 'pin'}</button>
+            ${!m.supBy && html`<button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
+              ${m.pinned ? 'unpin' : 'pin'}</button>`}
+            ${m.supBy && html`<button class="btn small" title="Clear the supersede marks — this note shows again where the revision had hidden it"
+              onClick=${() => restore(m)}>restore</button>`}
             <button class="btn small danger" title="Delete memory" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
           </div>
           <div class="text">${m.text}</div>
+          ${m.revNote && html`<div class="hint" style=${{ marginTop: '4px' }}
+            title="Change summary recorded by the maintenance pass">change: ${m.revNote}</div>`}
         </div>`)}
     </div>`;
 }
-
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
+  const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
   // Pieces are never deleted by rewind/regenerate — a piece stamped with a
@@ -6230,24 +6501,31 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   // Queue accept routing: new pieces become user-owned (provenance stripped,
   // visible on every branch); UPDATE proposals keep their stamps (a rewrite
   // must stay scoped to the branch that accepted it); memory revisions land
-  // as a fresh card superseding the stale one.
-  const acceptQueued = (q) => {
-    const path = getActivePath(chat.messages ?? {}, chat.activeLeafId);
+  // as a fresh card superseding the stale one. One pure step against a
+  // working chat so Accept all can fold the whole queue through it.
+  const acceptStep = (work, q) => {
+    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
     if (q.kind === 'memory')
-      return update(acceptQueuedMemory(chat, q.id, { atLen: path.length,
-        atMsg: chat.activeLeafId ?? null, cap: cap ?? MEMORY_CAP }));
+      return acceptQueuedMemory(work, q.id, { atLen: path.length,
+        atMsg: work.activeLeafId ?? null, cap: cap ?? MEMORY_CAP,
+        maxChars: memMaxChars ?? DEFAULT_SETTINGS.memoryMaxChars });
     if (q.updateOf) {
-      const view = allPieces
-        .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
-        .map(p => pieceAtPath(p, pathIds, chat.messages ?? null));
-      return update(acceptQueuedUpdate(chat, q.id, { allPieces: view,
-        nodeId: chat.activeLeafId ?? null, atLen: path.length,
-        createdSwipe: chat.messages?.[chat.activeLeafId]?.activeSwipe ?? null }));
+      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
+      const view = mergedLorePieces(scenario, work, characters)
+        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
+        .map(p => pieceAtPath(p, ids, work.messages ?? null));
+      return acceptQueuedUpdate(work, q.id, { allPieces: view,
+        nodeId: work.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
     }
-    update(acceptQueuedLore(chat, q.id));
+    return acceptQueuedLore(work, q.id);
   };
-  const queuePill = (q) => q.kind === 'memory' ? 'memory' : q.updateOf ? 'update'
-    : q.source === 'extract' ? 'extracted' : 'tool';
+  const acceptQueued = (q) => update(acceptStep(chat, q));
+  const acceptAll = () => update((chat.loreQueue ?? []).reduce(acceptStep, chat));
+  const dismissAll = () => {
+    if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
+      update({ ...chat, loreQueue: [] });
+  };
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
   const update = (c) => onUpdateChat(c, { touch: false });
@@ -6277,18 +6555,26 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
         <div class="field">
           <span>Suggested lore — awaiting review (${chat.loreQueue.length})</span>
           <div class="hint">Proposed by the model or the maintenance pass. Accept moves a new piece into this chat's lore as yours; an update rewrites the named piece for this chat only (the original card is kept, and rewind restores it); a memory revision replaces the stale note going forward. Dismiss discards the proposal.</div>
+          ${chat.loreQueue.length > 1 && html`
+            <div style=${{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+              <button class="btn small" title="Accept every pending proposal (same rules as accepting one by one)" onClick=${acceptAll}>Accept all</button>
+              <button class="btn small danger" title="Discard every pending proposal" onClick=${dismissAll}>Dismiss all</button>
+            </div>`}
           ${chat.loreQueue.map(q => html`
             <div class="lore-card" key=${q.id}>
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
-                <span class="pill">${queuePill(q)}</span>
+                <span class="pill">${queuePillOf(q)}</span>
                 <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
                 <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
               ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
-              <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>
-              ${q.oldContent != null && html`
-                <div class="hint" style=${{ padding: '0 8px 6px', whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>`}
+              ${q.oldContent != null ? html`
+                <div class="grid2" style=${{ padding: '2px 8px 6px' }}>
+                  <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>
+                  <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>now: ${q.content}</div>
+                </div>` : html`
+                <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>`}
               ${(q.keys ?? []).length > 0 && html`
                 <div class="hint" style=${{ padding: '0 8px 6px' }}>keys: ${q.keys.join(', ')}</div>`}
             </div>`)}
@@ -6319,18 +6605,34 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
             </div>
           </div>`)}
       </div>
-      <div style=${{ display: 'flex', gap: '6px' }}>
+      <div style=${{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
         ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
+        <button class="btn small" title="Change log of maintenance writes — piece updates, tool registrations, memory revisions"
+          onClick=${() => setHistOpen(true)}>Maintenance history</button>
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
       ${editing && html`
         <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
           onSave=${(draft) => {
-            setPieces(editing.isNew ? [...pieces, draft] : pieces.map(q => q.id === draft.id ? draft : q));
+            if (editing.isNew) { setPieces([...pieces, draft]); setEditing(null); return; }
+            // Merge-on-save: re-read the LIVE piece — a generation completing
+            // while the popout was open may have appended stamped revisions
+            // (tool update, lore pass, enrichment), and wholesale replacement
+            // would wipe a log that is never trimmed. The draft wins the
+            // editable fields; the live piece's revision log and provenance
+            // stamps survive. A piece deleted meanwhile drops the save.
+            const live = pieces.find(q => q.id === draft.id);
+            if (!live) { setEditing(null); return; }
+            const merged = { ...draft,
+              ...(live.revisions ? { revisions: live.revisions } : {}),
+              ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+                .filter(k => live[k] !== undefined).map(k => [k, live[k]])) };
+            setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}
           onClose=${() => setEditing(null)} onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`}
+      ${histOpen && html`<${MaintenanceHistoryModal} chat=${chat} dateFormat=${dateFormat} onClose=${() => setHistOpen(false)} />`}
     </div>`;
 }
 
@@ -6633,6 +6935,9 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const slots = imgs ? groupImageSlots(imgs, swipe.imgUsed).map(g => ({
     slot: g.slot, take: g.active, activeIdx: g.activeIdx, count: g.takes.length,
     hasPending: g.takes.some(t => t?.pending),
+    // Take URLs kept for the lightbox's preload-ahead (flipping takes must
+    // not flash the previous image while the next decodes).
+    takeUrls: g.takes.map(t => t?.src).filter(Boolean),
   })) : null;
   const canImgRegen = imagesEnabled && !!onImgRegen;
   const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
@@ -7076,6 +7381,7 @@ ${showNav && html`
       ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
         num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
+        takes=${lbSlot ? lbSlot.takeUrls : null}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,
@@ -7430,7 +7736,12 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
   // oldest first. Keyed on the messages map so identities stay stable across
-  // unrelated re-renders (MessageItem memo compares prop identities).
+  // unrelated re-renders (MessageItem memo compares prop identities). The map
+  // identity changes per streamed token, so kid arrays are cached: when every
+  // child node object is unchanged (only the streaming node gets a fresh
+  // identity per token) the previous array is reused, keeping branchKids
+  // identity stable for every unaffected parent.
+  const kidsCacheRef = useRef(new Map()); // parentId → last kids array
   const kidsByParent = useMemo(() => {
     const map = new Map();
     for (const n of Object.values(chat?.messages ?? {})) {
@@ -7438,19 +7749,35 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       if (!map.has(n.parentId)) map.set(n.parentId, []);
       map.get(n.parentId).push(n);
     }
-    for (const kids of map.values())
+    const prev = kidsCacheRef.current;
+    const cache = new Map();
+    for (const [pid, kids] of map) {
       kids.sort((a, b) => ((a.swipes?.[0]?.createdAt ?? 0) - (b.swipes?.[0]?.createdAt ?? 0)) || (a.id < b.id ? -1 : 1));
+      const old = prev.get(pid);
+      const stable = old && old.length === kids.length && kids.every((k, i) => k === old[i]) ? old : kids;
+      cache.set(pid, stable);
+      map.set(pid, stable);
+    }
+    kidsCacheRef.current = cache;
     return map;
   }, [chat?.messages]);
   // Memory pills: path position → count of memories stamped there (atLen), so
   // the message where an auto-summary fired shows it and can jump to the
-  // Memory tab. Rewind trims the store, so stale pills vanish on their own.
+  // Memory tab. Only cards visible on this path count — branch-hidden
+  // (off-path atMsg) and superseded (a supPointsOf point on path) ones hide
+  // by derivation; rewind never deletes them, so without the filter stale
+  // pills would linger.
   const memByLen = useMemo(() => {
     const m = new Map();
-    for (const mem of chat?.memoryStore?.memories ?? [])
-      if (Number.isFinite(mem?.atLen)) m.set(mem.atLen, (m.get(mem.atLen) ?? 0) + 1);
+    const pathIds = new Set(path.map(n => n.id));
+    for (const mem of chat?.memoryStore?.memories ?? []) {
+      if (!Number.isFinite(mem?.atLen)) continue;
+      if (mem.atMsg != null && !pathIds.has(mem.atMsg)) continue;
+      if (supPointsOf(mem).some(id => pathIds.has(id))) continue;
+      m.set(mem.atLen, (m.get(mem.atLen) ?? 0) + 1);
+    }
     return m;
-  }, [chat?.memoryStore]);
+  }, [chat?.memoryStore, path]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
   // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
   // unpin/re-pin themselves via the scroll listener.
@@ -7614,6 +7941,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   latestRef.current = { chat, generating, auxBusy };
   const onComposerSubmit = (text) => {
     const chatId = chat?.id;
+    const sentAt = Date.now();
     const res = onSubmitInput(text);
     if (res || !chatId) return res; // hint shown, draft kept by the Composer
     setTimeout(() => {
@@ -7621,9 +7949,15 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       const p = cur.chat ? getActivePath(cur.chat.messages, cur.chat.activeLeafId) : [];
       // Accepted = a generation/aux pass started, or the user message landed
       // in the tree (runGeneration can still bail after the append).
-      const appended = p[p.length - 1]?.role === 'assistant'
+      const leafNow = p[p.length - 1];
+      const appended = leafNow?.role === 'assistant'
         && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
-      if (cur.generating || cur.auxBusy.length || appended) return;
+      // /image appends only an assistant node whose swipe carries a pending
+      // image entry — no generation, no aux, no user text — accept that too.
+      const imgJob = leafNow?.role === 'assistant'
+        && (leafNow.swipes?.[leafNow.activeSwipe ?? 0]?.images ?? [])
+          .some(e => e && (e.pending || (e.at ?? 0) >= sentAt));
+      if (cur.generating || cur.auxBusy.length || appended || imgJob) return;
       draftsRef.current.set(chatId, text); // rejected — restore the draft
       if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
     }, 0);
@@ -7637,8 +7971,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     </div></div></div>`;
   const personaName = persona?.name?.trim() || 'User';
   const leaf = path[path.length - 1];
+  // Swipe is part of the match: suggestions fetched for one take must not
+  // render under another take of the same leaf (swiped mid-flight).
   const showSugg = !generating && leaf?.role === 'assistant'
-    && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id;
+    && suggestions?.chatId === chat.id && suggestions?.nodeId === leaf.id
+    && suggestions?.swipe === leaf.activeSwipe;
   // Impersonate chip: below the suggestion chips when those are on, the only
   // chip otherwise. Click-triggered only — no aux call until asked.
   // genElsewhere: a generation is running in ANOTHER chat — one at a time is
@@ -7784,6 +8121,8 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
   const chatMatches = chatQuery ? new Map(chatList.map(c => [c.id, matchFor(c)])) : null;
   const shownChats = chatQuery ? chatList.filter(c => chatMatches.get(c.id).hit) : pinnedChats;
   // Long-press (touch) → same context menu as right-click. Cancelled by movement.
+  // The rows' tool buttons stop pointerdown propagation (see .tools below), so
+  // a long hold on ✕/✎/⤓ never arms this timer — only the button click fires.
   const lp = useRef(null);
   const lpMenuRef = useRef(false); // menu just opened by long-press — swallow the follow-up click
   const lpStart = (e, id, onMenu = onChatContextMenu) => {
@@ -7839,7 +8178,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} />`}
               <span class="name">${s.name}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat from this scenario"
                     onClick=${(e) => { e.stopPropagation(); onNewChat(s.id); }}>✚</button>
@@ -7867,7 +8206,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
               ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} />`}
               <span class="name">${c.name}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="New chat with this character"
                     onClick=${(e) => { e.stopPropagation(); onNewCharacterChat(c.id); }}>✚</button>
@@ -7905,7 +8244,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               ${chatAvatarEl(c)}
               <span class="name">${c.name}${chatMatches?.get(c.id)?.excerpt
                 && html`<span class="chat-match">${chatMatches.get(c.id).excerpt}</span>`}</span>
-              <span class="tools">
+              <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
                   <button class="btn small ghost" title="Inspector"
                     onClick=${(e) => act(e, c.id, 'inspector')}>▦</button>
@@ -7986,6 +8325,40 @@ function RecapModal({ text, onSaveMemory, onClose }) {
 }
 
 // ============================================================================
+// COMPONENTS: MAINTENANCE HISTORY MODAL — per-chat change log assembled from
+// lore-piece revision notes (entries with `note`), tool registrations
+// (createdBy-stamped pieces), and memory revision notes (revNote). Read-only,
+// newest first. Opened from Chat options.
+// ============================================================================
+function MaintenanceHistoryModal({ chat, dateFormat, onClose }) {
+  const entries = [];
+  for (const p of (Array.isArray(chat?.lorePieces) ? chat.lorePieces : [])) {
+    if (p.createdBy)
+      entries.push({ at: p.createdAt ?? 0, kind: 'registration', title: p.title || '(untitled)', note: null });
+    for (const r of (p.revisions ?? []))
+      if (r.note) entries.push({ at: r.createdAt ?? 0, kind: 'piece update', title: p.title || '(untitled)', note: r.note });
+  }
+  for (const m of (chat?.memoryStore?.memories ?? []))
+    if (m?.revNote)
+      entries.push({ at: m.createdAt ?? 0, kind: 'memory revision', title: `memory ${String(m.id ?? '').slice(-6)}`, note: m.revNote });
+  entries.sort((a, b) => b.at - a.at);
+  return html`
+    <${Modal} title="Maintenance history" onClose=${onClose}>
+      ${entries.length === 0 && html`
+        <div class="hint">Nothing recorded yet — tool-registered characters, lore-piece updates, and memory revisions carrying a change note are listed here.</div>`}
+      ${entries.map((e, i) => html`
+        <div class="lore-item-row" key=${i}>
+          <div class="row">
+            <span class="pill">${e.kind}</span>
+            <span style=${{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>${e.title}</span>
+            <span class="hint">${fmtDate(e.at, dateFormat)}</span>
+          </div>
+          ${e.note && html`<div class="ir-content">${e.note}</div>`}
+        </div>`)}
+    <//>`;
+}
+
+// ============================================================================
 // COMPONENTS: CONTEXT MENU (chat rows — right-click / long-press)
 // ============================================================================
 function ContextMenu({ x, y, items, onClose }) {
@@ -8025,7 +8398,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -8038,13 +8411,13 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -8056,7 +8429,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
     <//>`;
 }
 
@@ -8070,7 +8443,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -8087,7 +8460,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -8204,7 +8577,9 @@ function extractGenJSON(out) {
   } catch { return null; }
 }
 
-const GEN_NAME_MAX = 100;
+// Aligned with TOOL_NAME_MAX (60) — the speaker-attribution cap: a longer
+// generated name could never be detected as a `Name:` prefix.
+const GEN_NAME_MAX = TOOL_NAME_MAX;
 const GEN_META_MAX = 300;   // description
 const GEN_FIELD_MAX = 8000; // scenarioInstructions / backstory / greeting / card content
 const GEN_PIECE_CAP = 20;   // lore pieces per generated scenario
@@ -8228,7 +8603,9 @@ const sanitizeGenPiece = (p) => ({
 });
 
 // Only fields present (and non-empty) in the model's reply land in the patch;
-// everything else keeps the draft's current value.
+// everything else keeps the draft's current value. Arrays follow the same
+// no-wipe rule as strings: an empty array never enters the patch, so a thin
+// reply can't clear the draft's tags or lore pieces.
 function sanitizeScenarioGen(obj) {
   const patch = {};
   for (const [key, max] of [['name', GEN_NAME_MAX], ['description', GEN_META_MAX],
@@ -8236,13 +8613,34 @@ function sanitizeScenarioGen(obj) {
     const s = genStr(obj[key], max);
     if (s) patch[key] = s;
   }
-  if (Array.isArray(obj.tags))
-    patch.tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
-  if (Array.isArray(obj.lorePieces))
-    patch.lorePieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
+  if (Array.isArray(obj.tags)) {
+    const tags = obj.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 10);
+    if (tags.length) patch.tags = tags;
+  }
+  if (Array.isArray(obj.lorePieces)) {
+    const pieces = obj.lorePieces.slice(0, GEN_PIECE_CAP)
       .map(p => ({ ...newLorePiece(), ...sanitizeGenPiece(p) })) // fresh id + flag defaults
       .filter(p => p.title && p.content);
+    // The editor merges these into its draft BY TITLE (mergeGenPieces) —
+    // never a wholesale replace, so a partial reply can't wipe pieces.
+    if (pieces.length) patch.lorePieces = pieces;
+  }
   return patch;
+}
+
+// Merge generated pieces into the draft's BY TITLE (case-insensitive): a
+// title match updates that piece's content/keys in place (id, flags and
+// editor-only fields survive), new titles append.
+function mergeGenPieces(current, generated) {
+  const out = [...(current ?? [])];
+  const idx = new Map(out.map((p, i) => [String(p.title ?? '').trim().toLowerCase(), i]));
+  for (const g of generated ?? []) {
+    const t = String(g.title ?? '').trim().toLowerCase();
+    const i = idx.get(t);
+    if (i == null) { idx.set(t, out.length); out.push(g); }
+    else out[i] = { ...out[i], content: g.content, keys: g.keys };
+  }
+  return out;
 }
 
 // Single lore piece (✦ on a scenario-editor card or the chat piece editor
@@ -8253,7 +8651,7 @@ function sanitizePieceGen(obj) {
   const patch = {};
   if (p.title) patch.title = p.title;
   if (p.content) patch.content = p.content;
-  if (Array.isArray(obj?.keys)) patch.keys = p.keys;
+  if (Array.isArray(obj?.keys) && p.keys.length) patch.keys = p.keys; // no-wipe rule for arrays too
   if (typeof obj?.pinned === 'boolean') patch.pinned = p.pinned;
   if (obj?.type === 'character' || obj?.type === 'lore') patch.type = p.type;
   return patch;
@@ -8265,7 +8663,7 @@ function sanitizeCharacterGen(obj) {
     const s = genStr(obj[key], max);
     if (s) patch[key] = s;
   }
-  if (Array.isArray(obj.keys)) patch.keys = genKeys(obj.keys);
+  if (Array.isArray(obj.keys) && genKeys(obj.keys).length) patch.keys = genKeys(obj.keys);
   // Optional speaker-name colour override — hex only, anything else dropped.
   const col = String(obj.color ?? '').trim();
   if (/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(col)) patch.color = col.toLowerCase();
@@ -8321,8 +8719,13 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // take change updates the view in place. The footer's Save button downloads
 // the shown image (the live take on a slot, full-res for avatar expansions) —
 // this is also the touch path, since phones have no right-click. `num` is the
-// 1-based take number, so multi-take saves get a filename suffix.
-function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0 }) {
+// 1-based take number, so multi-take saves get a filename suffix. `takes`
+// (optional, the slot's take URLs) preloads the other takes so ←/→ flipping
+// doesn't show the previous image while the next one decodes.
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null }) {
+  useEffect(() => {
+    for (const u of takes ?? []) if (u && u !== src) { const im = new Image(); im.src = u; }
+  }, [takes, src]);
   useEffect(() => {
     if (!onPrev && !onNext) return;
     const onKey = (e) => {
@@ -8455,10 +8858,12 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
   // full copy is unchanged, only the 256² thumb is rewritten.
   const [cropImg, setCropImg] = useState(null); // { img, full } | null
   const [genBusy, setGenBusy] = useState(false); // ✦ generation in flight
+  const [error, setError] = useState(null); // inline failure note (recrop of a corrupt stored image)
   // Character/scenario/persona drafts carry `name`; a character-type lore
   // piece's display name is its `title`.
   const draftName = draft.name ?? draft.title ?? '';
   const upload = async () => {
+    setError(null);
     const file = await pickFile('image/*');
     if (!file) return;
     try {
@@ -8475,8 +8880,12 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
     } catch (e) { console.warn('avatar: could not decode image file', e); }
   };
   const recrop = () => {
+    setError(null);
     const img = new Image();
     img.onload = () => setCropImg({ img, full: null });
+    // A corrupt stored data URL otherwise makes the Crop button silently dead
+    // — surface it inline like the editor's other .warn errors.
+    img.onerror = () => setError('Could not reload the stored avatar image — it may be corrupted. Upload a new one instead.');
     img.src = draft.avatarFull || draft.avatar; // re-crop from the full copy when one exists
   };
   // ✦: hand the host the live draft (a character card's .content; otherwise
@@ -8506,6 +8915,7 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
           onClick=${generate}>${genBusy ? '…' : '✦'}</button>`}
         ${draft.avatar && html`<button class="btn small" onClick=${() => set({ avatar: '', avatarFull: '' })}>Clear</button>`}
       </div>
+      ${error && html`<div class="warn">${error}</div>`}
     </div>
     ${cropImg && html`<${ImageCropper} img=${cropImg.img} onClose=${() => setCropImg(null)}
       onDone=${(dataURL) => { set(cropImg.full == null ? { avatar: dataURL } : { avatar: dataURL, avatarFull: cropImg.full }); setCropImg(null); }} />`}
@@ -9066,10 +9476,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const idb = new IndexedDBAdapter();
     await idb.init();
     const srv = new ServerDBAdapter(ref.current.settings.serverToken ?? '');
+    await srv.init(); // capability probe + images map — persistEntity needs both
     let n = 0;
     for (const store of STORES)
       for (const [key, data] of Object.entries(idb.getAll(store))) {
-        await srv.remoteSave(store, key, data);
+        // persistEntity (the normal save path), not raw remoteSave: images
+        // extract out-of-band on capable servers, so an image-heavy chat
+        // doesn't stay inline (and can't hit the body cap mid-loop).
+        await srv.persistEntity(store, key, data);
         n++;
       }
     return n;
@@ -9109,7 +9523,15 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     if (!recent.trim()) return null;
     const maxChars = st.memoryMaxChars ?? 5000;
-    const priorTexts = (chatObj.memoryStore?.memories ?? []).slice(-MEM_PRIOR_MAX).map(m => m.text);
+    // Priors context: branch-visible, non-superseded cards only (the lore
+    // pass's predicates) — a superseded or off-branch card must not suppress
+    // re-recording the corrected fact.
+    const pathIds = new Set(path.map(n => n.id));
+    const priorTexts = (chatObj.memoryStore?.memories ?? [])
+      .filter(m => m && (m.text ?? '').trim()
+        && !(m.atMsg != null && !pathIds.has(m.atMsg))
+        && !supPointsOf(m).some(id => pathIds.has(id)))
+      .slice(-MEM_PRIOR_MAX).map(m => m.text);
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
       ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
@@ -9135,10 +9557,11 @@ function Main({ storage, storageKind, storageFailed }) {
       if (text) {
         // Merge-on-write: the chat may have changed (or been deleted) during
         // the aux call — re-read it and overwrite only memoryStore.
+        // touch:false — a background pass must not re-sort the sidebar.
         const cur = ref.current.chats[chatObj.id];
         if (cur)
           saveChat({ ...cur, memoryStore: { ...pushMemory(cur, text),
-            cursor: getActivePath(cur.messages, cur.activeLeafId).length } });
+            cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
       }
     } catch (e) {
       // Degrade like lore extraction: warn and advance the cursor — a failing
@@ -9147,7 +9570,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[chatObj.id];
       if (cur)
         saveChat({ ...cur, memoryStore: { ...(cur.memoryStore ?? { memories: [], cursor: 0 }),
-          cursor: getActivePath(cur.messages, cur.activeLeafId).length } });
+          cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
     } finally {
       setSummarizing(false);
     }
@@ -9159,157 +9582,197 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- emergent lore maintenance ----
-  // On the memory cadence, an aux pass reviews the chat's whole knowledge
-  // state against the recent conversation and can: propose NEW lore pieces,
-  // UPDATE existing pieces (any layer — scenario/global targets are shadowed
-  // into the chat overlay, the update lands as a stamped revision), and
-  // REVISE stale memory notes (supersede: fresh stamped card, old card marked
-  // hidden from this point on this branch — derivation, never deletion).
+  // On the memory cadence (or on demand from Chat options, force=true), an
+  // aux pass reviews the chat's whole knowledge state against the recent
+  // conversation and can: propose NEW lore pieces, UPDATE existing pieces
+  // (any layer — scenario/global targets are shadowed into the chat overlay,
+  // the update lands as a stamped revision), and REVISE stale memory notes
+  // (supersede: fresh stamped card, old card marked hidden from this point on
+  // this branch — derivation, never deletion).
   // 'queue' mode (default): everything waits for review in Chat options.
-  // 'auto': applied straight away. 'off': nothing.
+  // 'auto': applied straight away — except updates to pieces the digest could
+  // only show truncated, which drop to the queue for human review. 'off': nothing.
   // Failures degrade silently (console.warn) and the cursor still advances.
   // Prompt budgets for the maintenance pass: per-piece content truncation and
   // the total lore digest cap (chat-local pieces are kept over scenario ones).
   const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
-  async function maybeExtractLore(chatObj) {
-    const { scenarios: sc, personas: pe, settings: st } = ref.current;
-    const scen = sc[chatObj.scenarioId];
-    const mode = scen?.emergentLore ?? 'queue';
-    const conn = roleApi(st, 'aux');
-    if (mode === 'off' || !conn.endpoint) return;
-    const model = st.auxModel || st.model;
-    if (!model) return;
-    const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const pathLen = path.length;
-    const every = st.memoryEvery ?? MEMORY_EVERY;
-    if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
+  // Appended to a truncated digest entry so the pass knows it saw only the
+  // head of the piece (prompt text — stays dash-free).
+  const PASS_TRUNC_NOTE = '\n[…truncated; propose updates for this piece only if the change falls within the visible portion]';
+  async function maybeExtractLore(chatObj, force = false) {
     // Merge-on-write: re-read the chat at save time (a generation may have
     // advanced it during the aux call) and apply the lore changes to the
     // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
-    // are overwritten. Chat deleted mid-call → drop the write.
+    // are overwritten. Chat deleted mid-call → drop the write. The cursor is
+    // derived from the live re-read chat (summarizeNow's rule), not the
+    // pre-call snapshot. touch:false — a background pass must not re-sort
+    // the sidebar.
     const advance = (fn) => {
       const cur = ref.current.chats[chatObj.id];
-      if (cur) saveChat({ ...fn(cur), emergentCursor: pathLen });
+      if (cur) saveChat({ ...fn(cur), emergentCursor: getActivePath(cur.messages, cur.activeLeafId).length }, { touch: false });
     };
-    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
-    const recent = path.slice(-every)
-      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
-      .join('\n\n');
-    if (!recent.trim()) return;
-    const pathIds = new Set(path.map(n => n.id));
-    // Branch-current lore view: off-branch pieces are hidden and each piece
-    // is derived at its last on-view revision — a chat-shadowed card feeds
-    // the CHAT revision into the pass (and back out as the update base), so
-    // the stale scenario/global original is never seen or clobbered.
-    const loreView = (c) => {
-      const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
-      return mergedLorePieces(scen, c, ref.current.characters)
-        .filter(p => pieceVisibleAt(p, ids, c.messages))
-        .map(p => pieceAtPath(p, ids, c.messages));
-    };
-    const view = loreView(chatObj);
-    // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
-    // static scenario pieces before chat-owned ones.
-    const loreLines = [];
-    let loreChars = 0;
-    for (const p of [...view].reverse()) {
-      const content = String(p?.content ?? '').trim();
-      if (!(p?.title ?? '').trim() || !content) continue;
-      const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
-        + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`;
-      if (loreChars + entry.length > PASS_LORE_CHARS) continue;
-      loreLines.unshift(entry); loreChars += entry.length;
-    }
-    // Memory digest (ids included so the pass can target revisions): visible
-    // cards only — off-branch and already-superseded ones are out of scope.
-    const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
-      && !(m.atMsg != null && !pathIds.has(m.atMsg))
-      && !(m.supAtMsg != null && pathIds.has(m.supAtMsg)));
-    const memLines = [];
-    let memChars = 0;
-    for (const m of [...memVisible].reverse()) {
-      const line = `- [${m.id}] ${m.text}`;
-      if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
-      memLines.unshift(line); memChars += line.length;
-    }
+    // Fire-and-forget at the call site: guard the WHOLE body (the digest
+    // build runs aux-free but touches plenty of derivations) so nothing can
+    // reject unhandled — summarizeNow's pattern.
     try {
-      const out = await auxLogged('lore-extract', {
-        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
-        system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
-          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
-        user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
-          + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
-          + `Recent conversation:\n\n${recent}\n\nJSON object:`,
-        maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
-      }, chatObj.id);
-      const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
-      const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
-      const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-      const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
-      const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
-      const maxNew = Math.max(1, st.loreExtractMax ?? 5);
-      const freshOk = fresh
-        .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
-        .slice(0, maxNew);
-      // Updates must name a known piece and actually change its current text.
-      const updatesOk = updates
-        .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
-        .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
-          && u.content !== String(u.target.content ?? '').trim())
-        .slice(0, maxNew);
-      // Memory revisions must name a visible card and change its text.
-      const memsOk = memoryUpdates
-        .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
-        .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
-        .slice(0, PASS_MEM_CAP);
-      if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
-      const now = Date.now();
-      const stamps = () => {
-        const cur = ref.current.chats[chatObj.id];
-        const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
-        return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
-          createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+      const { scenarios: sc, personas: pe, settings: st } = ref.current;
+      const scen = sc[chatObj.scenarioId];
+      const mode = scen?.emergentLore ?? 'queue';
+      const conn = roleApi(st, 'aux');
+      if (mode === 'off' || !conn.endpoint) return;
+      const model = st.auxModel || st.model;
+      if (!model) return;
+      const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
+      const pathLen = path.length;
+      const every = st.memoryEvery ?? MEMORY_EVERY;
+      if (!force && pathLen - (chatObj.emergentCursor ?? 0) < every) return;
+      const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+      const recent = path.slice(-every)
+        .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+        .join('\n\n');
+      if (!recent.trim()) return;
+      const pathIds = new Set(path.map(n => n.id));
+      // Branch-current lore view: off-branch pieces are hidden and each piece
+      // is derived at its last on-view revision — a chat-shadowed card feeds
+      // the CHAT revision into the pass (and back out as the update base), so
+      // the stale scenario/global original is never seen or clobbered.
+      const loreView = (c) => {
+        const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
+        return mergedLorePieces(scen, c, ref.current.characters)
+          .filter(p => pieceVisibleAt(p, ids, c.messages))
+          .map(p => pieceAtPath(p, ids, c.messages));
       };
-      advance((cur) => {
-        let work = cur;
-        if (mode === 'auto') {
-          // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
-          // stay scoped to the branch they were made on — derivation replaces
-          // the old atLen rewind cutoff.
-          const { now: n2, ...st2 } = stamps();
-          if (freshOk.length)
-            work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
-              { now: n2, ...st2 }, loreView(work)).chat;
-          for (const u of updatesOk) {
-            const call = u.target.type === 'character'
-              ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
-              : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
-            work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
+      const view = loreView(chatObj);
+      // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
+      // static scenario pieces before chat-owned ones.
+      const loreLines = [];
+      let loreChars = 0;
+      for (const p of [...view].reverse()) {
+        const content = String(p?.content ?? '').trim();
+        if (!(p?.title ?? '').trim() || !content) continue;
+        const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
+          + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`
+          + (content.length > PASS_PIECE_CHARS ? PASS_TRUNC_NOTE : '');
+        if (loreChars + entry.length > PASS_LORE_CHARS) continue;
+        loreLines.unshift(entry); loreChars += entry.length;
+      }
+      // Memory digest (ids included so the pass can target revisions): visible
+      // cards only — off-branch and already-superseded ones are out of scope.
+      const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
+        && !(m.atMsg != null && !pathIds.has(m.atMsg))
+        && !supPointsOf(m).some(id => pathIds.has(id)));
+      const memLines = [];
+      let memChars = 0;
+      for (const m of [...memVisible].reverse()) {
+        const line = `- [${m.id}] ${m.text}`;
+        if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
+        memLines.unshift(line); memChars += line.length;
+      }
+      try {
+        const out = await auxLogged('lore-extract', {
+          endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
+          system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
+            .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
+          user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
+            + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
+            + `Recent conversation:\n\n${recent}\n\nJSON object:`,
+          maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
+        }, chatObj.id);
+        const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
+        const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
+        const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+        const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
+        const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+        const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+        const freshOk = fresh
+          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+          .slice(0, maxNew);
+        // Updates must name a known piece and actually change its current text.
+        const updatesOk = updates
+          .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
+          .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
+            && u.content !== String(u.target.content ?? '').trim())
+          .slice(0, maxNew);
+        // Memory revisions must name a visible card and change its text.
+        // Dedupe by id first (keep last) — two entries for one card in a
+        // single pass would supersede it twice.
+        const memsOk = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
+          .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
+          .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+          .slice(0, PASS_MEM_CAP);
+        if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+        const now = Date.now();
+        const stamps = () => {
+          const cur = ref.current.chats[chatObj.id];
+          const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
+          return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
+            createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+        };
+        advance((cur) => {
+          let work = cur;
+          if (mode === 'auto') {
+            // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
+            // stay scoped to the branch they were made on — derivation replaces
+            // the old atLen rewind cutoff.
+            const { now: n2, ...st2 } = stamps();
+            if (freshOk.length)
+              work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
+                { now: n2, ...st2 }, loreView(work)).chat;
+            for (const u of updatesOk) {
+              // Over-long piece: the digest showed only its head, so a
+              // full-text rewrite built from that view would silently replace
+              // the unseen tail. Route this one update to the review queue
+              // even in auto mode.
+              if (String(u.target.content ?? '').length > PASS_PIECE_CHARS) {
+                work = queueLorePiece(work, { title: u.target.title, content: u.content,
+                  keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+                  updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+                  source: 'extract', atLen: st2.atLen });
+                continue;
+              }
+              const call = u.target.type === 'character'
+                ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
+                : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
+              work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
+            }
+            const maxChars = st.memoryMaxChars ?? 5000;
+            for (const u of memsOk)
+              if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
+                work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+          } else {
+            for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+            for (const u of updatesOk)
+              work = queueLorePiece(work, { title: u.target.title, content: u.content,
+                keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+                updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+                source: 'extract', atLen: pathLen });
+            for (const u of memsOk)
+              work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
+                content: u.text, note: u.note, memoryId: u.id,
+                oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
           }
-          const maxChars = st.memoryMaxChars ?? 5000;
-          for (const u of memsOk)
-            if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
-              work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
-        } else {
-          for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
-          for (const u of updatesOk)
-            work = queueLorePiece(work, { title: u.target.title, content: u.content,
-              keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
-              updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
-              source: 'extract', atLen: pathLen });
-          for (const u of memsOk)
-            work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
-              content: u.text, note: u.note, memoryId: u.id,
-              oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
-        }
-        return work;
-      });
+          return work;
+        });
+      } catch (e) {
+        console.warn('Emergent lore extraction failed:', e);
+        advance((c) => c);
+      }
     } catch (e) {
+      // Pre-aux failure (digest build, path derivation): same degrade rule.
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
     }
   }
+
+  // "Run maintenance now" (Chat options): the cadence-gated lore pass, fired
+  // on demand (force skips the interval check, not the mode/endpoint gates).
+  // No-op while a generation or any aux call is busy — the pass rides
+  // auxLogged, so it shows in the composer's busy state like any aux call.
+  const onRunMaintenance = (c) => {
+    if (!c || genRef.current || auxBusy.length) return;
+    maybeExtractLore(c, true);
+  };
 
   // ---- character enrichment (experimental, settings.toolsEnrich) ----
   // Newly tool-registered characters get fleshed out by the ✦ generator
@@ -9427,9 +9890,17 @@ function Main({ storage, storageKind, storageFailed }) {
       // start-of-generation snapshot and would silently revert this write on
       // the next token (the rule regenImage/swipeImage/onEdit refuse on).
       // The image result is already in hand and the merge below re-reads
-      // ref.current, so waiting out the stream costs nothing.
-      while (genRef.current?.chatId === chatId)
+      // ref.current, so waiting out the stream costs nothing. Capped: if the
+      // generation's finally ever wedges, warn and patch anyway (the merge is
+      // safe) rather than park the completed image forever.
+      const deferDeadline = Date.now() + 10 * 60 * 1000;
+      while (genRef.current?.chatId === chatId) {
+        if (Date.now() > deferDeadline) {
+          console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
+          break;
+        }
         await new Promise(r => setTimeout(r, 250));
+      }
       const cur = ref.current.chats[chatId];
       const node = cur?.messages?.[nodeId];
       const swipe = node?.swipes?.[swipeIdx];
@@ -9796,9 +10267,12 @@ function Main({ storage, storageKind, storageFailed }) {
     let stopList = st.stopStrings;
     // Usage reporting (stream_options.include_usage): a backend that 400s the
     // unknown field gets one silent retry without it, like the stop retry.
+    // Each retry has its own flag — a backend that 400s BOTH unknown fields
+    // gets both degradations in sequence.
     let wantUsage = true;
+    let stopRetried = false;
     try {
-      for (let attempt = 0; ; attempt++) {
+      for (;;) {
         try {
           for await (const chunk of openaiChatStream({
             endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
@@ -9837,9 +10311,10 @@ function Main({ storage, storageKind, storageFailed }) {
             wantUsage = false;
             continue;
           }
-          if (attempt === 0 && !acc && e?.status === 400 && /stop/i.test(e?.message ?? '')
+          if (!stopRetried && !acc && e?.status === 400 && /stop/i.test(e?.message ?? '')
               && Array.isArray(stopList) && stopList.length > 4) {
             console.warn(`FictionPad: backend rejected ${stopList.length} stop strings — retrying with the first 4.`);
+            stopRetried = true;
             stopList = stopList.slice(0, 4);
             continue;
           }
@@ -10129,10 +10604,10 @@ function Main({ storage, storageKind, storageFailed }) {
         .map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim())
         .filter(l => l.length > 0 && l.split(/\s+/).length <= Math.ceil(words * 1.5) && !/^\d+$/.test(l) && !/:$/.test(l))
         .slice(0, count);
-      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId)
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId && s?.swipe === key.swipe)
         ? (items.length ? { ...key, loading: false, items } : null) : s);
     } catch {
-      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId) ? null : s);
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId && s?.swipe === key.swipe) ? null : s);
     }
   }
 
@@ -11026,6 +11501,7 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
+        onRunMaintenance=${() => chat && onRunMaintenance(chat)} memMaxChars=${settings.memoryMaxChars ?? 5000}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
@@ -11067,6 +11543,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modal?.kind === 'settings' && html`
       <${ErrorBoundary} name="settings"><${SettingsModal} settings=${settings} theme=${theme} onThemeChange=${setTheme}
         accent=${accent} onAccentChange=${setAccent} initialDraft=${settingsDraft}
+        initialTab=${settingsDraft ? 'generation' : undefined}
         onOpenLogitBias=${(draft) => { setSettingsDraft(draft ?? null); setModal({ kind: 'logitBias' }); }}
         storageKind=${storageKind} onUpload=${migrateUpload} onDownload=${migrateDownload}
         onExportAll=${onExportAll} onImportAll=${onImportAll} onServerBackup=${onServerBackup}
@@ -11106,6 +11583,7 @@ function Main({ storage, storageKind, storageFailed }) {
         settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
+        onRunMaintenance=${() => onRunMaintenance(chats[modal.chatId])} memMaxChars=${settings.memoryMaxChars ?? 5000}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}

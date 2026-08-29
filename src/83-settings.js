@@ -178,6 +178,15 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     </div>`;
 }
 
+// Grouping of the PROFILE_FIELDS allowlist (30-core) into the user-facing
+// buckets a profile Apply confirm names.
+const PROFILE_GROUPS = [
+  ['connection', ['endpoint', 'apiKey', 'auxEndpoint', 'auxApiKey', 'genEndpoint', 'genApiKey',
+    'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey']],
+  ['models', ['model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel']],
+  ['samplers', ['samplers', 'disabledSamplers', 'customSamplers']],
+];
+
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
                         storageKind, onUpload, onDownload, onExportAll, onImportAll, onServerBackup, initialDraft, initialTab }) {
   const [draft, setDraft] = useState(() => {
@@ -210,7 +219,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
   const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
-  const lbCount = Object.keys(draft.logitBias ?? {}).length;
+  // Logit-bias edits land in LIVE settings during the detour (the stashed
+  // draft's map is pre-detour), so the count reads the live map first.
+  const lbCount = Object.keys(settings?.logitBias ?? draft.logitBias ?? {}).length;
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
@@ -292,7 +303,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   };
   const applySelectedProfile = () => {
     const p = profiles.find(x => x.id === profileSel);
-    if (p) set(applyProfile({}, p));
+    if (!p) return;
+    // Say up front which PROFILE_FIELDS groups actually move.
+    const changed = PROFILE_GROUPS.filter(([, keys]) =>
+      keys.some(k => JSON.stringify(draft[k]) !== JSON.stringify(p.fields?.[k]))).map(([g]) => g);
+    if (!confirm(changed.length
+      ? `Apply profile "${p.name}"? This changes: ${changed.join(', ')}.`
+      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`)) return;
+    set(applyProfile({}, p));
   };
   const deleteSelectedProfile = () => {
     const p = profiles.find(x => x.id === profileSel);
@@ -605,7 +623,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'Chars/token drives estimated counts when /tokenize is unavailable — budgets, inspector "(est)" numbers, and the lore scan window all follow it. Search depth is the default scan window for keyword triggers (per-piece depth still wins); link boost is the weight an active piece lends its links.')}
         ${section('Logit bias', html`
           <div>
-            <button class="btn small" onClick=${() => onOpenLogitBias(draft)}>Edit logit bias…</button>
+            <button class="btn small" onClick=${() => onOpenLogitBias(draft, tab)}>Edit logit bias…</button>
             <span class="hint" style=${{ marginLeft: '8px' }}>${lbCount} ${lbCount === 1 ? 'entry' : 'entries'}</span>
           </div>`)}`}
 

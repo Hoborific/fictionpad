@@ -11,6 +11,15 @@ const html = readFileSync(new URL('../fictionpad.html', import.meta.url), 'utf8'
 const match = html.match(/\/\/ === PURE CORE START ===([\s\S]*?)\/\/ === PURE CORE END ===/);
 if (!match) throw new Error('PURE CORE markers not found in fictionpad.html');
 
+// Freshness guard: the suite evals the GENERATED file — a src edit without a
+// reassemble would silently test stale code. Compare the core region in
+// src/30-core.js against the assembled one and fail fast on drift.
+const coreFrag = readFileSync(new URL('../src/30-core.js', import.meta.url), 'utf8');
+const fragMatch = coreFrag.match(/\/\/ === PURE CORE START ===([\s\S]*?)\/\/ === PURE CORE END ===/);
+if (!fragMatch) throw new Error('PURE CORE markers not found in src/30-core.js');
+if (fragMatch[1] !== match[1])
+  throw new Error('src/30-core.js PURE CORE region differs from fictionpad.html — run node vendor.mjs to reassemble.');
+
 const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
@@ -19,10 +28,10 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
-  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
+  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize, comfyHistoryResult,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
-  supersedeMemory, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams,
+  supersedeMemory, supPointsOf, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
@@ -36,22 +45,24 @@ const {
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
-  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
+  healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize, comfyHistoryResult,
   resolveLimits, autoReserve,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
-  supersedeMemory, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams,
+  supersedeMemory, supPointsOf, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
   PROFILE_FIELDS, profileFromSettings, applyProfile,
 } = core;
 
-// detectSpeaker lives in src/20-prose.js, outside the pure-core region —
-// extract its (dependency-free) function source from fictionpad.html and
-// eval it standalone.
-const speakerMatch = html.match(/function detectSpeaker\([\s\S]*?\n\}/);
-if (!speakerMatch) throw new Error('detectSpeaker not found in fictionpad.html');
-const detectSpeaker = new Function(`${speakerMatch[0]}\nreturn detectSpeaker;`)();
+// Prose helpers live in src/20-prose.js, outside the pure-core region, but
+// are DOM-free — eval the fragment standalone like the core region above.
+// characterNamesOf references core's mergedLorePieces; stubbed here (the lore
+// overlay sections cover the real one).
+const proseSrc = readFileSync(new URL('../src/20-prose.js', import.meta.url), 'utf8');
+const { wrapDialogue, autoCloseProse, detectSpeaker, stripSpeakerPrefix } =
+  new Function('mergedLorePieces',
+    `${proseSrc}\nreturn { wrapDialogue, autoCloseProse, detectSpeaker, stripSpeakerPrefix };`)(() => []);
 
 // ---- tiny test runner ----
 let failures = 0;
@@ -2044,7 +2055,8 @@ section('supersedeMemory');
   ok(store.memories.length === 2, 'supersede keeps the old card and appends the revision');
   const oldC = store.memories.find(m => m.id === oldId);
   const newC = store.memories.find(m => m.id !== oldId);
-  ok(oldC.supBy === newC.id && oldC.supAtMsg === 'n2', 'old card marked with supersede point + replacement link');
+  ok(oldC.supBy === newC.id && oldC.supAtMsgs?.join() === 'n2' && oldC.supAtMsg === undefined,
+    'old card marked with a supersede-point list + latest-replacement link');
   ok(newC.text === 'Mia trusts Ari now' && newC.atMsg === 'n2' && newC.atLen === 5,
     'revision card stamped like a fresh memory');
   // cap eviction still applies across the appended card
@@ -2052,6 +2064,28 @@ section('supersedeMemory');
   for (let i = 0; i < MEMORY_CAP; i++) full = addMemory(full, `m${i}`, i);
   full = supersedeMemory(full, full.memories[0].id, 'revised', 9999, MEMORY_CAP, MEMORY_CAP + 1, 'nx');
   ok(full.memories.length === MEMORY_CAP, 'supersede respects the memory cap');
+  // pin transfer: the replacement inherits the pin, the original unpins
+  let pinStore = { memories: [{ id: 'mp', text: 'pinned note', pinned: true, createdAt: 1, atMsg: 'n1' }], cursor: 0 };
+  pinStore = supersedeMemory(pinStore, 'mp', 'pinned note v2', 200, MEMORY_CAP, 5, 'n2');
+  ok(pinStore.memories.find(m => m.id === 'mp').pinned === false
+    && pinStore.memories.find(m => m.text === 'pinned note v2').pinned === true,
+    'pin transfers to the revision, the superseded original unpins');
+  // unknown id: no-op, identity return
+  ok(supersedeMemory(pinStore, 'missing', 'x', 300) === pinStore, 'unknown memory id is a no-op');
+  // eviction preference: a non-superseded card goes before the superseded original
+  let ev = { memories: [], cursor: 0 };
+  ev = addMemory(ev, 'victim', 1, 3, 1, 'n1');
+  ev = addMemory(ev, 'keep-me-stale', 2, 3, 1, 'n1');
+  ev = addMemory(ev, 'third', 3, 3, 1, 'n1');
+  ev = supersedeMemory(ev, ev.memories[1].id, 'keep-me-stale v2', 4, 3, 2, 'n2');
+  ok(ev.memories.length === 3 && ev.memories.some(m => m.text === 'keep-me-stale' && m.supBy)
+    && ev.memories.some(m => m.text === 'keep-me-stale v2') && !ev.memories.some(m => m.text === 'victim'),
+    'cap eviction drops the oldest non-superseded card, the superseded original survives');
+  // no eviction candidate (all pinned AND already over cap): abort the
+  // supersede entirely rather than drop the fresh revision
+  const ap = { memories: [0, 1, 2].map(i => ({ id: `p${i}`, text: `p${i}`, pinned: true, createdAt: i })), cursor: 0 };
+  ok(supersedeMemory(ap, 'p0', 'rev', 9, 2, 2, 'n2') === ap,
+    'all-pinned over-cap store aborts the supersede (store unchanged)');
 }
 section('memory supersede derivation');
 {
@@ -2081,6 +2115,50 @@ section('memory supersede derivation');
     ok(mem.inactive.some(m => m.reason === 'branch' && m.text === 'Mia trusts Ari now'),
       'the revision card hides as branch state above the rewind point');
   }
+}
+section('per-branch supersede');
+{
+  // Two sibling branches from u1; the SAME card is superseded on each. Each
+  // branch must see only its own revision — a single scalar supersede point
+  // would resurrect the stale card on the first branch.
+  const chat = { ...baseChat, messages: {
+    root: node('root', null, 'assistant', 'Welcome to Veyra, Ari.', 1),
+    u1: node('u1', 'root', 'user', 'hi', 2),
+    a1: node('a1', 'u1', 'assistant', 'branch A reply', 3),
+    b1: node('b1', 'u1', 'assistant', 'branch B reply', 4),
+  }, activeLeafId: 'a1' };
+  let store = { memories: [], cursor: 0 };
+  store = addMemory(store, 'Mia distrusts Ari', 100, MEMORY_CAP, 2, 'u1');
+  const oldId = store.memories[0].id;
+  store = supersedeMemory(store, oldId, 'revision from branch A', 200, MEMORY_CAP, 3, 'a1');
+  store = supersedeMemory(store, oldId, 'revision from branch B', 300, MEMORY_CAP, 3, 'b1');
+  const oldC = store.memories.find(m => m.id === oldId);
+  ok(oldC.supAtMsgs.length === 2 && oldC.supAtMsgs.includes('a1') && oldC.supAtMsgs.includes('b1'),
+    're-supersede on a sibling branch appends a second supersede point');
+  const memOn = (leaf) => assemblePrompt({ scenario: baseScenario, persona,
+    chat: { ...chat, memoryStore: store, activeLeafId: leaf }, settings }).manifest.layers.memory;
+  const ma = memOn('a1');
+  ok(ma.memories.length === 1 && ma.memories[0].text === 'revision from branch A',
+    'branch A sees only its own revision');
+  ok(ma.inactive.some(m => m.reason === 'superseded' && m.text === 'Mia distrusts Ari')
+    && ma.inactive.some(m => m.reason === 'branch' && m.text === 'revision from branch B'),
+    'branch A: stale card superseded, the branch-B revision is off-path');
+  const mb = memOn('b1');
+  ok(mb.memories.length === 1 && mb.memories[0].text === 'revision from branch B',
+    'branch B sees only its own revision — no stale-card resurrection');
+  ok(mb.inactive.some(m => m.reason === 'superseded' && m.text === 'Mia distrusts Ari')
+    && mb.inactive.some(m => m.reason === 'branch' && m.text === 'revision from branch A'),
+    'branch B: stale card superseded, the branch-A revision is off-path');
+  // Legacy scalar supAtMsg reads as a one-element list (existing data).
+  const legacy = { ...chat, memoryStore: { memories: [
+    { id: 'mL', text: 'stale legacy', pinned: false, createdAt: 1, supAtMsg: 'a1', supBy: 'mR' },
+    { id: 'mR', text: 'revised legacy', pinned: false, createdAt: 2, atMsg: 'a1' }], cursor: 0 } };
+  const ml = assemblePrompt({ scenario: baseScenario, persona, chat: legacy, settings }).manifest.layers.memory;
+  ok(ml.memories.length === 1 && ml.memories[0].id === 'mR'
+    && ml.inactive.some(m => m.id === 'mL' && m.reason === 'superseded'),
+    'legacy scalar supAtMsg still hides the stale card');
+  ok(supPointsOf({ supAtMsg: 'x' }).join() === 'x' && supPointsOf({ supAtMsgs: ['a', 'b'] }).length === 2
+    && supPointsOf({}).length === 0, 'supPointsOf migrates scalar and tolerates bare cards');
 }
 section('parseLorePassOutput');
 {
@@ -2144,13 +2222,52 @@ section('queue accept: updates + memory revisions');
   const m2 = acceptQueuedMemory(mc, mc.loreQueue[0].id, { atLen: 1, atMsg: 'root', now: 500 });
   ok(m2.loreQueue.length === 0 && m2.memoryStore.memories.length === 2,
     'memory accept supersedes instead of rewriting');
-  ok(m2.memoryStore.memories.find(m => m.id === 'm1').supAtMsg === 'root',
+  ok(m2.memoryStore.memories.find(m => m.id === 'm1').supAtMsgs?.join() === 'root',
     'stale card marked at the accept point');
   ok(m2.memoryStore.memories.some(m => m.text === 'revised note' && m.atMsg === 'root'),
     'revised note lands as a fresh stamped card');
   // vanished target: entry drops, chat otherwise untouched
   const m3 = acceptQueuedMemory(mc, 'nope', { atLen: 1, atMsg: 'root' });
   ok(m3 === mc, 'unknown queue id is a no-op');
+  // character-type update target: routes through update_character
+  const scenC = { ...baseScenario,
+    lorePieces: [lore({ id: 'CH1', type: 'character', title: 'Mia', content: 'a smuggler', keys: ['Mia'] })] };
+  let cchat = { ...baseChat, lorePieces: [] };
+  cchat = queueLorePiece(cchat, { title: 'Mia', content: 'a smuggler, now captain', hasKeys: false,
+    note: 'promoted', updateOf: 'Mia', oldContent: 'a smuggler', source: 'extract', atLen: 3 });
+  const cu = acceptQueuedUpdate(cchat, cchat.loreQueue[0].id,
+    { allPieces: mergedLorePieces(scenC, cchat, null), nodeId: 'a1', atLen: 3, createdSwipe: 0, now: 600 });
+  const cshadow = (cu.lorePieces ?? []).find(p => p.id === 'CH1');
+  ok(cu.loreQueue.length === 0 && cshadow && cshadow.content === 'a smuggler, now captain'
+    && cshadow.keys.join() === 'Mia' && cshadow.revisions.length === 2
+    && cshadow.revisions[1].note === 'promoted',
+    'queued update against a character piece shadows + revisions it (omitted keys kept)');
+  ok(scenC.lorePieces[0].content === 'a smuggler', 'character scenario piece never mutates');
+  // vanished update target: the entry is found but its piece is gone — drop
+  // the entry, write nothing
+  const vchat = queueLorePiece({ ...baseChat, lorePieces: [] },
+    { title: 'Ghost', content: 'was here', hasKeys: false, updateOf: 'Ghost', source: 'extract', atLen: 1 });
+  const vu = acceptQueuedUpdate(vchat, vchat.loreQueue[0].id,
+    { allPieces: mergedLorePieces(scen, vchat, null), nodeId: 'a1', atLen: 1, createdSwipe: 0, now: 700 });
+  ok(vu.loreQueue.length === 0 && (vu.lorePieces ?? []).length === 0,
+    'vanished update target drops the queue entry without writing a piece');
+  // vanished memory target: found entry, missing memoryId — same rule
+  const vm = queueLorePiece({ ...baseChat, memoryStore: { memories: [], cursor: 0 } },
+    { kind: 'memory', title: '(memory note)', content: 'revised', memoryId: 'gone', source: 'extract', atLen: 1 });
+  const vm2 = acceptQueuedMemory(vm, vm.loreQueue[0].id, { atLen: 1, atMsg: 'root' });
+  ok(vm2.loreQueue.length === 0 && vm2.memoryStore.memories.length === 0,
+    'vanished memory target drops the queue entry without touching the store');
+  // maxChars clamp + revNote on the accepted revision card
+  let cc = { ...baseChat, memoryStore: { memories: [
+    { id: 'm9', text: 'stale', pinned: false, createdAt: 1, atMsg: 'root' }], cursor: 0 } };
+  cc = queueLorePiece(cc, { kind: 'memory', title: '(memory note)', content: 'x'.repeat(50),
+    note: 'trimmed the stale part', memoryId: 'm9', source: 'extract', atLen: 1 });
+  const c2 = acceptQueuedMemory(cc, cc.loreQueue[0].id, { atLen: 1, atMsg: 'root', maxChars: 10 });
+  const fresh = c2.memoryStore.memories.find(m => m.id !== 'm9');
+  ok(fresh.text.length === 10, 'acceptQueuedMemory clamps the revision text to maxChars');
+  ok(fresh.revNote === 'trimmed the stale part', 'acceptQueuedMemory records the change note as revNote');
+  const c3 = acceptQueuedMemory(cc, cc.loreQueue[0].id, { atLen: 1, atMsg: 'root' });
+  ok(c3.memoryStore.memories.find(m => m.id !== 'm9').text.length === 50, 'no maxChars → no clamp');
 }
 
 section('normalizeLorePiece revision heal');
@@ -2392,13 +2509,20 @@ section('substituteComfyWorkflow');
     '{{width}} present: latent width kept, latent height still overwritten');
   ok(out2['2'].inputs.text === 'a cat at 832px', 'width placeholder substituted in strings');
 
-  // String placeholders on a latent node substitute as before (numbers
-  // untouched when the axis placeholder exists).
+  // Whole-value placeholders substitute as NUMBERS (strict backends reject
+  // "832" for an INT widget input); the axis still counts as placeholder-
+  // driven, so numeric latent values on that axis are left alone.
   const wf3 = { '1': { class_type: 'EmptySD3LatentImage',
     inputs: { width: '{{width}}', height: '{{height}}', batch_size: 1 } } };
   const out3 = substituteComfyWorkflow(wf3, { width: 832, height: 1216, seed: 7 });
-  ok(out3['1'].inputs.width === '832' && out3['1'].inputs.height === '1216',
-    'latent node placeholder strings substitute per axis');
+  ok(out3['1'].inputs.width === 832 && out3['1'].inputs.height === 1216,
+    'latent node whole-value placeholders substitute as numbers');
+  const wf4 = { '1': { class_type: 'FooNode',
+    inputs: { width: '{{width}}', label: '{{width}} px wide' } } };
+  const out4 = substituteComfyWorkflow(wf4, { width: 832, seed: 7 });
+  ok(out4['1'].inputs.width === 832 && typeof out4['1'].inputs.width === 'number',
+    'whole-value {{width}} on any node substitutes as a number');
+  ok(out4['1'].inputs.label === '832 px wide', 'embedded {{width}} stays a string substitution');
 
   ok(parseImageSize('832x1216').width === 832 && parseImageSize('junk').width === 1024,
     'parseImageSize parses WxH and falls back to 1024 square');
@@ -2557,6 +2681,90 @@ section('image externalization (extractImages / rehydrateImages)');
   const refs = collectImageUrls({ list: [entity, { deep: { x: B } }] });
   ok(refs.has(A) && refs.has(B) && refs.size === 2, 'collectImageUrls finds nested image URLs');
   ok(collectImageUrls({ t: 'data:text/plain,xx' }).size === 0, 'non-image data URLs not collected');
+}
+
+// ---- ComfyUI history polling gating ----
+section('comfyHistoryResult');
+{
+  const rec = (file) => ({ status: { status_str: 'success', completed: true },
+    outputs: { 9: { images: [{ filename: file, subfolder: '', type: 'output' }] } } });
+  const hist = { p1: rec('a.png'), p2: rec('other.png') };
+  ok(comfyHistoryResult(hist, 'p1').image?.filename === 'a.png', 'looks up the requested prompt id');
+  const miss = comfyHistoryResult(hist, 'nope');
+  ok(miss.done === false && miss.error === null && miss.image === null,
+    'missing prompt id stays pending — never falls back to another run');
+  ok(comfyHistoryResult(hist).image?.filename === 'a.png',
+    'promptId-less whole-history read takes the first record');
+  ok(comfyHistoryResult({}, 'p1').done === false && comfyHistoryResult(null, 'p1').done === false,
+    'empty/absent history is pending');
+  const err = comfyHistoryResult({ p1: { status: { status_str: 'error', messages: [['boom']] } } }, 'p1');
+  ok(err.done === true && err.error === 'boom', 'error status surfaces the message');
+}
+
+// ---- explicit empty keys clear on both tool update paths ----
+section('explicit empty keys');
+{
+  let reg = applyToolCalls({ ...baseChat, lorePieces: [] },
+    [{ name: 'register_character', args: { name: 'Mia', description: 'a smuggler' } }],
+    { nodeId: 'a1', now: 1 }).chat;
+  ok(reg.lorePieces[0].keys.join() === 'Mia', 'register seeds the name as a key');
+  const cleared = applyToolCalls(reg,
+    [{ name: 'update_character', args: { name: 'Mia', content: 'v2', keys: [] } }], { nodeId: 'a1', now: 2 }).chat;
+  ok(cleared.lorePieces[0].keys.length === 0 && cleared.lorePieces[0].revisions.at(-1).keys.length === 0,
+    'update_character: explicit empty keys clears');
+  const kept = applyToolCalls(reg,
+    [{ name: 'update_character', args: { name: 'Mia', content: 'v2' } }], { nodeId: 'a1', now: 2 }).chat;
+  ok(kept.lorePieces[0].keys.join() === 'Mia', 'update_character: omitted keys keep current');
+  // add_lore dedupe-update: same contract (scenario piece shadows into overlay)
+  const scenK = { ...baseScenario, lorePieces: [lore({ id: 'SC9', title: 'Veyra', content: 'floats', keys: ['Veyra'] })] };
+  const upd = applyToolCalls({ ...baseChat, lorePieces: [] },
+    [{ name: 'add_lore', args: { title: 'Veyra', content: 'half-sunken', keys: [] } }],
+    { nodeId: 'a1', now: 3 }, scenK.lorePieces).chat;
+  const sh = upd.lorePieces.find(p => p.id === 'SC9');
+  ok(sh && sh.keys.length === 0 && sh.revisions.at(-1).keys.length === 0,
+    'add_lore dedupe-update: explicit empty keys clears');
+  const upd2 = applyToolCalls({ ...baseChat, lorePieces: [] },
+    [{ name: 'add_lore', args: { title: 'Veyra', content: 'half-sunken' } }],
+    { nodeId: 'a1', now: 3 }, scenK.lorePieces).chat;
+  ok(upd2.lorePieces.find(p => p.id === 'SC9').keys.join() === 'Veyra',
+    'add_lore dedupe-update: omitted keys keep current');
+}
+
+// ---- shared queue-pill derivation ----
+section('queuePillOf');
+{
+  ok(queuePillOf({ kind: 'memory' }) === 'memory', 'memory revision entry');
+  ok(queuePillOf({ updateOf: 'Mia' }) === 'update', 'piece update entry');
+  ok(queuePillOf({ source: 'extract' }) === 'new' && queuePillOf({ source: 'tool' }) === 'new',
+    'fresh proposals (extract/tool) read as new');
+  ok(queuePillOf({}) === 'new' && queuePillOf(null) === 'new', 'bare/missing entry defaults to new');
+}
+
+// ---- prose helpers (src/20-prose.js, evaled above) ----
+section('prose helpers');
+{
+  ok(wrapDialogue('She said "hello there" quietly') === 'She said <span class="dialogue">"hello there"</span> quietly',
+    'wrapDialogue wraps straight quotes');
+  ok(wrapDialogue('“curly”') === '<span class="dialogue">“curly”</span>', 'wrapDialogue pairs curly quotes');
+  ok(wrapDialogue('5ft8" tall and "a quote"') === '5ft8" tall and <span class="dialogue">"a quote"</span>',
+    'inch mark after a digit is not an opener');
+  ok(wrapDialogue('a trailing "quote') === 'a trailing "quote', 'unterminated quote stays raw without closeOpen');
+  ok(wrapDialogue('a trailing "quote', true) === 'a trailing <span class="dialogue">"quote</span>',
+    'closeOpen wraps an unterminated opener to end-of-line (streaming)');
+  ok(wrapDialogue('```\n"code"\n```') === '```\n"code"\n```', 'fenced code is skipped');
+  ok(autoCloseProse('*she wav') === '*she wav*', 'autoCloseProse closes a trailing emphasis opener');
+  ok(autoCloseProse('**bold') === '**bold**', 'autoCloseProse closes a bold opener');
+  ok(autoCloseProse('text *') === 'text *', 'lone trailing star stays literal');
+  ok(autoCloseProse('a *b* c') === 'a *b* c', 'balanced emphasis untouched');
+  ok(detectSpeaker('Mia: hello', ['Mia']) === 'Mia', 'detectSpeaker matches a known name');
+  ok(detectSpeaker('**Mia:** hello', ['Mia']) === 'Mia', 'detectSpeaker matches a bolded prefix');
+  ok(detectSpeaker('Bob: hello', ['Mia']) === null, 'unknown name is not attributed');
+  ok(detectSpeaker(`${'N'.repeat(70)}: hello`, ['N'.repeat(70)]) === null,
+    'name beyond the 60-char cap is not attributed');
+  ok(stripSpeakerPrefix('Mia: hello', 'Mia') === 'hello', 'stripSpeakerPrefix removes Name:');
+  ok(stripSpeakerPrefix('**Mia:** hello', 'Mia') === 'hello', 'stripSpeakerPrefix removes a bolded prefix');
+  ok(stripSpeakerPrefix('Mia: *waves*', 'Mia') === '*waves*', 'an action star after the colon survives');
+  ok(stripSpeakerPrefix('Mia: hello', 'Bob') === 'Mia: hello', 'non-matching name leaves the text alone');
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

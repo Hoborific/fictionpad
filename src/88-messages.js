@@ -187,6 +187,9 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const slots = imgs ? groupImageSlots(imgs, swipe.imgUsed).map(g => ({
     slot: g.slot, take: g.active, activeIdx: g.activeIdx, count: g.takes.length,
     hasPending: g.takes.some(t => t?.pending),
+    // Take URLs kept for the lightbox's preload-ahead (flipping takes must
+    // not flash the previous image while the next decodes).
+    takeUrls: g.takes.map(t => t?.src).filter(Boolean),
   })) : null;
   const canImgRegen = imagesEnabled && !!onImgRegen;
   const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
@@ -630,6 +633,7 @@ ${showNav && html`
       ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
         num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
+        takes=${lbSlot ? lbSlot.takeUrls : null}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,

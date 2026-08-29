@@ -42,10 +42,19 @@ function pickFile(accept) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
-    input.onchange = () => resolve(input.files?.[0] ?? null);
-    // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+);
-    // without this the promise never settles and imports silently hang.
-    input.oncancel = () => resolve(null);
+    let timer = null;
+    // Fallback for browsers without input.oncancel (older WebKit): the picker
+    // holds focus, so the window regaining it with no change event within a
+    // beat means the dialog was dismissed — settle null.
+    const onFocus = () => { timer = setTimeout(() => settle(null), 400); };
+    const cleanup = () => { clearTimeout(timer); window.removeEventListener('focus', onFocus); };
+    const settle = (file) => { cleanup(); resolve(file); };
+    input.onchange = () => settle(input.files?.[0] ?? null);
+    // Dismissing the dialog without picking fires oncancel (Chrome/FF 91+) —
+    // the fast path. Without either hook the promise never settles and
+    // imports silently hang.
+    input.oncancel = () => settle(null);
+    window.addEventListener('focus', onFocus);
     input.click();
   });
 }
@@ -161,7 +170,7 @@ const enabledSamplers = (st) => Object.fromEntries(
 // strings, NumInput otherwise. Shared by every surface that edits a sampler
 // set (per-chat overrides, scenario defaults), so the rows can't drift.
 const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
-  ? html`<select value=${String(value !== false)} onChange=${(e) => onChange(e.target.value === 'true')}>
+  ? html`<select value=${String(value ?? f.def ?? true)} onChange=${(e) => onChange(e.target.value === 'true')}>
       <option value="true">true</option><option value="false">false</option></select>`
   : f.type === 'string'
     ? (f.options?.length

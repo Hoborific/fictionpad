@@ -5,6 +5,18 @@
 // ============================================================================
 const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
 
+// True when `next` references fewer distinct in-memory image URLs than `prev`
+// — the overwrite may have orphaned a stored image, so the caller sweeps.
+function imageRefDropped(prev, next) {
+  const before = new Set();
+  collectImageUrls(prev, before);
+  if (!before.size) return false;
+  const after = new Set();
+  collectImageUrls(next, after);
+  for (const u of before) if (!after.has(u)) return true;
+  return false;
+}
+
 class AbstractStorage extends EventTarget {
   constructor() {
     super();
@@ -29,9 +41,14 @@ class AbstractStorage extends EventTarget {
   getAll(store) { return this.cache[store] ?? {}; }
   get(store, key) { return this.cache[store]?.[key]; }
   set(store, key, value) {
+    const prev = this.cache[store][key];
     this.cache[store][key] = value;
     this.saveQueue.set(`${store}/${key}`, { op: 'put', store, key, value });
     this.#schedule();
+    // Overwrites trigger GC too (not just remove()): an edit that drops the
+    // last in-entity reference to a stored image — avatar cleared, swipe
+    // images purged — must not leave the row orphaned.
+    if (prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   remove(store, key) {
@@ -55,11 +72,13 @@ class AbstractStorage extends EventTarget {
     await this.persistPut(store, key, entity);
   }
   // Image GC: a reference scan, never refcounting. Debounced behind deletes
-  // (and after the flush that lands them): walk the whole cache (data URLs
-  // are rehydrated there) and drop every stored image no entity references.
-  // Cache is the single source of truth, so a live — or merely queued —
-  // entity's images can never be reclaimed. Inline mode: nothing stored
-  // out-of-band, sweep stays a no-op.
+  // and reference-dropping overwrites (and after the flush that lands them):
+  // walk the whole cache (data URLs are rehydrated there) and drop every
+  // stored image no entity references. Cache is the single source of truth,
+  // so a live — or merely queued — entity's images can never be reclaimed.
+  // Inline mode: nothing stored out-of-band, sweep stays a no-op. The server
+  // adapter overrides collectImages with a server-side sweep when /version
+  // advertises the gc capability.
   #scheduleImageGc() {
     if (!this.imagesEnabled) return;
     clearTimeout(this.gcTimer);
@@ -68,12 +87,25 @@ class AbstractStorage extends EventTarget {
       await this.collectImages();
     }, 2000);
   }
-  async collectImages() {
+  // Boot sweep: one pass shortly after init bounds orphan growth (crashed
+  // sessions, pre-GC builds). Rides the debounced scheduler — fire-and-forget,
+  // flush-first, and failures just leave the orphans for the next sweep.
+  scheduleBootImageGc() { this.#scheduleImageGc(); }
+  // Distinct image URLs referenced anywhere in the live cache right now.
+  referencedImageUrls() {
     const referenced = new Set();
     for (const s of STORES)
       for (const v of Object.values(this.cache[s])) collectImageUrls(v, referenced);
+    return referenced;
+  }
+  async collectImages() {
+    const referenced = this.referencedImageUrls();
     for (const [id, dataUrl] of [...this.images]) {
       if (referenced.has(dataUrl)) continue;
+      // The snapshot above predates the async delete loop: re-check against
+      // the CURRENT cache before each delete, so an entity saved mid-sweep
+      // can't lose an image it just started referencing (GC-vs-persist race).
+      if (this.referencedImageUrls().has(dataUrl)) continue;
       try {
         await this.persistDeleteImage(id);
         this.images.delete(id);
@@ -151,8 +183,6 @@ class AbstractStorage extends EventTarget {
     this._savestate = detail;
     this.dispatchEvent(new CustomEvent('savestate', { detail }));
   }
-  async persistPut() {}
-  async persistDelete() {}
 }
 
 class IndexedDBAdapter extends AbstractStorage {
@@ -187,6 +217,7 @@ class IndexedDBAdapter extends AbstractStorage {
       if (navigator.storage?.persist && !(await navigator.storage.persisted()))
         await navigator.storage.persist();
     } catch {}
+    this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   #readAll(store) {
     return new Promise((resolve, reject) => {
@@ -271,6 +302,11 @@ class ServerDBAdapter extends AbstractStorage {
     // the capability the adapter stays in inline mode (entities persist
     // verbatim, no 'unknown store' 400s) — today's behavior, just fat saves.
     this.imagesEnabled = info.images === true;
+    // Server-side image GC: the server scans ALL stored entities (every
+    // device's) for imgref refs and deletes unreferenced Images rows in one
+    // POST /gc-images. Without the capability collectImages() below falls
+    // back to the local cache-scan sweep (old servers).
+    this.gcEnabled = info.gc === true;
     // Images first: entities are rehydrated from them (imgref: → data URL).
     if (this.imagesEnabled)
       this.images = new Map(Object.entries(await this.remoteAll('Images')));
@@ -282,14 +318,27 @@ class ServerDBAdapter extends AbstractStorage {
         for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);
       this.cache[s] = all;
     }
+    this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   persistPut(store, key, value) { return this.#post('/save', { store, key, data: value }); }
   persistDelete(store, key) { return this.#post('/delete', { store, key }); }
   persistImage(id, dataUrl) { return this.#post('/save', { store: 'Images', key: id, data: dataUrl }); }
   persistDeleteImage(id) { return this.#post('/delete', { store: 'Images', key: id }); }
-  // Used by the settings migration helpers. No refs hint: the server
-  // rehydrates, so migrated entities always travel self-contained (inline).
+  // With the gc capability the sweep runs server-side (one POST, covers every
+  // device's entities); the local cache-scan stays the fallback for older
+  // servers. Afterwards prune the local mirror by the same reference scan, so
+  // a later save can't reference a row the server just dropped.
+  async collectImages() {
+    if (!this.gcEnabled) return super.collectImages();
+    try {
+      await this.#post('/gc-images', {});
+      const referenced = this.referencedImageUrls();
+      for (const [id, dataUrl] of this.images)
+        if (!referenced.has(dataUrl)) this.images.delete(id);
+    } catch (e) { console.error('FictionPad: image GC failed', e); }
+  }
+  // Used by init and the settings migration helpers. No refs hint: the server
+  // rehydrates, so pulled entities always travel self-contained (inline).
   async remoteAll(store, opts) { return (await this.#post('/all', { store, ...opts })).entries ?? {}; }
-  async remoteSave(store, key, data) { await this.#post('/save', { store, key, data }); }
 }
 

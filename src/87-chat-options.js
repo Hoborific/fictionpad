@@ -1,8 +1,9 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
+  const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
   // Pieces are never deleted by rewind/regenerate — a piece stamped with a
@@ -17,24 +18,31 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   // Queue accept routing: new pieces become user-owned (provenance stripped,
   // visible on every branch); UPDATE proposals keep their stamps (a rewrite
   // must stay scoped to the branch that accepted it); memory revisions land
-  // as a fresh card superseding the stale one.
-  const acceptQueued = (q) => {
-    const path = getActivePath(chat.messages ?? {}, chat.activeLeafId);
+  // as a fresh card superseding the stale one. One pure step against a
+  // working chat so Accept all can fold the whole queue through it.
+  const acceptStep = (work, q) => {
+    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
     if (q.kind === 'memory')
-      return update(acceptQueuedMemory(chat, q.id, { atLen: path.length,
-        atMsg: chat.activeLeafId ?? null, cap: cap ?? MEMORY_CAP }));
+      return acceptQueuedMemory(work, q.id, { atLen: path.length,
+        atMsg: work.activeLeafId ?? null, cap: cap ?? MEMORY_CAP,
+        maxChars: memMaxChars ?? DEFAULT_SETTINGS.memoryMaxChars });
     if (q.updateOf) {
-      const view = allPieces
-        .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
-        .map(p => pieceAtPath(p, pathIds, chat.messages ?? null));
-      return update(acceptQueuedUpdate(chat, q.id, { allPieces: view,
-        nodeId: chat.activeLeafId ?? null, atLen: path.length,
-        createdSwipe: chat.messages?.[chat.activeLeafId]?.activeSwipe ?? null }));
+      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
+      const view = mergedLorePieces(scenario, work, characters)
+        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
+        .map(p => pieceAtPath(p, ids, work.messages ?? null));
+      return acceptQueuedUpdate(work, q.id, { allPieces: view,
+        nodeId: work.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
     }
-    update(acceptQueuedLore(chat, q.id));
+    return acceptQueuedLore(work, q.id);
   };
-  const queuePill = (q) => q.kind === 'memory' ? 'memory' : q.updateOf ? 'update'
-    : q.source === 'extract' ? 'extracted' : 'tool';
+  const acceptQueued = (q) => update(acceptStep(chat, q));
+  const acceptAll = () => update((chat.loreQueue ?? []).reduce(acceptStep, chat));
+  const dismissAll = () => {
+    if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
+      update({ ...chat, loreQueue: [] });
+  };
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
   const update = (c) => onUpdateChat(c, { touch: false });
@@ -64,18 +72,26 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
         <div class="field">
           <span>Suggested lore — awaiting review (${chat.loreQueue.length})</span>
           <div class="hint">Proposed by the model or the maintenance pass. Accept moves a new piece into this chat's lore as yours; an update rewrites the named piece for this chat only (the original card is kept, and rewind restores it); a memory revision replaces the stale note going forward. Dismiss discards the proposal.</div>
+          ${chat.loreQueue.length > 1 && html`
+            <div style=${{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+              <button class="btn small" title="Accept every pending proposal (same rules as accepting one by one)" onClick=${acceptAll}>Accept all</button>
+              <button class="btn small danger" title="Discard every pending proposal" onClick=${dismissAll}>Dismiss all</button>
+            </div>`}
           ${chat.loreQueue.map(q => html`
             <div class="lore-card" key=${q.id}>
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
-                <span class="pill">${queuePill(q)}</span>
+                <span class="pill">${queuePillOf(q)}</span>
                 <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
                 <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
               ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
-              <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>
-              ${q.oldContent != null && html`
-                <div class="hint" style=${{ padding: '0 8px 6px', whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>`}
+              ${q.oldContent != null ? html`
+                <div class="grid2" style=${{ padding: '2px 8px 6px' }}>
+                  <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>
+                  <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>now: ${q.content}</div>
+                </div>` : html`
+                <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>`}
               ${(q.keys ?? []).length > 0 && html`
                 <div class="hint" style=${{ padding: '0 8px 6px' }}>keys: ${q.keys.join(', ')}</div>`}
             </div>`)}
@@ -106,18 +122,34 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
             </div>
           </div>`)}
       </div>
-      <div style=${{ display: 'flex', gap: '6px' }}>
+      <div style=${{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
         ${onOpenBranches && html`<button class="btn small" title="See every branch of this chat and jump between them" onClick=${() => onOpenBranches()}>⎇ Branches</button>`}
+        <button class="btn small" title="Change log of maintenance writes — piece updates, tool registrations, memory revisions"
+          onClick=${() => setHistOpen(true)}>Maintenance history</button>
         <button class="btn small" onClick=${() => onExport()}>Export chat JSON</button>
         <button class="btn small danger" onClick=${() => onDelete()}>Delete chat</button>
       </div>
       ${editing && html`
         <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
           onSave=${(draft) => {
-            setPieces(editing.isNew ? [...pieces, draft] : pieces.map(q => q.id === draft.id ? draft : q));
+            if (editing.isNew) { setPieces([...pieces, draft]); setEditing(null); return; }
+            // Merge-on-save: re-read the LIVE piece — a generation completing
+            // while the popout was open may have appended stamped revisions
+            // (tool update, lore pass, enrichment), and wholesale replacement
+            // would wipe a log that is never trimmed. The draft wins the
+            // editable fields; the live piece's revision log and provenance
+            // stamps survive. A piece deleted meanwhile drops the save.
+            const live = pieces.find(q => q.id === draft.id);
+            if (!live) { setEditing(null); return; }
+            const merged = { ...draft,
+              ...(live.revisions ? { revisions: live.revisions } : {}),
+              ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+                .filter(k => live[k] !== undefined).map(k => [k, live[k]])) };
+            setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}
           onClose=${() => setEditing(null)} onGenerate=${onGenerate} onGenerateAvatar=${onGenerateAvatar} />`}
+      ${histOpen && html`<${MaintenanceHistoryModal} chat=${chat} dateFormat=${dateFormat} onClose=${() => setHistOpen(false)} />`}
     </div>`;
 }
 

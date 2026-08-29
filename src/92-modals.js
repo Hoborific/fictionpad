@@ -44,6 +44,40 @@ function RecapModal({ text, onSaveMemory, onClose }) {
 }
 
 // ============================================================================
+// COMPONENTS: MAINTENANCE HISTORY MODAL — per-chat change log assembled from
+// lore-piece revision notes (entries with `note`), tool registrations
+// (createdBy-stamped pieces), and memory revision notes (revNote). Read-only,
+// newest first. Opened from Chat options.
+// ============================================================================
+function MaintenanceHistoryModal({ chat, dateFormat, onClose }) {
+  const entries = [];
+  for (const p of (Array.isArray(chat?.lorePieces) ? chat.lorePieces : [])) {
+    if (p.createdBy)
+      entries.push({ at: p.createdAt ?? 0, kind: 'registration', title: p.title || '(untitled)', note: null });
+    for (const r of (p.revisions ?? []))
+      if (r.note) entries.push({ at: r.createdAt ?? 0, kind: 'piece update', title: p.title || '(untitled)', note: r.note });
+  }
+  for (const m of (chat?.memoryStore?.memories ?? []))
+    if (m?.revNote)
+      entries.push({ at: m.createdAt ?? 0, kind: 'memory revision', title: `memory ${String(m.id ?? '').slice(-6)}`, note: m.revNote });
+  entries.sort((a, b) => b.at - a.at);
+  return html`
+    <${Modal} title="Maintenance history" onClose=${onClose}>
+      ${entries.length === 0 && html`
+        <div class="hint">Nothing recorded yet — tool-registered characters, lore-piece updates, and memory revisions carrying a change note are listed here.</div>`}
+      ${entries.map((e, i) => html`
+        <div class="lore-item-row" key=${i}>
+          <div class="row">
+            <span class="pill">${e.kind}</span>
+            <span style=${{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>${e.title}</span>
+            <span class="hint">${fmtDate(e.at, dateFormat)}</span>
+          </div>
+          ${e.note && html`<div class="ir-content">${e.note}</div>`}
+        </div>`)}
+    <//>`;
+}
+
+// ============================================================================
 // COMPONENTS: CONTEXT MENU (chat rows — right-click / long-press)
 // ============================================================================
 function ContextMenu({ x, y, items, onClose }) {

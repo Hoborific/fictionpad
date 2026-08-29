@@ -9,7 +9,7 @@ const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memo
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
@@ -22,13 +22,13 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
@@ -40,7 +40,7 @@ function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, aux
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
     <//>`;
 }
 
@@ -54,7 +54,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -71,7 +71,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}

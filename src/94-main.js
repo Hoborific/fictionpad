@@ -553,10 +553,14 @@ function Main({ storage, storageKind, storageFailed }) {
     const idb = new IndexedDBAdapter();
     await idb.init();
     const srv = new ServerDBAdapter(ref.current.settings.serverToken ?? '');
+    await srv.init(); // capability probe + images map — persistEntity needs both
     let n = 0;
     for (const store of STORES)
       for (const [key, data] of Object.entries(idb.getAll(store))) {
-        await srv.remoteSave(store, key, data);
+        // persistEntity (the normal save path), not raw remoteSave: images
+        // extract out-of-band on capable servers, so an image-heavy chat
+        // doesn't stay inline (and can't hit the body cap mid-loop).
+        await srv.persistEntity(store, key, data);
         n++;
       }
     return n;
@@ -596,7 +600,15 @@ function Main({ storage, storageKind, storageFailed }) {
       .join('\n\n');
     if (!recent.trim()) return null;
     const maxChars = st.memoryMaxChars ?? 5000;
-    const priorTexts = (chatObj.memoryStore?.memories ?? []).slice(-MEM_PRIOR_MAX).map(m => m.text);
+    // Priors context: branch-visible, non-superseded cards only (the lore
+    // pass's predicates) — a superseded or off-branch card must not suppress
+    // re-recording the corrected fact.
+    const pathIds = new Set(path.map(n => n.id));
+    const priorTexts = (chatObj.memoryStore?.memories ?? [])
+      .filter(m => m && (m.text ?? '').trim()
+        && !(m.atMsg != null && !pathIds.has(m.atMsg))
+        && !supPointsOf(m).some(id => pathIds.has(id)))
+      .slice(-MEM_PRIOR_MAX).map(m => m.text);
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
       ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
@@ -622,10 +634,11 @@ function Main({ storage, storageKind, storageFailed }) {
       if (text) {
         // Merge-on-write: the chat may have changed (or been deleted) during
         // the aux call — re-read it and overwrite only memoryStore.
+        // touch:false — a background pass must not re-sort the sidebar.
         const cur = ref.current.chats[chatObj.id];
         if (cur)
           saveChat({ ...cur, memoryStore: { ...pushMemory(cur, text),
-            cursor: getActivePath(cur.messages, cur.activeLeafId).length } });
+            cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
       }
     } catch (e) {
       // Degrade like lore extraction: warn and advance the cursor — a failing
@@ -634,7 +647,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[chatObj.id];
       if (cur)
         saveChat({ ...cur, memoryStore: { ...(cur.memoryStore ?? { memories: [], cursor: 0 }),
-          cursor: getActivePath(cur.messages, cur.activeLeafId).length } });
+          cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
     } finally {
       setSummarizing(false);
     }
@@ -646,157 +659,197 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- emergent lore maintenance ----
-  // On the memory cadence, an aux pass reviews the chat's whole knowledge
-  // state against the recent conversation and can: propose NEW lore pieces,
-  // UPDATE existing pieces (any layer — scenario/global targets are shadowed
-  // into the chat overlay, the update lands as a stamped revision), and
-  // REVISE stale memory notes (supersede: fresh stamped card, old card marked
-  // hidden from this point on this branch — derivation, never deletion).
+  // On the memory cadence (or on demand from Chat options, force=true), an
+  // aux pass reviews the chat's whole knowledge state against the recent
+  // conversation and can: propose NEW lore pieces, UPDATE existing pieces
+  // (any layer — scenario/global targets are shadowed into the chat overlay,
+  // the update lands as a stamped revision), and REVISE stale memory notes
+  // (supersede: fresh stamped card, old card marked hidden from this point on
+  // this branch — derivation, never deletion).
   // 'queue' mode (default): everything waits for review in Chat options.
-  // 'auto': applied straight away. 'off': nothing.
+  // 'auto': applied straight away — except updates to pieces the digest could
+  // only show truncated, which drop to the queue for human review. 'off': nothing.
   // Failures degrade silently (console.warn) and the cursor still advances.
   // Prompt budgets for the maintenance pass: per-piece content truncation and
   // the total lore digest cap (chat-local pieces are kept over scenario ones).
   const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
-  async function maybeExtractLore(chatObj) {
-    const { scenarios: sc, personas: pe, settings: st } = ref.current;
-    const scen = sc[chatObj.scenarioId];
-    const mode = scen?.emergentLore ?? 'queue';
-    const conn = roleApi(st, 'aux');
-    if (mode === 'off' || !conn.endpoint) return;
-    const model = st.auxModel || st.model;
-    if (!model) return;
-    const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const pathLen = path.length;
-    const every = st.memoryEvery ?? MEMORY_EVERY;
-    if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
+  // Appended to a truncated digest entry so the pass knows it saw only the
+  // head of the piece (prompt text — stays dash-free).
+  const PASS_TRUNC_NOTE = '\n[…truncated; propose updates for this piece only if the change falls within the visible portion]';
+  async function maybeExtractLore(chatObj, force = false) {
     // Merge-on-write: re-read the chat at save time (a generation may have
     // advanced it during the aux call) and apply the lore changes to the
     // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
-    // are overwritten. Chat deleted mid-call → drop the write.
+    // are overwritten. Chat deleted mid-call → drop the write. The cursor is
+    // derived from the live re-read chat (summarizeNow's rule), not the
+    // pre-call snapshot. touch:false — a background pass must not re-sort
+    // the sidebar.
     const advance = (fn) => {
       const cur = ref.current.chats[chatObj.id];
-      if (cur) saveChat({ ...fn(cur), emergentCursor: pathLen });
+      if (cur) saveChat({ ...fn(cur), emergentCursor: getActivePath(cur.messages, cur.activeLeafId).length }, { touch: false });
     };
-    const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
-    const recent = path.slice(-every)
-      .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
-      .join('\n\n');
-    if (!recent.trim()) return;
-    const pathIds = new Set(path.map(n => n.id));
-    // Branch-current lore view: off-branch pieces are hidden and each piece
-    // is derived at its last on-view revision — a chat-shadowed card feeds
-    // the CHAT revision into the pass (and back out as the update base), so
-    // the stale scenario/global original is never seen or clobbered.
-    const loreView = (c) => {
-      const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
-      return mergedLorePieces(scen, c, ref.current.characters)
-        .filter(p => pieceVisibleAt(p, ids, c.messages))
-        .map(p => pieceAtPath(p, ids, c.messages));
-    };
-    const view = loreView(chatObj);
-    // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
-    // static scenario pieces before chat-owned ones.
-    const loreLines = [];
-    let loreChars = 0;
-    for (const p of [...view].reverse()) {
-      const content = String(p?.content ?? '').trim();
-      if (!(p?.title ?? '').trim() || !content) continue;
-      const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
-        + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`;
-      if (loreChars + entry.length > PASS_LORE_CHARS) continue;
-      loreLines.unshift(entry); loreChars += entry.length;
-    }
-    // Memory digest (ids included so the pass can target revisions): visible
-    // cards only — off-branch and already-superseded ones are out of scope.
-    const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
-      && !(m.atMsg != null && !pathIds.has(m.atMsg))
-      && !(m.supAtMsg != null && pathIds.has(m.supAtMsg)));
-    const memLines = [];
-    let memChars = 0;
-    for (const m of [...memVisible].reverse()) {
-      const line = `- [${m.id}] ${m.text}`;
-      if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
-      memLines.unshift(line); memChars += line.length;
-    }
+    // Fire-and-forget at the call site: guard the WHOLE body (the digest
+    // build runs aux-free but touches plenty of derivations) so nothing can
+    // reject unhandled — summarizeNow's pattern.
     try {
-      const out = await auxLogged('lore-extract', {
-        endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
-        system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
-          .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
-        user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
-          + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
-          + `Recent conversation:\n\n${recent}\n\nJSON object:`,
-        maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
-      }, chatObj.id);
-      const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
-      const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
-      const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-      const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
-      const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
-      const maxNew = Math.max(1, st.loreExtractMax ?? 5);
-      const freshOk = fresh
-        .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
-        .slice(0, maxNew);
-      // Updates must name a known piece and actually change its current text.
-      const updatesOk = updates
-        .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
-        .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
-          && u.content !== String(u.target.content ?? '').trim())
-        .slice(0, maxNew);
-      // Memory revisions must name a visible card and change its text.
-      const memsOk = memoryUpdates
-        .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
-        .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
-        .slice(0, PASS_MEM_CAP);
-      if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
-      const now = Date.now();
-      const stamps = () => {
-        const cur = ref.current.chats[chatObj.id];
-        const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
-        return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
-          createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+      const { scenarios: sc, personas: pe, settings: st } = ref.current;
+      const scen = sc[chatObj.scenarioId];
+      const mode = scen?.emergentLore ?? 'queue';
+      const conn = roleApi(st, 'aux');
+      if (mode === 'off' || !conn.endpoint) return;
+      const model = st.auxModel || st.model;
+      if (!model) return;
+      const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
+      const pathLen = path.length;
+      const every = st.memoryEvery ?? MEMORY_EVERY;
+      if (!force && pathLen - (chatObj.emergentCursor ?? 0) < every) return;
+      const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
+      const recent = path.slice(-every)
+        .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
+        .join('\n\n');
+      if (!recent.trim()) return;
+      const pathIds = new Set(path.map(n => n.id));
+      // Branch-current lore view: off-branch pieces are hidden and each piece
+      // is derived at its last on-view revision — a chat-shadowed card feeds
+      // the CHAT revision into the pass (and back out as the update base), so
+      // the stale scenario/global original is never seen or clobbered.
+      const loreView = (c) => {
+        const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
+        return mergedLorePieces(scen, c, ref.current.characters)
+          .filter(p => pieceVisibleAt(p, ids, c.messages))
+          .map(p => pieceAtPath(p, ids, c.messages));
       };
-      advance((cur) => {
-        let work = cur;
-        if (mode === 'auto') {
-          // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
-          // stay scoped to the branch they were made on — derivation replaces
-          // the old atLen rewind cutoff.
-          const { now: n2, ...st2 } = stamps();
-          if (freshOk.length)
-            work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
-              { now: n2, ...st2 }, loreView(work)).chat;
-          for (const u of updatesOk) {
-            const call = u.target.type === 'character'
-              ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
-              : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
-            work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
+      const view = loreView(chatObj);
+      // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
+      // static scenario pieces before chat-owned ones.
+      const loreLines = [];
+      let loreChars = 0;
+      for (const p of [...view].reverse()) {
+        const content = String(p?.content ?? '').trim();
+        if (!(p?.title ?? '').trim() || !content) continue;
+        const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
+          + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`
+          + (content.length > PASS_PIECE_CHARS ? PASS_TRUNC_NOTE : '');
+        if (loreChars + entry.length > PASS_LORE_CHARS) continue;
+        loreLines.unshift(entry); loreChars += entry.length;
+      }
+      // Memory digest (ids included so the pass can target revisions): visible
+      // cards only — off-branch and already-superseded ones are out of scope.
+      const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
+        && !(m.atMsg != null && !pathIds.has(m.atMsg))
+        && !supPointsOf(m).some(id => pathIds.has(id)));
+      const memLines = [];
+      let memChars = 0;
+      for (const m of [...memVisible].reverse()) {
+        const line = `- [${m.id}] ${m.text}`;
+        if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
+        memLines.unshift(line); memChars += line.length;
+      }
+      try {
+        const out = await auxLogged('lore-extract', {
+          endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
+          system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
+            .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
+          user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
+            + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
+            + `Recent conversation:\n\n${recent}\n\nJSON object:`,
+          maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
+        }, chatObj.id);
+        const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
+        const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
+        const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+        const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
+        const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+        const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+        const freshOk = fresh
+          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+          .slice(0, maxNew);
+        // Updates must name a known piece and actually change its current text.
+        const updatesOk = updates
+          .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
+          .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
+            && u.content !== String(u.target.content ?? '').trim())
+          .slice(0, maxNew);
+        // Memory revisions must name a visible card and change its text.
+        // Dedupe by id first (keep last) — two entries for one card in a
+        // single pass would supersede it twice.
+        const memsOk = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
+          .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
+          .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+          .slice(0, PASS_MEM_CAP);
+        if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+        const now = Date.now();
+        const stamps = () => {
+          const cur = ref.current.chats[chatObj.id];
+          const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
+          return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
+            createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+        };
+        advance((cur) => {
+          let work = cur;
+          if (mode === 'auto') {
+            // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
+            // stay scoped to the branch they were made on — derivation replaces
+            // the old atLen rewind cutoff.
+            const { now: n2, ...st2 } = stamps();
+            if (freshOk.length)
+              work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
+                { now: n2, ...st2 }, loreView(work)).chat;
+            for (const u of updatesOk) {
+              // Over-long piece: the digest showed only its head, so a
+              // full-text rewrite built from that view would silently replace
+              // the unseen tail. Route this one update to the review queue
+              // even in auto mode.
+              if (String(u.target.content ?? '').length > PASS_PIECE_CHARS) {
+                work = queueLorePiece(work, { title: u.target.title, content: u.content,
+                  keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+                  updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+                  source: 'extract', atLen: st2.atLen });
+                continue;
+              }
+              const call = u.target.type === 'character'
+                ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
+                : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
+              work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
+            }
+            const maxChars = st.memoryMaxChars ?? 5000;
+            for (const u of memsOk)
+              if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
+                work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+          } else {
+            for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+            for (const u of updatesOk)
+              work = queueLorePiece(work, { title: u.target.title, content: u.content,
+                keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+                updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+                source: 'extract', atLen: pathLen });
+            for (const u of memsOk)
+              work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
+                content: u.text, note: u.note, memoryId: u.id,
+                oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
           }
-          const maxChars = st.memoryMaxChars ?? 5000;
-          for (const u of memsOk)
-            if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
-              work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
-        } else {
-          for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
-          for (const u of updatesOk)
-            work = queueLorePiece(work, { title: u.target.title, content: u.content,
-              keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
-              updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
-              source: 'extract', atLen: pathLen });
-          for (const u of memsOk)
-            work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
-              content: u.text, note: u.note, memoryId: u.id,
-              oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
-        }
-        return work;
-      });
+          return work;
+        });
+      } catch (e) {
+        console.warn('Emergent lore extraction failed:', e);
+        advance((c) => c);
+      }
     } catch (e) {
+      // Pre-aux failure (digest build, path derivation): same degrade rule.
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
     }
   }
+
+  // "Run maintenance now" (Chat options): the cadence-gated lore pass, fired
+  // on demand (force skips the interval check, not the mode/endpoint gates).
+  // No-op while a generation or any aux call is busy — the pass rides
+  // auxLogged, so it shows in the composer's busy state like any aux call.
+  const onRunMaintenance = (c) => {
+    if (!c || genRef.current || auxBusy.length) return;
+    maybeExtractLore(c, true);
+  };
 
   // ---- character enrichment (experimental, settings.toolsEnrich) ----
   // Newly tool-registered characters get fleshed out by the ✦ generator
@@ -914,9 +967,17 @@ function Main({ storage, storageKind, storageFailed }) {
       // start-of-generation snapshot and would silently revert this write on
       // the next token (the rule regenImage/swipeImage/onEdit refuse on).
       // The image result is already in hand and the merge below re-reads
-      // ref.current, so waiting out the stream costs nothing.
-      while (genRef.current?.chatId === chatId)
+      // ref.current, so waiting out the stream costs nothing. Capped: if the
+      // generation's finally ever wedges, warn and patch anyway (the merge is
+      // safe) rather than park the completed image forever.
+      const deferDeadline = Date.now() + 10 * 60 * 1000;
+      while (genRef.current?.chatId === chatId) {
+        if (Date.now() > deferDeadline) {
+          console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
+          break;
+        }
         await new Promise(r => setTimeout(r, 250));
+      }
       const cur = ref.current.chats[chatId];
       const node = cur?.messages?.[nodeId];
       const swipe = node?.swipes?.[swipeIdx];
@@ -1283,9 +1344,12 @@ function Main({ storage, storageKind, storageFailed }) {
     let stopList = st.stopStrings;
     // Usage reporting (stream_options.include_usage): a backend that 400s the
     // unknown field gets one silent retry without it, like the stop retry.
+    // Each retry has its own flag — a backend that 400s BOTH unknown fields
+    // gets both degradations in sequence.
     let wantUsage = true;
+    let stopRetried = false;
     try {
-      for (let attempt = 0; ; attempt++) {
+      for (;;) {
         try {
           for await (const chunk of openaiChatStream({
             endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model, messages,
@@ -1324,9 +1388,10 @@ function Main({ storage, storageKind, storageFailed }) {
             wantUsage = false;
             continue;
           }
-          if (attempt === 0 && !acc && e?.status === 400 && /stop/i.test(e?.message ?? '')
+          if (!stopRetried && !acc && e?.status === 400 && /stop/i.test(e?.message ?? '')
               && Array.isArray(stopList) && stopList.length > 4) {
             console.warn(`FictionPad: backend rejected ${stopList.length} stop strings — retrying with the first 4.`);
+            stopRetried = true;
             stopList = stopList.slice(0, 4);
             continue;
           }
@@ -1616,10 +1681,10 @@ function Main({ storage, storageKind, storageFailed }) {
         .map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim())
         .filter(l => l.length > 0 && l.split(/\s+/).length <= Math.ceil(words * 1.5) && !/^\d+$/.test(l) && !/:$/.test(l))
         .slice(0, count);
-      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId)
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId && s?.swipe === key.swipe)
         ? (items.length ? { ...key, loading: false, items } : null) : s);
     } catch {
-      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId) ? null : s);
+      setSuggestions(s => (s?.chatId === key.chatId && s?.nodeId === key.nodeId && s?.swipe === key.swipe) ? null : s);
     }
   }
 
@@ -2513,6 +2578,7 @@ function Main({ storage, storageKind, storageFailed }) {
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
+        onRunMaintenance=${() => chat && onRunMaintenance(chat)} memMaxChars=${settings.memoryMaxChars ?? 5000}
         width=${peekRight ? clampPane(ui.dwWidth ?? autoPaneW) : dwW} onDragStart=${paneDragStart('right')} onResetWidth=${() => resetPaneWidth('right')}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
@@ -2554,6 +2620,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modal?.kind === 'settings' && html`
       <${ErrorBoundary} name="settings"><${SettingsModal} settings=${settings} theme=${theme} onThemeChange=${setTheme}
         accent=${accent} onAccentChange=${setAccent} initialDraft=${settingsDraft}
+        initialTab=${settingsDraft ? 'generation' : undefined}
         onOpenLogitBias=${(draft) => { setSettingsDraft(draft ?? null); setModal({ kind: 'logitBias' }); }}
         storageKind=${storageKind} onUpload=${migrateUpload} onDownload=${migrateDownload}
         onExportAll=${onExportAll} onImportAll=${onImportAll} onServerBackup=${onServerBackup}
@@ -2593,6 +2660,7 @@ function Main({ storage, storageKind, storageFailed }) {
         settings=${settings} onUpdateSettings=${updateSettings}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onSummarize=${() => summarizeNow(chats[modal.chatId])} summarizing=${summarizing}
+        onRunMaintenance=${() => onRunMaintenance(chats[modal.chatId])} memMaxChars=${settings.memoryMaxChars ?? 5000}
         onGenerate=${runGen}
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}

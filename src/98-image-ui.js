@@ -32,8 +32,13 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // take change updates the view in place. The footer's Save button downloads
 // the shown image (the live take on a slot, full-res for avatar expansions) —
 // this is also the touch path, since phones have no right-click. `num` is the
-// 1-based take number, so multi-take saves get a filename suffix.
-function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0 }) {
+// 1-based take number, so multi-take saves get a filename suffix. `takes`
+// (optional, the slot's take URLs) preloads the other takes so ←/→ flipping
+// doesn't show the previous image while the next one decodes.
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null }) {
+  useEffect(() => {
+    for (const u of takes ?? []) if (u && u !== src) { const im = new Image(); im.src = u; }
+  }, [takes, src]);
   useEffect(() => {
     if (!onPrev && !onNext) return;
     const onKey = (e) => {
@@ -166,10 +171,12 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
   // full copy is unchanged, only the 256² thumb is rewritten.
   const [cropImg, setCropImg] = useState(null); // { img, full } | null
   const [genBusy, setGenBusy] = useState(false); // ✦ generation in flight
+  const [error, setError] = useState(null); // inline failure note (recrop of a corrupt stored image)
   // Character/scenario/persona drafts carry `name`; a character-type lore
   // piece's display name is its `title`.
   const draftName = draft.name ?? draft.title ?? '';
   const upload = async () => {
+    setError(null);
     const file = await pickFile('image/*');
     if (!file) return;
     try {
@@ -186,8 +193,12 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
     } catch (e) { console.warn('avatar: could not decode image file', e); }
   };
   const recrop = () => {
+    setError(null);
     const img = new Image();
     img.onload = () => setCropImg({ img, full: null });
+    // A corrupt stored data URL otherwise makes the Crop button silently dead
+    // — surface it inline like the editor's other .warn errors.
+    img.onerror = () => setError('Could not reload the stored avatar image — it may be corrupted. Upload a new one instead.');
     img.src = draft.avatarFull || draft.avatar; // re-crop from the full copy when one exists
   };
   // ✦: hand the host the live draft (a character card's .content; otherwise
@@ -217,6 +228,7 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
           onClick=${generate}>${genBusy ? '…' : '✦'}</button>`}
         ${draft.avatar && html`<button class="btn small" onClick=${() => set({ avatar: '', avatarFull: '' })}>Clear</button>`}
       </div>
+      ${error && html`<div class="warn">${error}</div>`}
     </div>
     ${cropImg && html`<${ImageCropper} img=${cropImg.img} onClose=${() => setCropImg(null)}
       onDone=${(dataURL) => { set(cropImg.full == null ? { avatar: dataURL } : { avatar: dataURL, avatarFull: cropImg.full }); setCropImg(null); }} />`}

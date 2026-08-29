@@ -19,7 +19,7 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
   effectiveEndpoint, roleConn, html, SettingsModal, DEFAULT_SETTINGS,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
-  LorePieceEditor, chatSearchText, matchExcerpt, ChatOptions,
+  LorePieceEditor, chatSearchText, matchExcerpt, ChatOptions, MemoryPanel,
   Avatar, Lightbox, AvatarField,
   BranchPanel, appendMessage, activateBranch, getActivePath,
   splitImageCalls, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
@@ -650,7 +650,9 @@ trial('comfy: substituteComfyWorkflow — placeholders, seed rule, purity', () =
   // placeholders in strings substitute
   if (out['6'].inputs.text !== 'a fox, cinematic') throw new Error('prompt placeholder: ' + out['6'].inputs.text);
   if (out['7'].inputs.text !== 'blurry') throw new Error('negative placeholder: ' + out['7'].inputs.text);
-  if (out['5'].inputs.width !== '832' || out['5'].inputs.height !== '1216') throw new Error('size placeholders: ' + JSON.stringify(out['5'].inputs));
+  // whole-value size placeholders substitute as NUMBERS (strict backends
+  // reject "832" string INT inputs); embedded occurrences stay strings
+  if (out['5'].inputs.width !== 832 || out['5'].inputs.height !== 1216) throw new Error('size placeholders: ' + JSON.stringify(out['5'].inputs));
   if (out['9'].inputs.filename_prefix !== 'fp_777') throw new Error('seed placeholder: ' + out['9'].inputs.filename_prefix);
   // numeric seed/noise_seed keys randomize to the SAME seed as {{seed}}
   if (out['3'].inputs.seed !== 777 || out['3'].inputs.noise_seed !== 777)
@@ -706,9 +708,13 @@ trial('comfy: comfyHistoryResult — pending, error, success, keying', () => {
     mine: { status: { status_str: 'success', completed: true }, outputs: { '9': { images: [{ filename: 'right.png' }] } } },
   }, 'mine');
   if (multi.image?.filename !== 'right.png') throw new Error('prompt_id keying: ' + JSON.stringify(multi));
-  // unknown prompt_id falls back to the first record (older servers)
+  // unknown prompt_id is PENDING (never another run's record); the first-record
+  // fallback applies only when NO prompt_id was given (whole-history payloads)
   if (comfyHistoryResult({ only: { status: { status_str: 'success', completed: true },
-    outputs: { '9': { images: [{ filename: 'only.png' }] } } } }, 'nope').image?.filename !== 'only.png')
+    outputs: { '9': { images: [{ filename: 'only.png' }] } } } }, 'nope').done)
+    throw new Error('unknown prompt_id must not fall back to another run');
+  if (comfyHistoryResult({ only: { status: { status_str: 'success', completed: true },
+    outputs: { '9': { images: [{ filename: 'only.png' }] } } } }).image?.filename !== 'only.png')
     throw new Error('unkeyed fallback broken');
 });
 
@@ -1318,6 +1324,52 @@ trial('chat options: off-branch pieces keep their row with a branch pill (deriva
   if (out.split('>branch<').length - 1 !== 1) throw new Error('exactly one branch pill expected');
   const eveRow = out.slice(out.indexOf('Eve'), out.indexOf('Docks'));
   if (!eveRow.includes('>branch<')) throw new Error('branch pill should sit on the off-branch piece');
+});
+
+// Queue review UI: ChatOptions routes pills through queuePillOf, renders the
+// update entry as a was/now two-column preview, and offers Accept/Dismiss all
+// once ≥2 entries are pending.
+trial('chat options: queue pills, was/now preview, accept/dismiss all (SSR)', () => {
+  const noop = () => {};
+  const chat = {
+    id: 'C', name: 'queue chat', messages: {}, activeLeafId: null, lorePieces: [],
+    loreQueue: [
+      { id: 'Q1', title: 'Vex', updateOf: 'Vex', note: 'aged him', content: 'Older now.', oldContent: 'A smuggler.', keys: ['vex'] },
+      { id: 'Q2', kind: 'memory', memoryId: 'memA1', title: 'Debt', note: 'clarified', content: 'Ari owes Vex double.' },
+    ],
+  };
+  const out = renderToStaticMarkup(html`<${fp.ChatOptions} chat=${chat} personas=${{}} scenario=${null}
+    characters=${{}} onUpdateChat=${noop} onExport=${noop} onDelete=${noop} onGenerate=${noop} />`);
+  for (const frag of ['>update<', '>memory<', 'was: A smuggler.', 'now: Older now.', 'Accept all', 'Dismiss all'])
+    if (!out.includes(frag)) throw new Error(`missing ${frag}: ` + out);
+});
+
+// The Inspector's Suggested-lore section shares queuePillOf — same pills.
+trial('inspector: suggested-lore queue pills (SSR)', () => {
+  const out = renderToStaticMarkup(html`<${ContextInspector} manifest=${null} hasChat=${false} onPreview=${() => {}}
+    loreQueue=${[{ id: 'Q1', title: 'Vex', updateOf: 'Vex', content: 'Older now.' },
+      { id: 'Q2', kind: 'memory', memoryId: 'memA1', title: 'Debt', content: 'x' }]} />`);
+  for (const frag of ['Suggested lore', '>update<', '>memory<'])
+    if (!out.includes(frag)) throw new Error(`missing ${frag}: ` + out);
+});
+
+// Memory tab: a superseded card carries the click-through badge + restore and
+// offers no pin; a revised card shows its revNote subline. (Newest first, so
+// the replacement memB2 renders above the superseded memA1.)
+trial('memory panel: superseded + revised cards (SSR)', () => {
+  const chat = { id: 'C', memoryStore: { memories: [
+    { id: 'memA1', text: 'Old text.', pinned: false, createdAt: 1, supBy: 'memB2', supAtMsgs: ['a1'] },
+    { id: 'memB2', text: 'New text.', pinned: false, createdAt: 2, revNote: 'clarified the debt' },
+  ], cursor: 0 } };
+  const out = renderToStaticMarkup(html`<${fp.MemoryPanel} chat=${chat} onUpdateChat=${() => {}}
+    onSummarize=${() => {}} summarizing=${false} dateFormat="dd/mm/yyyy" />`);
+  for (const frag of ['superseded', '>restore<', 'change: clarified the debt', 'id="mem-memB2"'])
+    if (!out.includes(frag)) throw new Error(`missing ${frag}: ` + out);
+  const supRow = out.slice(out.indexOf('mem-memA1'));
+  if (supRow.includes('>pin<') || supRow.includes('>unpin<'))
+    throw new Error('superseded card must not offer pin: ' + supRow);
+  const newRow = out.slice(out.indexOf('mem-memB2'), out.indexOf('mem-memA1'));
+  if (!newRow.includes('>pin<')) throw new Error('live card keeps its pin button: ' + newRow);
 });
 
 // Out-of-band image storage: entities persist with imgref: sentinels, image
