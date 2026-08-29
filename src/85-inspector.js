@@ -75,10 +75,10 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
     <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
       ${loreQueue.map(q => html`
         <${InspectorRow} key=${q.id}
-          pills=${[{ text: q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
+          pills=${[{ text: q.kind === 'memory' ? 'memory' : q.updateOf ? 'update' : q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
           title=${q.title || '(untitled)'}
           preview=${toPreview(q.content, 140)}
-          content=${`${q.content ?? ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
+          content=${`${q.note ? `[change] ${q.note}\n\n` : ''}${q.content ?? ''}${q.oldContent != null ? `\n\n[was] ${q.oldContent}` : ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
       <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accept or dismiss in the Chat tab.</div>
     <//>`;
   if (!manifest?.layers) return html`

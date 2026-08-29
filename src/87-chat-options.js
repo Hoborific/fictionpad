@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -14,6 +14,27 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   const allPieces = mergedLorePieces(scenario, chat, characters);
   const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => update({ ...chat, lorePieces });
+  // Queue accept routing: new pieces become user-owned (provenance stripped,
+  // visible on every branch); UPDATE proposals keep their stamps (a rewrite
+  // must stay scoped to the branch that accepted it); memory revisions land
+  // as a fresh card superseding the stale one.
+  const acceptQueued = (q) => {
+    const path = getActivePath(chat.messages ?? {}, chat.activeLeafId);
+    if (q.kind === 'memory')
+      return update(acceptQueuedMemory(chat, q.id, { atLen: path.length,
+        atMsg: chat.activeLeafId ?? null, cap: cap ?? MEMORY_CAP }));
+    if (q.updateOf) {
+      const view = allPieces
+        .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
+        .map(p => pieceAtPath(p, pathIds, chat.messages ?? null));
+      return update(acceptQueuedUpdate(chat, q.id, { allPieces: view,
+        nodeId: chat.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: chat.messages?.[chat.activeLeafId]?.activeSwipe ?? null }));
+    }
+    update(acceptQueuedLore(chat, q.id));
+  };
+  const queuePill = (q) => q.kind === 'memory' ? 'memory' : q.updateOf ? 'update'
+    : q.source === 'extract' ? 'extracted' : 'tool';
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
   const update = (c) => onUpdateChat(c, { touch: false });
@@ -42,16 +63,19 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       ${(chat.loreQueue ?? []).length > 0 && html`
         <div class="field">
           <span>Suggested lore — awaiting review (${chat.loreQueue.length})</span>
-          <div class="hint">Proposed by the model or the extraction pass. Accept moves it into this chat's lore as yours; dismiss discards it.</div>
+          <div class="hint">Proposed by the model or the maintenance pass. Accept moves a new piece into this chat's lore as yours; an update rewrites the named piece for this chat only (the original card is kept, and rewind restores it); a memory revision replaces the stale note going forward. Dismiss discards the proposal.</div>
           ${chat.loreQueue.map(q => html`
             <div class="lore-card" key=${q.id}>
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
-                <span class="pill">${q.source === 'extract' ? 'extracted' : 'tool'}</span>
-                <button class="btn small" onClick=${() => update(acceptQueuedLore(chat, q.id))}>accept</button>
+                <span class="pill">${queuePill(q)}</span>
+                <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
                 <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
+              ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
               <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>
+              ${q.oldContent != null && html`
+                <div class="hint" style=${{ padding: '0 8px 6px', whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>`}
               ${(q.keys ?? []).length > 0 && html`
                 <div class="hint" style=${{ padding: '0 8px 6px' }}>keys: ${q.keys.join(', ')}</div>`}
             </div>`)}

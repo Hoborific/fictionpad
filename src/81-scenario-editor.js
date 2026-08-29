@@ -177,7 +177,7 @@ function RevisionRow({ rev, n }) {
         <span class="hint">${rev.atLen != null ? `msg ${rev.atLen} · ` : ''}${stamp}</span>
       </div>
       ${!open && html`<div class="ir-preview">${toPreview(rev.content, 140)}</div>`}
-      ${open && html`<div class="ir-content">${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
+      ${open && html`<div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
     </div>`;
 }
 
@@ -213,7 +213,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">
           <span>Change history (${piece.revisions.length})</span>
-          <div class="hint">Versions written by tool calls or enrichment, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
+          <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
             <${RevisionRow} key=${i} rev=${r} n=${piece.revisions.length - i} />`)}
         </div>`}

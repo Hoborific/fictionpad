@@ -645,11 +645,19 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
-  // ---- emergent lore extraction ----
-  // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
-  // the recent conversation. 'queue' mode (default): proposals wait for review
-  // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
+  // ---- emergent lore maintenance ----
+  // On the memory cadence, an aux pass reviews the chat's whole knowledge
+  // state against the recent conversation and can: propose NEW lore pieces,
+  // UPDATE existing pieces (any layer — scenario/global targets are shadowed
+  // into the chat overlay, the update lands as a stamped revision), and
+  // REVISE stale memory notes (supersede: fresh stamped card, old card marked
+  // hidden from this point on this branch — derivation, never deletion).
+  // 'queue' mode (default): everything waits for review in Chat options.
+  // 'auto': applied straight away. 'off': nothing.
   // Failures degrade silently (console.warn) and the cursor still advances.
+  // Prompt budgets for the maintenance pass: per-piece content truncation and
+  // the total lore digest cap (chat-local pieces are kept over scenario ones).
+  const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
   async function maybeExtractLore(chatObj) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
     const scen = sc[chatObj.scenarioId];
@@ -664,8 +672,8 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
     // Merge-on-write: re-read the chat at save time (a generation may have
     // advanced it during the aux call) and apply the lore changes to the
-    // CURRENT object, so only lorePieces/loreQueue/emergentCursor are
-    // overwritten. Chat deleted mid-call → drop the write.
+    // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
+    // are overwritten. Chat deleted mid-call → drop the write.
     const advance = (fn) => {
       const cur = ref.current.chats[chatObj.id];
       if (cur) saveChat({ ...fn(cur), emergentCursor: pathLen });
@@ -675,46 +683,115 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
-    const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
+    const pathIds = new Set(path.map(n => n.id));
+    // Branch-current lore view: off-branch pieces are hidden and each piece
+    // is derived at its last on-view revision — a chat-shadowed card feeds
+    // the CHAT revision into the pass (and back out as the update base), so
+    // the stale scenario/global original is never seen or clobbered.
+    const loreView = (c) => {
+      const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
+      return mergedLorePieces(scen, c, ref.current.characters)
+        .filter(p => pieceVisibleAt(p, ids, c.messages))
+        .map(p => pieceAtPath(p, ids, c.messages));
+    };
+    const view = loreView(chatObj);
+    // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
+    // static scenario pieces before chat-owned ones.
+    const loreLines = [];
+    let loreChars = 0;
+    for (const p of [...view].reverse()) {
+      const content = String(p?.content ?? '').trim();
+      if (!(p?.title ?? '').trim() || !content) continue;
+      const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
+        + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`;
+      if (loreChars + entry.length > PASS_LORE_CHARS) continue;
+      loreLines.unshift(entry); loreChars += entry.length;
+    }
+    // Memory digest (ids included so the pass can target revisions): visible
+    // cards only — off-branch and already-superseded ones are out of scope.
+    const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
+      && !(m.atMsg != null && !pathIds.has(m.atMsg))
+      && !(m.supAtMsg != null && pathIds.has(m.supAtMsg)));
+    const memLines = [];
+    let memChars = 0;
+    for (const m of [...memVisible].reverse()) {
+      const line = `- [${m.id}] ${m.text}`;
+      if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
+      memLines.unshift(line); memChars += line.length;
+    }
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
           .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
-        user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
-        maxTokens: st.loreExtractMaxTokens ?? 1500, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
+        user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
+          + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
+          + `Recent conversation:\n\n${recent}\n\nJSON object:`,
+        maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       }, chatObj.id);
-      const m = out.match(/\[[\s\S]*\]/);
-      const proposals = m ? JSON.parse(m[0]) : [];
-      const existing = new Set(titles.map(t => t.toLowerCase()));
-      const queued = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-      const fresh = (Array.isArray(proposals) ? proposals : [])
-        .map(p => ({
-          title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
-          content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
-          keys: (Array.isArray(p?.keys) ? p.keys : []).map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5),
-        }))
-        .filter(p => p.title && p.content
-          && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
-        .slice(0, Math.max(1, st.loreExtractMax ?? 5));
-      if (fresh.length) {
-        advance((cur) => {
-          let work = cur;
-          if (mode === 'auto') {
-            // Stamp with the live leaf (+ its viewed swipe): auto-mode pieces
-            // stay scoped to the branch they were extracted from — derivation
-            // replaces the old atLen rewind cutoff.
-            work = applyToolCalls(work, fresh.map(p => ({ name: 'add_lore', args: p })),
-              { now: Date.now(), atLen: pathLen, nodeId: cur.activeLeafId ?? null,
-                createdSwipe: cur.messages?.[cur.activeLeafId]?.activeSwipe ?? null }).chat;
-          } else {
-            for (const p of fresh) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+      const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
+      const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
+      const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+      const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
+      const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+      const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+      const freshOk = fresh
+        .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+        .slice(0, maxNew);
+      // Updates must name a known piece and actually change its current text.
+      const updatesOk = updates
+        .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
+        .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
+          && u.content !== String(u.target.content ?? '').trim())
+        .slice(0, maxNew);
+      // Memory revisions must name a visible card and change its text.
+      const memsOk = memoryUpdates
+        .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
+        .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+        .slice(0, PASS_MEM_CAP);
+      if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+      const now = Date.now();
+      const stamps = () => {
+        const cur = ref.current.chats[chatObj.id];
+        const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
+        return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
+          createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+      };
+      advance((cur) => {
+        let work = cur;
+        if (mode === 'auto') {
+          // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
+          // stay scoped to the branch they were made on — derivation replaces
+          // the old atLen rewind cutoff.
+          const { now: n2, ...st2 } = stamps();
+          if (freshOk.length)
+            work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
+              { now: n2, ...st2 }, loreView(work)).chat;
+          for (const u of updatesOk) {
+            const call = u.target.type === 'character'
+              ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
+              : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
+            work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
           }
-          return work;
-        });
-        return;
-      }
-      advance((c) => c);
+          const maxChars = st.memoryMaxChars ?? 5000;
+          for (const u of memsOk)
+            if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
+              work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
+                u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+        } else {
+          for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+          for (const u of updatesOk)
+            work = queueLorePiece(work, { title: u.target.title, content: u.content,
+              keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+              updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+              source: 'extract', atLen: pathLen });
+          for (const u of memsOk)
+            work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
+              content: u.text, note: u.note, memoryId: u.id,
+              oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
+        }
+        return work;
+      });
     } catch (e) {
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
@@ -920,7 +997,11 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- generation ----
-  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
+  // appendedSwipe: the caller added an empty swipe to an EXISTING node before
+  // firing (regenerate, regen-from-token). discardEmptySwipe may only pop a
+  // swipe when this holds — a bare continuation appends nothing, so popping
+  // there would destroy a real take.
+  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
@@ -1090,9 +1171,10 @@ function Main({ storage, storageKind, storageFailed }) {
     let work = ref.current.chats[chatObj.id] ?? chatObj;
     // ^ Re-base on the stored chat, not the caller's snapshot: a background
     // merge-on-write (an image job's patch, enrichment) may have landed
-    // between the caller's read and the stream start. Callers upsert the
-    // chat carrying the new empty swipe before firing, so our node survives
-    // the re-base.
+    // between the caller's read and the stream start. Callers saveChat the
+    // chat carrying the new empty swipe before firing (ref-synced), so the
+    // stored copy always includes our node — never reintroduce a bare
+    // upsertChat append upstream of fireGeneration.
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
@@ -1160,7 +1242,11 @@ function Main({ storage, storageKind, storageFailed }) {
     };
     // Remove the empty generating swipe (or the fresh placeholder node) when
     // nothing was ever written — applies to errors, dropped connections,
-    // empty completions, and Stop-before-first-token alike. World state needs
+    // empty completions, and Stop-before-first-token alike. Only state the
+    // CALLER appended for this generation may be discarded: fresh removes the
+    // placeholder node, appendedSwipe pops the new take — a bare continuation
+    // appended nothing, so it must never pop a pre-existing swipe.
+    // World state needs
     // no restore: the replaced swipe's tool writes were never pruned (they
     // hide by swipe-derivation), so a failed retry leaves them untouched.
     const discardEmptySwipe = () => {
@@ -1168,14 +1254,14 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
-      if (n.swipes.length > 1) {
-        const swipes = n.swipes.slice(0, -1);
-        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
-        upsertChat(work.id, work);
-      } else if (fresh) {
+      if (fresh) {
         const messages = { ...work.messages };
         delete messages[nodeId];
         work = { ...cur, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
+        upsertChat(work.id, work);
+      } else if (appendedSwipe && n.swipes.length > 1) {
+        const swipes = n.swipes.slice(0, -1);
+        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
         upsertChat(work.id, work);
       }
     };
@@ -1551,7 +1637,12 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!generationReady(c)) return;
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
-    upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+    // saveChat, not bare upsertChat: the append must reach ref.current
+    // synchronously — runGeneration re-bases on the stored chat at stream
+    // start, and React may not have flushed a plain upsertChat yet (a
+    // greeting regen's prep is fully synchronous, so the re-base would read
+    // the pre-append snapshot and overwrite the viewed swipe).
+    saveChat(c2);
     fireGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
@@ -1562,7 +1653,7 @@ function Main({ storage, storageKind, storageFailed }) {
       fireGeneration(c, last.id, { continuation: true });
     } else {
       const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-      upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+      saveChat(c1);
       fireGeneration(c1, id, { fresh: true });
     }
   }
@@ -1610,7 +1701,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-        upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+        saveChat(c1);
         fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
         return null;
       }
@@ -1631,7 +1722,9 @@ function Main({ storage, storageKind, storageFailed }) {
         const slot = uid();
         const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
           swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
-        upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+        // saveChat: the image job's completion patch merge-on-writes against
+        // ref.current.chats — the pending node must be there synchronously.
+        saveChat(c2);
         runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
         return null;
       }
@@ -1786,7 +1879,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // The regenerated node becomes the tip: the previous continuation is kept
     // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    upsertChat(c1.id, c1);
+    saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
     fireGeneration(c1, nodeId);
   };
   // Regenerate from a token: new swipe whose text starts with tokens[0..i]
@@ -1803,8 +1896,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    upsertChat(c1.id, c1);
-    fireGeneration(c1, nodeId, { continuation: true });
+    saveChat(c1);
+    // continuation drives the prefill mechanics, but the caller DID append a
+    // swipe — an abort may discard it (appendedSwipe).
+    fireGeneration(c1, nodeId, { continuation: true, appendedSwipe: true });
   };
   // Swiping a mid-chain node re-derives the visible branch below it: each
   // swipe keeps its own continuation (children record the parent swipe they
@@ -2021,7 +2116,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
-    upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+    saveChat(c1);
     fireGeneration(c1, id, { fresh: true });
   };
 

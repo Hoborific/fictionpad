@@ -19,6 +19,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
         <div class="mem-item" key=${m.id}>
           <div class="row">
             ${m.pinned && html`<span class="pill pinned">pinned</span>`}
+            ${m.supBy && html`<span class="pill" title="Revised by the lore pass — hidden from context on branches past the revision point; the original text is kept for rewind and older branches">superseded</span>`}
             <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt, dateFormat)}</span>
             <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
               ${m.pinned ? 'unpin' : 'pin'}</button>

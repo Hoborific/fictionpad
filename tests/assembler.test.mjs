@@ -22,6 +22,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
+  supersedeMemory, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
@@ -38,6 +39,7 @@ const {
   healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize,
   resolveLimits, autoReserve,
   subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, expandSamplerParams,
+  supersedeMemory, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
   hashImageId, extractImages, rehydrateImages, collectImageUrls,
@@ -2030,6 +2032,138 @@ section('branch-visible world state');
     ok(hidden !== p && hidden.content === 'orig', 'latest revision off-path → last visible revision content');
     ok(hidden.revisions.length === 2, 'revision log itself is never trimmed by the view');
   }
+}
+
+// ---- lore maintenance pass: supersede + update derivation (v4.11.7) ----
+section('supersedeMemory');
+{
+  let store = { memories: [], cursor: 0 };
+  store = addMemory(store, 'Mia distrusts Ari', 100, MEMORY_CAP, 2, 'n1');
+  const oldId = store.memories[0].id;
+  store = supersedeMemory(store, oldId, 'Mia trusts Ari now', 200, MEMORY_CAP, 5, 'n2');
+  ok(store.memories.length === 2, 'supersede keeps the old card and appends the revision');
+  const oldC = store.memories.find(m => m.id === oldId);
+  const newC = store.memories.find(m => m.id !== oldId);
+  ok(oldC.supBy === newC.id && oldC.supAtMsg === 'n2', 'old card marked with supersede point + replacement link');
+  ok(newC.text === 'Mia trusts Ari now' && newC.atMsg === 'n2' && newC.atLen === 5,
+    'revision card stamped like a fresh memory');
+  // cap eviction still applies across the appended card
+  let full = { memories: [], cursor: 0 };
+  for (let i = 0; i < MEMORY_CAP; i++) full = addMemory(full, `m${i}`, i);
+  full = supersedeMemory(full, full.memories[0].id, 'revised', 9999, MEMORY_CAP, MEMORY_CAP + 1, 'nx');
+  ok(full.memories.length === MEMORY_CAP, 'supersede respects the memory cap');
+}
+section('memory supersede derivation');
+{
+  const chat = { ...baseChat, messages: {
+    root: node('root', null, 'assistant', 'Welcome to Veyra, Ari.', 1),
+    u1: node('u1', 'root', 'user', 'hi', 2),
+    a1: node('a1', 'u1', 'assistant', 'hello', 3),
+  }, activeLeafId: 'a1' };
+  let store = { memories: [], cursor: 0 };
+  store = addMemory(store, 'Mia distrusts Ari', 100, MEMORY_CAP, 2, 'u1');
+  store = supersedeMemory(store, store.memories[0].id, 'Mia trusts Ari now', 200, MEMORY_CAP, 3, 'a1');
+  const c = { ...chat, memoryStore: store };
+  {
+    const r = assemblePrompt({ scenario: baseScenario, persona, chat: c, settings });
+    const mem = r.manifest.layers.memory;
+    ok(mem.memories.length === 1 && mem.memories[0].text === 'Mia trusts Ari now',
+      'superseded memory is replaced by its revision on the same branch');
+    ok(mem.inactive.some(m => m.reason === 'superseded' && m.text === 'Mia distrusts Ari'),
+      'superseded card surfaces as Not injected · superseded');
+  }
+  {
+    // viewed before the supersede point (rewind to u1): the old text returns
+    const r = assemblePrompt({ scenario: baseScenario, persona, chat: { ...c, activeLeafId: 'u1' }, settings });
+    const mem = r.manifest.layers.memory;
+    ok(mem.memories.length === 1 && mem.memories[0].text === 'Mia distrusts Ari',
+      'rewind past the supersede restores the old memory text');
+    ok(mem.inactive.some(m => m.reason === 'branch' && m.text === 'Mia trusts Ari now'),
+      'the revision card hides as branch state above the rewind point');
+  }
+}
+section('parseLorePassOutput');
+{
+  const p = parseLorePassOutput('prefix {"new": [{"title":"Tavern","content":"A warm place","keys":["tavern"]}],'
+    + ' "updates": [{"title":"Mia","content":"full card v2","note":"trust changed"}],'
+    + ' "memories": [{"id":"m1","text":"revised","note":"went stale"}]} trailing');
+  ok(p.fresh.length === 1 && p.fresh[0].title === 'Tavern' && p.fresh[0].keys.join() === 'tavern',
+    'contract: new pieces parsed');
+  ok(p.updates.length === 1 && p.updates[0].note === 'trust changed' && p.updates[0].hasKeys === false,
+    'contract: update parsed, omitted keys marked keep-current');
+  ok(p.memoryUpdates.length === 1 && p.memoryUpdates[0].id === 'm1' && p.memoryUpdates[0].text === 'revised',
+    'contract: memory revision parsed');
+  const legacy = parseLorePassOutput('[{"title":"Old","content":"style"}]');
+  ok(legacy.fresh.length === 1 && legacy.fresh[0].title === 'Old' && legacy.updates.length === 0,
+    'legacy bare-array reply still parses as new-only');
+  const junk = parseLorePassOutput('no json at all');
+  ok(junk.fresh.length === 0 && junk.updates.length === 0 && junk.memoryUpdates.length === 0,
+    'garbage reply degrades to empty');
+  const bad = parseLorePassOutput('{"updates": [{"title":"", "content":"x"}], "memories": [{"id":"m1","text":""}]}');
+  ok(bad.updates.length === 0 && bad.memoryUpdates.length === 0, 'entries missing title/text are dropped');
+}
+section('queue accept: updates + memory revisions');
+{
+  const scen = { ...baseScenario,
+    lorePieces: [lore({ id: 'SC1', title: 'Veyra', content: 'floats above clouds', keys: ['Veyra'] })] };
+  let chat = { ...baseChat, messages: {
+    root: node('root', null, 'assistant', 'Welcome to Veyra, Ari.', 1),
+    u1: node('u1', 'root', 'user', 'hi', 2),
+    a1: node('a1', 'u1', 'assistant', 'hello', 3),
+    b1: node('b1', 'u1', 'assistant', 'sibling branch', 4),
+  }, activeLeafId: 'a1', lorePieces: [] };
+  chat = queueLorePiece(chat, { title: 'Veyra', content: 'now half-sunken', keys: ['Veyra'], hasKeys: true,
+    note: 'the city fell', updateOf: 'Veyra', oldContent: 'floats above clouds', source: 'extract', atLen: 3 });
+  const view = mergedLorePieces(scen, chat, null);
+  const n2 = acceptQueuedUpdate(chat, chat.loreQueue[0].id,
+    { allPieces: view, nodeId: 'a1', atLen: 3, createdSwipe: 0, now: 500 });
+  ok(n2.loreQueue.length === 0, 'accept removes the queue entry');
+  ok(scen.lorePieces[0].content === 'floats above clouds', 'scenario piece never mutates');
+  const shadow = (n2.lorePieces ?? []).find(p => p.id === 'SC1');
+  ok(shadow && shadow.content === 'now half-sunken', 'accept shadows the scenario piece into the chat overlay');
+  ok(shadow.createdBy === 'a1' && shadow.revisions.length === 2
+    && shadow.revisions[1].note === 'the city fell' && shadow.revisions[1].createdBy === 'a1',
+    'accepted update keeps its stamps and records the change note');
+  {
+    const r = assemblePrompt({ scenario: scen, persona, chat: n2, settings });
+    ok(r.manifest.layers.lore.pieces.find(p => p.id === 'SC1')?.content === 'now half-sunken',
+      'accepting branch sees the updated content');
+  }
+  {
+    // sibling branch (leaf b1): the shadow's origin is off-path — the
+    // scenario original resurfaces
+    const r = assemblePrompt({ scenario: scen, persona, chat: { ...n2, activeLeafId: 'b1' }, settings });
+    ok(r.manifest.layers.lore.pieces.find(p => p.id === 'SC1')?.content === 'floats above clouds',
+      'sibling branch keeps the stale original — derivation, never deletion');
+  }
+  // memory revision accept
+  let mc = { ...baseChat, memoryStore: { memories: [
+    { id: 'm1', text: 'old note', pinned: false, createdAt: 1, atMsg: 'root' }], cursor: 0 } };
+  mc = queueLorePiece(mc, { kind: 'memory', title: '(memory note)', content: 'revised note',
+    note: 'went stale', memoryId: 'm1', oldContent: 'old note', source: 'extract', atLen: 1 });
+  const m2 = acceptQueuedMemory(mc, mc.loreQueue[0].id, { atLen: 1, atMsg: 'root', now: 500 });
+  ok(m2.loreQueue.length === 0 && m2.memoryStore.memories.length === 2,
+    'memory accept supersedes instead of rewriting');
+  ok(m2.memoryStore.memories.find(m => m.id === 'm1').supAtMsg === 'root',
+    'stale card marked at the accept point');
+  ok(m2.memoryStore.memories.some(m => m.text === 'revised note' && m.atMsg === 'root'),
+    'revised note lands as a fresh stamped card');
+  // vanished target: entry drops, chat otherwise untouched
+  const m3 = acceptQueuedMemory(mc, 'nope', { atLen: 1, atMsg: 'root' });
+  ok(m3 === mc, 'unknown queue id is a no-op');
+}
+
+section('normalizeLorePiece revision heal');
+{
+  // A LorePieceEditor save normalizes the draft — the revision change note
+  // (v4.11.7) must survive, or one edit strips every Change-history summary.
+  const p = normalizeLorePiece({ title: 'Mia', content: 'v2', revisions: [
+    { content: 'v0', keys: ['Mia'], atLen: null, createdAt: null, createdBy: null, createdSwipe: null },
+    { content: 'v2', keys: ['Mia'], atLen: 3, createdAt: 500, createdBy: 'a1', createdSwipe: 0, note: 'trust changed' },
+  ] });
+  ok(p.revisions.length === 2 && p.revisions[1].note === 'trust changed',
+    'revision note survives normalization (editor save)');
+  ok(p.revisions[0].note === undefined, 'note-less revisions stay note-less');
 }
 
 // ---- image takes: slot grouping + active-take resolution (v4.10) ----

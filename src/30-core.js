@@ -703,6 +703,27 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
   return { ...(store ?? {}), memories };
 }
 
+// Revise a memory without rewriting it: the stale card stays in the store,
+// marked with the supersede point (supAtMsg = the leaf the pass ran at) and a
+// link to its replacement (supBy); the revised text lands as a FRESH card
+// stamped like any new memory. The assembler hides a card whose supAtMsg is
+// on the active path, so the branch that superseded sees only the new text
+// while a stale-leaf branch (or a rewind) keeps the old card — derivation,
+// never deletion, same rule as lore revisions.
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+  const newId = uid();
+  const memories = (store?.memories ?? []).map(m => (m && m.id === id)
+    ? { ...m, supBy: newId, ...(atMsg ? { supAtMsg: atMsg } : {}) } : m);
+  memories.push({ id: newId, text, pinned: false, createdAt: now,
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) });
+  while (memories.length > cap) {
+    const idx = memories.findIndex(m => !m.pinned);
+    if (idx === -1) break;
+    memories.splice(idx, 1);
+  }
+  return { ...(store ?? {}), memories };
+}
+
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
@@ -909,10 +930,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const memCap = Math.floor(budget * caps.memory);
   // Branch visibility (same rule as the lore layer): a memory stamped with
   // atMsg (the leaf it was summarized under) injects only while that node is
-  // on the active path; unstamped memories are global.
+  // on the active path; unstamped memories are global. A card superseded by
+  // the lore pass (supAtMsg on path) hides too — its replacement rides the
+  // same stamps, so each branch sees the newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
-  const memHidden = memStore.filter(m => m?.atMsg != null && !pathIds.has(m.atMsg));
-  const memAll = memStore.filter(m => !(m?.atMsg != null && !pathIds.has(m.atMsg)));
+  const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
+  const memSuped = (m) => !memGone(m) && m?.supAtMsg != null && pathIds.has(m.supAtMsg);
+  const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
+  const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
   const memThreshold = typeof settings.semanticThreshold === 'number' ? settings.semanticThreshold : 0.55;
   const memPinnedList = memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt);
@@ -953,9 +978,10 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
         ? 'below-threshold' : 'over-budget',
       ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
       tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))
-      // Belong to a sibling branch — hidden, not deleted.
+      // Belong to a sibling branch, or superseded by a revision the pass
+      // wrote on this branch — hidden, not deleted.
       .concat(memHidden.map(m => ({
-        id: m.id, pinned: !!m.pinned, reason: 'branch',
+        id: m.id, pinned: !!m.pinned, reason: memSuped(m) ? 'superseded' : 'branch',
         tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))),
   };
 
@@ -1251,6 +1277,42 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
+// Accept a queued UPDATE proposal (updateOf set): resolves the target piece
+// by title against the caller-supplied merged view and funnels through the
+// tool-update machinery — scenario/global targets are shadowed into the
+// overlay, the update lands as a stamped revision. Unlike acceptQueuedLore
+// (new pieces, provenance stripped), the revision KEEPS its stamps: stripping
+// them would show the rewrite on branches that forked before it existed.
+// A vanished target (user delete) just drops the entry.
+function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, createdSwipe = null, atLen = null, now = Date.now() } = {}) {
+  const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
+  if (!q) return chat;
+  const target = (Array.isArray(allPieces) ? allPieces : [])
+    .find(p => (p.title ?? '').trim().toLowerCase() === (q.updateOf ?? q.title ?? '').trim().toLowerCase());
+  let work = chat;
+  if (target) {
+    const call = target.type === 'character'
+      ? { name: 'update_character', args: { name: target.title, content: q.content, ...(q.hasKeys ? { keys: q.keys } : {}), note: q.note } }
+      : { name: 'add_lore', args: { title: target.title, content: q.content, ...(q.hasKeys ? { keys: q.keys } : {}), note: q.note } };
+    work = applyToolCalls(work, [call], { now, atLen, nodeId, createdSwipe }, allPieces).chat;
+  }
+  return { ...work, loreQueue: (work.loreQueue ?? []).filter(e => e.id !== queueId) };
+}
+
+// Accept a queued MEMORY revision (kind: 'memory'): the revised text lands as
+// a fresh stamped card and the stale one is marked superseded (see
+// supersedeMemory). A vanished target (evicted/user-deleted) just drops the
+// entry.
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP } = {}) {
+  const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
+  if (!q) return chat;
+  const store = chat.memoryStore ?? { memories: [], cursor: 0 };
+  const exists = (store.memories ?? []).some(m => m?.id === q.memoryId);
+  return { ...chat,
+    memoryStore: exists ? supersedeMemory(store, q.memoryId, q.content, now, cap, atLen, atMsg) : store,
+    loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
+}
+
 function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null, createdSwipe = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
@@ -1265,6 +1327,10 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   // replaced swipe keeps its own state; derivation, never deletion).
   const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId,
     ...(Number.isInteger(createdSwipe) ? { createdSwipe } : {}) };
+  // Optional one-line change summary (the lore-maintenance pass sends it; the
+  // tool protocol itself has no note field). Carried on the revision entry
+  // and shown in the editor's Change history.
+  const revNote = String(args.note ?? '').trim().slice(0, 300) || null;
   // Revision log for EVERY tool-driven content mutation (universal rollback
   // rule): piece.content/keys always mirror the LAST revision, and the
   // assembler views the piece at the last revision on view for the active
@@ -1281,7 +1347,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   const withRevision = (p, seed, content, keys) => ({
     ...p, content, ...(keys ? { keys } : {}),
     revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
-      { content, keys: keys ?? p.keys ?? [], ...provenance }],
+      { content, keys: keys ?? p.keys ?? [], ...provenance, ...(revNote ? { note: revNote } : {}) }],
   });
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
@@ -1525,7 +1591,58 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
 const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
-const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation: long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}], or [] if nothing qualifies.';
+const DEFAULT_LORE_EXTRACT_PROMPT = `You maintain the memory notes and lorebook of an ongoing roleplay. You are given the current memory notes (each with its id), the current lore (each piece already reflects this chat's latest revisions), and the recent conversation. Reply with a JSON object only:
+{"new": [{"title":"…","content":"…","keys":["…"]}], "updates": [{"title":"…","content":"…","keys":["…"],"note":"…"}], "memories": [{"id":"…","text":"…","note":"…"}]}
+Rules:
+- "new": up to {{max}} NEW lasting facts about the world, places, objects, or factions: long-term reference material, not momentary events, never facts already in the lore.
+- "updates": rewrite an EXISTING lore piece when the story has genuinely changed what it says. title must match an existing piece exactly; content is the piece's FULL updated text with the change folded in, never a fragment or a diff; keys may be omitted to keep the current ones; note is one short sentence stating what changed.
+- "memories": revise a memory note the story has made stale or wrong. id must match an existing note exactly; text is the FULL revised note; note is one short sentence stating what changed. Never revise a note just to rephrase it.
+Use [] for any array with nothing to offer.`;
+
+// Tolerant extraction of the lore-maintenance pass reply. Accepts the current
+// object contract and the legacy bare-array one (treated as "new" only —
+// custom loreExtractPrompt settings written for it keep working). Returns
+// sanitized { fresh, updates, memoryUpdates }; hasKeys marks whether the
+// reply specified keys at all (omitted = keep the piece's current keys).
+function parseLorePassOutput(out) {
+  const empty = { fresh: [], updates: [], memoryUpdates: [] };
+  const s = String(out ?? '');
+  let obj = null;
+  const mo = s.match(/\{[\s\S]*\}/);
+  if (mo) {
+    try {
+      const p = JSON.parse(mo[0]);
+      // Only the real contract counts — a legacy bare-array reply also
+      // contains a {...} span, and it must fall through to the array path.
+      if (p && typeof p === 'object' && !Array.isArray(p)
+          && (Array.isArray(p.new) || Array.isArray(p.updates) || Array.isArray(p.memories))) obj = p;
+    } catch { /* fall through */ }
+  }
+  if (!obj) {
+    const ma = s.match(/\[[\s\S]*\]/);
+    if (ma) {
+      try { const p = JSON.parse(ma[0]); if (Array.isArray(p)) obj = { new: p }; } catch { /* fall through */ }
+    }
+  }
+  if (!obj) return empty;
+  const cleanKeys = (ks) => (Array.isArray(ks) ? ks : []).map(k => String(k).trim())
+    .filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+  const cleanNote = (n) => String(n ?? '').trim().slice(0, 300) || null;
+  const cleanPiece = (p) => ({
+    title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+    content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+    keys: cleanKeys(p?.keys),
+  });
+  const fresh = (Array.isArray(obj.new) ? obj.new : []).map(cleanPiece).filter(p => p.title && p.content);
+  const updates = (Array.isArray(obj.updates) ? obj.updates : [])
+    .map(p => ({ ...cleanPiece(p), hasKeys: Array.isArray(p?.keys), note: cleanNote(p?.note) }))
+    .filter(p => p.title && p.content);
+  const memoryUpdates = (Array.isArray(obj.memories) ? obj.memories : [])
+    .map(p => ({ id: String(p?.id ?? '').trim(), text: String(p?.text ?? '').trim().slice(0, 8000),
+      note: cleanNote(p?.note) }))
+    .filter(p => p.id && p.text);
+  return { fresh, updates, memoryUpdates };
+}
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
 const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
@@ -1578,7 +1695,10 @@ function normalizeLorePiece(p) {
       atLen: Number.isFinite(r?.atLen) ? r.atLen : null,
       createdAt: Number.isFinite(r?.createdAt) ? r.createdAt : null,
       createdBy: r?.createdBy != null ? String(r.createdBy) : null,
-      createdSwipe: Number.isInteger(r?.createdSwipe) ? r.createdSwipe : null })) };
+      createdSwipe: Number.isInteger(r?.createdSwipe) ? r.createdSwipe : null,
+      // Lore-pass change summary (v4.11.7) — carry it through the heal or any
+      // editor Save (which normalizes the draft) silently strips the notes.
+      note: typeof r?.note === 'string' && r.note ? r.note : undefined })) };
 }
 function normalizeScenario(s) {
   const o = (s && typeof s === 'object') ? s : {};

@@ -22,7 +22,7 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} />`}
     </div>`;
 }
 

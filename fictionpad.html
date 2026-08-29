@@ -961,7 +961,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.6';
+const APP_VERSION = '4.11.7';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1937,6 +1937,27 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
   return { ...(store ?? {}), memories };
 }
 
+// Revise a memory without rewriting it: the stale card stays in the store,
+// marked with the supersede point (supAtMsg = the leaf the pass ran at) and a
+// link to its replacement (supBy); the revised text lands as a FRESH card
+// stamped like any new memory. The assembler hides a card whose supAtMsg is
+// on the active path, so the branch that superseded sees only the new text
+// while a stale-leaf branch (or a rewind) keeps the old card — derivation,
+// never deletion, same rule as lore revisions.
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+  const newId = uid();
+  const memories = (store?.memories ?? []).map(m => (m && m.id === id)
+    ? { ...m, supBy: newId, ...(atMsg ? { supAtMsg: atMsg } : {}) } : m);
+  memories.push({ id: newId, text, pinned: false, createdAt: now,
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) });
+  while (memories.length > cap) {
+    const idx = memories.findIndex(m => !m.pinned);
+    if (idx === -1) break;
+    memories.splice(idx, 1);
+  }
+  return { ...(store ?? {}), memories };
+}
+
 // ---- context assembler --------------------------------------------------
 // Pure function: same inputs → same { messages, manifest }. The manifest
 // records exactly what was injected and why (powers the Context Inspector).
@@ -2143,10 +2164,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   const memCap = Math.floor(budget * caps.memory);
   // Branch visibility (same rule as the lore layer): a memory stamped with
   // atMsg (the leaf it was summarized under) injects only while that node is
-  // on the active path; unstamped memories are global.
+  // on the active path; unstamped memories are global. A card superseded by
+  // the lore pass (supAtMsg on path) hides too — its replacement rides the
+  // same stamps, so each branch sees the newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
-  const memHidden = memStore.filter(m => m?.atMsg != null && !pathIds.has(m.atMsg));
-  const memAll = memStore.filter(m => !(m?.atMsg != null && !pathIds.has(m.atMsg)));
+  const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
+  const memSuped = (m) => !memGone(m) && m?.supAtMsg != null && pathIds.has(m.supAtMsg);
+  const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
+  const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
   const memThreshold = typeof settings.semanticThreshold === 'number' ? settings.semanticThreshold : 0.55;
   const memPinnedList = memAll.filter(m => m.pinned).sort((a, b) => a.createdAt - b.createdAt);
@@ -2187,9 +2212,10 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
         ? 'below-threshold' : 'over-budget',
       ...(smart ? { score: memScores.get(m.id) ?? null } : {}),
       tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))
-      // Belong to a sibling branch — hidden, not deleted.
+      // Belong to a sibling branch, or superseded by a revision the pass
+      // wrote on this branch — hidden, not deleted.
       .concat(memHidden.map(m => ({
-        id: m.id, pinned: !!m.pinned, reason: 'branch',
+        id: m.id, pinned: !!m.pinned, reason: memSuped(m) ? 'superseded' : 'branch',
         tokens: est(`- ${m.text}`), preview: toPreview(m.text), text: m.text ?? '' }))),
   };
 
@@ -2485,6 +2511,42 @@ function dismissQueuedLore(chat, queueId) {
   return { ...chat, loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
+// Accept a queued UPDATE proposal (updateOf set): resolves the target piece
+// by title against the caller-supplied merged view and funnels through the
+// tool-update machinery — scenario/global targets are shadowed into the
+// overlay, the update lands as a stamped revision. Unlike acceptQueuedLore
+// (new pieces, provenance stripped), the revision KEEPS its stamps: stripping
+// them would show the rewrite on branches that forked before it existed.
+// A vanished target (user delete) just drops the entry.
+function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, createdSwipe = null, atLen = null, now = Date.now() } = {}) {
+  const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
+  if (!q) return chat;
+  const target = (Array.isArray(allPieces) ? allPieces : [])
+    .find(p => (p.title ?? '').trim().toLowerCase() === (q.updateOf ?? q.title ?? '').trim().toLowerCase());
+  let work = chat;
+  if (target) {
+    const call = target.type === 'character'
+      ? { name: 'update_character', args: { name: target.title, content: q.content, ...(q.hasKeys ? { keys: q.keys } : {}), note: q.note } }
+      : { name: 'add_lore', args: { title: target.title, content: q.content, ...(q.hasKeys ? { keys: q.keys } : {}), note: q.note } };
+    work = applyToolCalls(work, [call], { now, atLen, nodeId, createdSwipe }, allPieces).chat;
+  }
+  return { ...work, loreQueue: (work.loreQueue ?? []).filter(e => e.id !== queueId) };
+}
+
+// Accept a queued MEMORY revision (kind: 'memory'): the revised text lands as
+// a fresh stamped card and the stale one is marked superseded (see
+// supersedeMemory). A vanished target (evicted/user-deleted) just drops the
+// entry.
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP } = {}) {
+  const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
+  if (!q) return chat;
+  const store = chat.memoryStore ?? { memories: [], cursor: 0 };
+  const exists = (store.memories ?? []).some(m => m?.id === q.memoryId);
+  return { ...chat,
+    memoryStore: exists ? supersedeMemory(store, q.memoryId, q.content, now, cap, atLen, atMsg) : store,
+    loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
+}
+
 function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null, createdSwipe = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
@@ -2499,6 +2561,10 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   // replaced swipe keeps its own state; derivation, never deletion).
   const provenance = { createdAt: now, ...(Number.isFinite(atLen) ? { atLen } : {}), createdBy: nodeId,
     ...(Number.isInteger(createdSwipe) ? { createdSwipe } : {}) };
+  // Optional one-line change summary (the lore-maintenance pass sends it; the
+  // tool protocol itself has no note field). Carried on the revision entry
+  // and shown in the editor's Change history.
+  const revNote = String(args.note ?? '').trim().slice(0, 300) || null;
   // Revision log for EVERY tool-driven content mutation (universal rollback
   // rule): piece.content/keys always mirror the LAST revision, and the
   // assembler views the piece at the last revision on view for the active
@@ -2515,7 +2581,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
   const withRevision = (p, seed, content, keys) => ({
     ...p, content, ...(keys ? { keys } : {}),
     revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
-      { content, keys: keys ?? p.keys ?? [], ...provenance }],
+      { content, keys: keys ?? p.keys ?? [], ...provenance, ...(revNote ? { note: revNote } : {}) }],
   });
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
@@ -2759,7 +2825,58 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
 const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
-const DEFAULT_LORE_EXTRACT_PROMPT = 'You maintain the lorebook of an ongoing roleplay. Extract up to {{max}} NEW lasting facts about the world, places, objects, or factions from the recent conversation: long-term reference material, not momentary events, and never facts already in the existing lore. Reply with a JSON array only: [{"title":"…","content":"…","keys":["…"]}], or [] if nothing qualifies.';
+const DEFAULT_LORE_EXTRACT_PROMPT = `You maintain the memory notes and lorebook of an ongoing roleplay. You are given the current memory notes (each with its id), the current lore (each piece already reflects this chat's latest revisions), and the recent conversation. Reply with a JSON object only:
+{"new": [{"title":"…","content":"…","keys":["…"]}], "updates": [{"title":"…","content":"…","keys":["…"],"note":"…"}], "memories": [{"id":"…","text":"…","note":"…"}]}
+Rules:
+- "new": up to {{max}} NEW lasting facts about the world, places, objects, or factions: long-term reference material, not momentary events, never facts already in the lore.
+- "updates": rewrite an EXISTING lore piece when the story has genuinely changed what it says. title must match an existing piece exactly; content is the piece's FULL updated text with the change folded in, never a fragment or a diff; keys may be omitted to keep the current ones; note is one short sentence stating what changed.
+- "memories": revise a memory note the story has made stale or wrong. id must match an existing note exactly; text is the FULL revised note; note is one short sentence stating what changed. Never revise a note just to rephrase it.
+Use [] for any array with nothing to offer.`;
+
+// Tolerant extraction of the lore-maintenance pass reply. Accepts the current
+// object contract and the legacy bare-array one (treated as "new" only —
+// custom loreExtractPrompt settings written for it keep working). Returns
+// sanitized { fresh, updates, memoryUpdates }; hasKeys marks whether the
+// reply specified keys at all (omitted = keep the piece's current keys).
+function parseLorePassOutput(out) {
+  const empty = { fresh: [], updates: [], memoryUpdates: [] };
+  const s = String(out ?? '');
+  let obj = null;
+  const mo = s.match(/\{[\s\S]*\}/);
+  if (mo) {
+    try {
+      const p = JSON.parse(mo[0]);
+      // Only the real contract counts — a legacy bare-array reply also
+      // contains a {...} span, and it must fall through to the array path.
+      if (p && typeof p === 'object' && !Array.isArray(p)
+          && (Array.isArray(p.new) || Array.isArray(p.updates) || Array.isArray(p.memories))) obj = p;
+    } catch { /* fall through */ }
+  }
+  if (!obj) {
+    const ma = s.match(/\[[\s\S]*\]/);
+    if (ma) {
+      try { const p = JSON.parse(ma[0]); if (Array.isArray(p)) obj = { new: p }; } catch { /* fall through */ }
+    }
+  }
+  if (!obj) return empty;
+  const cleanKeys = (ks) => (Array.isArray(ks) ? ks : []).map(k => String(k).trim())
+    .filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5);
+  const cleanNote = (n) => String(n ?? '').trim().slice(0, 300) || null;
+  const cleanPiece = (p) => ({
+    title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
+    content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
+    keys: cleanKeys(p?.keys),
+  });
+  const fresh = (Array.isArray(obj.new) ? obj.new : []).map(cleanPiece).filter(p => p.title && p.content);
+  const updates = (Array.isArray(obj.updates) ? obj.updates : [])
+    .map(p => ({ ...cleanPiece(p), hasKeys: Array.isArray(p?.keys), note: cleanNote(p?.note) }))
+    .filter(p => p.title && p.content);
+  const memoryUpdates = (Array.isArray(obj.memories) ? obj.memories : [])
+    .map(p => ({ id: String(p?.id ?? '').trim(), text: String(p?.text ?? '').trim().slice(0, 8000),
+      note: cleanNote(p?.note) }))
+    .filter(p => p.id && p.text);
+  return { fresh, updates, memoryUpdates };
+}
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
 const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
@@ -2812,7 +2929,10 @@ function normalizeLorePiece(p) {
       atLen: Number.isFinite(r?.atLen) ? r.atLen : null,
       createdAt: Number.isFinite(r?.createdAt) ? r.createdAt : null,
       createdBy: r?.createdBy != null ? String(r.createdBy) : null,
-      createdSwipe: Number.isInteger(r?.createdSwipe) ? r.createdSwipe : null })) };
+      createdSwipe: Number.isInteger(r?.createdSwipe) ? r.createdSwipe : null,
+      // Lore-pass change summary (v4.11.7) — carry it through the heal or any
+      // editor Save (which normalizes the draft) silently strips the notes.
+      note: typeof r?.note === 'string' && r.note ? r.note : undefined })) };
 }
 function normalizeScenario(s) {
   const o = (s && typeof s === 'object') ? s : {};
@@ -4730,7 +4850,7 @@ function RevisionRow({ rev, n }) {
         <span class="hint">${rev.atLen != null ? `msg ${rev.atLen} · ` : ''}${stamp}</span>
       </div>
       ${!open && html`<div class="ir-preview">${toPreview(rev.content, 140)}</div>`}
-      ${open && html`<div class="ir-content">${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
+      ${open && html`<div class="ir-content">${rev.note ? `[change] ${rev.note}\n\n` : ''}${rev.content}${(rev.keys ?? []).length ? `\n\n[keys] ${rev.keys.join(', ')}` : ''}</div>`}
     </div>`;
 }
 
@@ -4766,7 +4886,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">
           <span>Change history (${piece.revisions.length})</span>
-          <div class="hint">Versions written by tool calls or enrichment, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
+          <div class="hint">Versions written by tool calls, enrichment, or the lore pass, newest first — rev 1 is the pre-tool original. Rewinding the chat past a version restores the earlier text.</div>
           ${[...piece.revisions].reverse().map((r, i) => html`
             <${RevisionRow} key=${i} rev=${r} n=${piece.revisions.length - i} />`)}
         </div>`}
@@ -5929,10 +6049,10 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
     <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
       ${loreQueue.map(q => html`
         <${InspectorRow} key=${q.id}
-          pills=${[{ text: q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
+          pills=${[{ text: q.kind === 'memory' ? 'memory' : q.updateOf ? 'update' : q.source === 'extract' ? 'extracted' : 'tool', cls: '' }]}
           title=${q.title || '(untitled)'}
           preview=${toPreview(q.content, 140)}
-          content=${`${q.content ?? ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
+          content=${`${q.note ? `[change] ${q.note}\n\n` : ''}${q.content ?? ''}${q.oldContent != null ? `\n\n[was] ${q.oldContent}` : ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
       <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accept or dismiss in the Chat tab.</div>
     <//>`;
   if (!manifest?.layers) return html`
@@ -6080,6 +6200,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
         <div class="mem-item" key=${m.id}>
           <div class="row">
             ${m.pinned && html`<span class="pill pinned">pinned</span>`}
+            ${m.supBy && html`<span class="pill" title="Revised by the lore pass — hidden from context on branches past the revision point; the original text is kept for rewind and older branches">superseded</span>`}
             <span class="hint" style=${{ flex: 1 }}>${fmtDate(m.createdAt, dateFormat)}</span>
             <button class="btn small" onClick=${() => setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, pinned: !x.pinned } : x))}>
               ${m.pinned ? 'unpin' : 'pin'}</button>
@@ -6093,7 +6214,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
   const pieces = Array.isArray(chat.lorePieces) ? chat.lorePieces : [];
@@ -6106,6 +6227,27 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   const allPieces = mergedLorePieces(scenario, chat, characters);
   const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => update({ ...chat, lorePieces });
+  // Queue accept routing: new pieces become user-owned (provenance stripped,
+  // visible on every branch); UPDATE proposals keep their stamps (a rewrite
+  // must stay scoped to the branch that accepted it); memory revisions land
+  // as a fresh card superseding the stale one.
+  const acceptQueued = (q) => {
+    const path = getActivePath(chat.messages ?? {}, chat.activeLeafId);
+    if (q.kind === 'memory')
+      return update(acceptQueuedMemory(chat, q.id, { atLen: path.length,
+        atMsg: chat.activeLeafId ?? null, cap: cap ?? MEMORY_CAP }));
+    if (q.updateOf) {
+      const view = allPieces
+        .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
+        .map(p => pieceAtPath(p, pathIds, chat.messages ?? null));
+      return update(acceptQueuedUpdate(chat, q.id, { allPieces: view,
+        nodeId: chat.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: chat.messages?.[chat.activeLeafId]?.activeSwipe ?? null }));
+    }
+    update(acceptQueuedLore(chat, q.id));
+  };
+  const queuePill = (q) => q.kind === 'memory' ? 'memory' : q.updateOf ? 'update'
+    : q.source === 'extract' ? 'extracted' : 'tool';
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
   const update = (c) => onUpdateChat(c, { touch: false });
@@ -6134,16 +6276,19 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       ${(chat.loreQueue ?? []).length > 0 && html`
         <div class="field">
           <span>Suggested lore — awaiting review (${chat.loreQueue.length})</span>
-          <div class="hint">Proposed by the model or the extraction pass. Accept moves it into this chat's lore as yours; dismiss discards it.</div>
+          <div class="hint">Proposed by the model or the maintenance pass. Accept moves a new piece into this chat's lore as yours; an update rewrites the named piece for this chat only (the original card is kept, and rewind restores it); a memory revision replaces the stale note going forward. Dismiss discards the proposal.</div>
           ${chat.loreQueue.map(q => html`
             <div class="lore-card" key=${q.id}>
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
-                <span class="pill">${q.source === 'extract' ? 'extracted' : 'tool'}</span>
-                <button class="btn small" onClick=${() => update(acceptQueuedLore(chat, q.id))}>accept</button>
+                <span class="pill">${queuePill(q)}</span>
+                <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
                 <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
               </div>
+              ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
               <div class="hint" style=${{ padding: '2px 8px 6px', whiteSpace: 'pre-wrap' }}>${q.content}</div>
+              ${q.oldContent != null && html`
+                <div class="hint" style=${{ padding: '0 8px 6px', whiteSpace: 'pre-wrap' }}>was: ${q.oldContent.slice(0, 400)}${q.oldContent.length > 400 ? '…' : ''}</div>`}
               ${(q.keys ?? []).length > 0 && html`
                 <div class="hint" style=${{ padding: '0 8px 6px' }}>keys: ${q.keys.join(', ')}</div>`}
             </div>`)}
@@ -7893,7 +8038,7 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} />`}
     </div>`;
 }
 
@@ -9013,11 +9158,19 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
   }
 
-  // ---- emergent lore extraction ----
-  // On the memory cadence, an aux call proposes up to 3 NEW lore pieces from
-  // the recent conversation. 'queue' mode (default): proposals wait for review
-  // in chat settings. 'auto': applied straight to chat lore. 'off': nothing.
+  // ---- emergent lore maintenance ----
+  // On the memory cadence, an aux pass reviews the chat's whole knowledge
+  // state against the recent conversation and can: propose NEW lore pieces,
+  // UPDATE existing pieces (any layer — scenario/global targets are shadowed
+  // into the chat overlay, the update lands as a stamped revision), and
+  // REVISE stale memory notes (supersede: fresh stamped card, old card marked
+  // hidden from this point on this branch — derivation, never deletion).
+  // 'queue' mode (default): everything waits for review in Chat options.
+  // 'auto': applied straight away. 'off': nothing.
   // Failures degrade silently (console.warn) and the cursor still advances.
+  // Prompt budgets for the maintenance pass: per-piece content truncation and
+  // the total lore digest cap (chat-local pieces are kept over scenario ones).
+  const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
   async function maybeExtractLore(chatObj) {
     const { scenarios: sc, personas: pe, settings: st } = ref.current;
     const scen = sc[chatObj.scenarioId];
@@ -9032,8 +9185,8 @@ function Main({ storage, storageKind, storageFailed }) {
     if (pathLen - (chatObj.emergentCursor ?? 0) < every) return;
     // Merge-on-write: re-read the chat at save time (a generation may have
     // advanced it during the aux call) and apply the lore changes to the
-    // CURRENT object, so only lorePieces/loreQueue/emergentCursor are
-    // overwritten. Chat deleted mid-call → drop the write.
+    // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
+    // are overwritten. Chat deleted mid-call → drop the write.
     const advance = (fn) => {
       const cur = ref.current.chats[chatObj.id];
       if (cur) saveChat({ ...fn(cur), emergentCursor: pathLen });
@@ -9043,46 +9196,115 @@ function Main({ storage, storageKind, storageFailed }) {
       .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
       .join('\n\n');
     if (!recent.trim()) return;
-    const titles = mergedLorePieces(scen, chatObj, ref.current.characters).map(p => (p.title ?? '').trim()).filter(Boolean);
+    const pathIds = new Set(path.map(n => n.id));
+    // Branch-current lore view: off-branch pieces are hidden and each piece
+    // is derived at its last on-view revision — a chat-shadowed card feeds
+    // the CHAT revision into the pass (and back out as the update base), so
+    // the stale scenario/global original is never seen or clobbered.
+    const loreView = (c) => {
+      const ids = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
+      return mergedLorePieces(scen, c, ref.current.characters)
+        .filter(p => pieceVisibleAt(p, ids, c.messages))
+        .map(p => pieceAtPath(p, ids, c.messages));
+    };
+    const view = loreView(chatObj);
+    // Lore digest, char-budgeted; iterate chat-local-first so the cap drops
+    // static scenario pieces before chat-owned ones.
+    const loreLines = [];
+    let loreChars = 0;
+    for (const p of [...view].reverse()) {
+      const content = String(p?.content ?? '').trim();
+      if (!(p?.title ?? '').trim() || !content) continue;
+      const entry = `${p.type === 'character' ? '[character] ' : ''}${p.title}`
+        + `${(p.keys ?? []).length ? ` (keys: ${p.keys.join(', ')})` : ''}\n${content.slice(0, PASS_PIECE_CHARS)}`;
+      if (loreChars + entry.length > PASS_LORE_CHARS) continue;
+      loreLines.unshift(entry); loreChars += entry.length;
+    }
+    // Memory digest (ids included so the pass can target revisions): visible
+    // cards only — off-branch and already-superseded ones are out of scope.
+    const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
+      && !(m.atMsg != null && !pathIds.has(m.atMsg))
+      && !(m.supAtMsg != null && pathIds.has(m.supAtMsg)));
+    const memLines = [];
+    let memChars = 0;
+    for (const m of [...memVisible].reverse()) {
+      const line = `- [${m.id}] ${m.text}`;
+      if (memLines.length >= MEM_PRIOR_MAX || memChars + line.length > MEM_PRIOR_CHARS) break;
+      memLines.unshift(line); memChars += line.length;
+    }
     try {
       const out = await auxLogged('lore-extract', {
         endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
         system: (st.loreExtractPrompt || DEFAULT_LORE_EXTRACT_PROMPT)
           .replaceAll('{{max}}', String(Math.max(1, st.loreExtractMax ?? 5))),
-        user: `Existing lore: ${titles.join(', ') || '(none)'}\n\nRecent conversation:\n\n${recent}\n\nJSON array:`,
-        maxTokens: st.loreExtractMaxTokens ?? 1500, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
+        user: `${memLines.length ? `Memory notes:\n${memLines.join('\n')}\n\n` : ''}`
+          + `Existing lore:\n${loreLines.join('\n\n') || '(none)'}\n\n`
+          + `Recent conversation:\n\n${recent}\n\nJSON object:`,
+        maxTokens: st.loreExtractMaxTokens ?? 3000, temperature: st.loreExtractTemp ?? 0.3, stop: st.stopStrings,
       }, chatObj.id);
-      const m = out.match(/\[[\s\S]*\]/);
-      const proposals = m ? JSON.parse(m[0]) : [];
-      const existing = new Set(titles.map(t => t.toLowerCase()));
-      const queued = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-      const fresh = (Array.isArray(proposals) ? proposals : [])
-        .map(p => ({
-          title: String(p?.title ?? '').trim().slice(0, TOOL_NAME_MAX),
-          content: String(p?.content ?? '').trim().slice(0, TOOL_TEXT_MAX),
-          keys: (Array.isArray(p?.keys) ? p.keys : []).map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5),
-        }))
-        .filter(p => p.title && p.content
-          && !existing.has(p.title.toLowerCase()) && !queued.has(p.title.toLowerCase()))
-        .slice(0, Math.max(1, st.loreExtractMax ?? 5));
-      if (fresh.length) {
-        advance((cur) => {
-          let work = cur;
-          if (mode === 'auto') {
-            // Stamp with the live leaf (+ its viewed swipe): auto-mode pieces
-            // stay scoped to the branch they were extracted from — derivation
-            // replaces the old atLen rewind cutoff.
-            work = applyToolCalls(work, fresh.map(p => ({ name: 'add_lore', args: p })),
-              { now: Date.now(), atLen: pathLen, nodeId: cur.activeLeafId ?? null,
-                createdSwipe: cur.messages?.[cur.activeLeafId]?.activeSwipe ?? null }).chat;
-          } else {
-            for (const p of fresh) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+      const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
+      const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
+      const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
+      const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
+      const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+      const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+      const freshOk = fresh
+        .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+        .slice(0, maxNew);
+      // Updates must name a known piece and actually change its current text.
+      const updatesOk = updates
+        .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
+        .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
+          && u.content !== String(u.target.content ?? '').trim())
+        .slice(0, maxNew);
+      // Memory revisions must name a visible card and change its text.
+      const memsOk = memoryUpdates
+        .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
+        .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+        .slice(0, PASS_MEM_CAP);
+      if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+      const now = Date.now();
+      const stamps = () => {
+        const cur = ref.current.chats[chatObj.id];
+        const curPath = cur ? getActivePath(cur.messages, cur.activeLeafId) : path;
+        return { now, atLen: curPath.length, nodeId: cur?.activeLeafId ?? null,
+          createdSwipe: cur?.messages?.[cur.activeLeafId]?.activeSwipe ?? null };
+      };
+      advance((cur) => {
+        let work = cur;
+        if (mode === 'auto') {
+          // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
+          // stay scoped to the branch they were made on — derivation replaces
+          // the old atLen rewind cutoff.
+          const { now: n2, ...st2 } = stamps();
+          if (freshOk.length)
+            work = applyToolCalls(work, freshOk.map(p => ({ name: 'add_lore', args: p })),
+              { now: n2, ...st2 }, loreView(work)).chat;
+          for (const u of updatesOk) {
+            const call = u.target.type === 'character'
+              ? { name: 'update_character', args: { name: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } }
+              : { name: 'add_lore', args: { title: u.target.title, content: u.content, ...(u.hasKeys ? { keys: u.keys } : {}), note: u.note } };
+            work = applyToolCalls(work, [call], { now: n2, ...st2 }, loreView(work)).chat;
           }
-          return work;
-        });
-        return;
-      }
-      advance((c) => c);
+          const maxChars = st.memoryMaxChars ?? 5000;
+          for (const u of memsOk)
+            if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
+              work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
+                u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId) };
+        } else {
+          for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
+          for (const u of updatesOk)
+            work = queueLorePiece(work, { title: u.target.title, content: u.content,
+              keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys, note: u.note,
+              updateOf: u.target.title, oldContent: String(u.target.content ?? ''),
+              source: 'extract', atLen: pathLen });
+          for (const u of memsOk)
+            work = queueLorePiece(work, { kind: 'memory', title: '(memory note)',
+              content: u.text, note: u.note, memoryId: u.id,
+              oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
+        }
+        return work;
+      });
     } catch (e) {
       console.warn('Emergent lore extraction failed:', e);
       advance((c) => c);
@@ -9288,7 +9510,11 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- generation ----
-  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null } = {}) {
+  // appendedSwipe: the caller added an empty swipe to an EXISTING node before
+  // firing (regenerate, regen-from-token). discardEmptySwipe may only pop a
+  // swipe when this holds — a bare continuation appends nothing, so popping
+  // there would destroy a real take.
+  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
@@ -9458,9 +9684,10 @@ function Main({ storage, storageKind, storageFailed }) {
     let work = ref.current.chats[chatObj.id] ?? chatObj;
     // ^ Re-base on the stored chat, not the caller's snapshot: a background
     // merge-on-write (an image job's patch, enrichment) may have landed
-    // between the caller's read and the stream start. Callers upsert the
-    // chat carrying the new empty swipe before firing, so our node survives
-    // the re-base.
+    // between the caller's read and the stream start. Callers saveChat the
+    // chat carrying the new empty swipe before firing (ref-synced), so the
+    // stored copy always includes our node — never reintroduce a bare
+    // upsertChat append upstream of fireGeneration.
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
@@ -9528,7 +9755,11 @@ function Main({ storage, storageKind, storageFailed }) {
     };
     // Remove the empty generating swipe (or the fresh placeholder node) when
     // nothing was ever written — applies to errors, dropped connections,
-    // empty completions, and Stop-before-first-token alike. World state needs
+    // empty completions, and Stop-before-first-token alike. Only state the
+    // CALLER appended for this generation may be discarded: fresh removes the
+    // placeholder node, appendedSwipe pops the new take — a bare continuation
+    // appended nothing, so it must never pop a pre-existing swipe.
+    // World state needs
     // no restore: the replaced swipe's tool writes were never pruned (they
     // hide by swipe-derivation), so a failed retry leaves them untouched.
     const discardEmptySwipe = () => {
@@ -9536,14 +9767,14 @@ function Main({ storage, storageKind, storageFailed }) {
       if (!n) return;
       const cur = ref.current.chats[work.id];
       if (!cur) return; // chat deleted mid-generation — never resurrect it
-      if (n.swipes.length > 1) {
-        const swipes = n.swipes.slice(0, -1);
-        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
-        upsertChat(work.id, work);
-      } else if (fresh) {
+      if (fresh) {
         const messages = { ...work.messages };
         delete messages[nodeId];
         work = { ...cur, messages, activeLeafId: n.parentId, updatedAt: Date.now() };
+        upsertChat(work.id, work);
+      } else if (appendedSwipe && n.swipes.length > 1) {
+        const swipes = n.swipes.slice(0, -1);
+        work = { ...cur, messages: { ...work.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, updatedAt: Date.now() };
         upsertChat(work.id, work);
       }
     };
@@ -9919,7 +10150,12 @@ function Main({ storage, storageKind, storageFailed }) {
     if (!generationReady(c)) return;
     const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
     const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
-    upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+    // saveChat, not bare upsertChat: the append must reach ref.current
+    // synchronously — runGeneration re-bases on the stored chat at stream
+    // start, and React may not have flushed a plain upsertChat yet (a
+    // greeting regen's prep is fully synchronous, so the re-base would read
+    // the pre-append snapshot and overwrite the viewed swipe).
+    saveChat(c2);
     fireGeneration(c2, asstId, { fresh: true });
   }
   function handleContinue(c) {
@@ -9930,7 +10166,7 @@ function Main({ storage, storageKind, storageFailed }) {
       fireGeneration(c, last.id, { continuation: true });
     } else {
       const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-      upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+      saveChat(c1);
       fireGeneration(c1, id, { fresh: true });
     }
   }
@@ -9978,7 +10214,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         if (!generationReady(c)) return null;
         const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-        upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+        saveChat(c1);
         fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
         return null;
       }
@@ -9999,7 +10235,9 @@ function Main({ storage, storageKind, storageFailed }) {
         const slot = uid();
         const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
           swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
-        upsertChat(c2.id, { ...c2, updatedAt: Date.now() });
+        // saveChat: the image job's completion patch merge-on-writes against
+        // ref.current.chats — the pending node must be there synchronously.
+        saveChat(c2);
         runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
         return null;
       }
@@ -10154,7 +10392,7 @@ function Main({ storage, storageKind, storageFailed }) {
     // The regenerated node becomes the tip: the previous continuation is kept
     // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    upsertChat(c1.id, c1);
+    saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
     fireGeneration(c1, nodeId);
   };
   // Regenerate from a token: new swipe whose text starts with tokens[0..i]
@@ -10171,8 +10409,10 @@ function Main({ storage, storageKind, storageFailed }) {
     const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
     const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
     const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    upsertChat(c1.id, c1);
-    fireGeneration(c1, nodeId, { continuation: true });
+    saveChat(c1);
+    // continuation drives the prefill mechanics, but the caller DID append a
+    // swipe — an abort may discard it (appendedSwipe).
+    fireGeneration(c1, nodeId, { continuation: true, appendedSwipe: true });
   };
   // Swiping a mid-chain node re-derives the visible branch below it: each
   // swipe keeps its own continuation (children record the parent swipe they
@@ -10389,7 +10629,7 @@ function Main({ storage, storageKind, storageFailed }) {
     const parent = c.messages[nodeId ?? c.activeLeafId];
     if (!parent || parent.role !== 'user') return;
     const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
-    upsertChat(c1.id, { ...c1, updatedAt: Date.now() });
+    saveChat(c1);
     fireGeneration(c1, id, { fresh: true });
   };
 

@@ -1242,3 +1242,22 @@ Note: this only changes the default prompt text; existing chats with a customize
 - An image that finished generating while a message reply was streaming no longer stays a blank shimmer forever. Image jobs write their result merge-on-write, but the generation loop rebuilds the message tree from a start-of-generation snapshot on every streamed token, so a patch landing mid-stream was silently reverted — and on the next chat open the orphaned pending entry healed into a bogus "image unavailable" note. The image job now waits out any generation running on its chat before patching (the result is already in hand, so waiting costs nothing), and generation re-bases on the freshest stored chat at stream start.
 - Name collisions between a chat/scenario character and a global character card no longer leak the card's avatar onto the imageless piece: a chat-registered "Mia" with no portrait used to show the unlinked global card Mia's avatar in the chat column while its own editor (correctly) showed none. The avatar map is now scoped to linked cards only, folds scenario character pieces in (their avatars render at all now), and a higher-priority piece without an avatar shadows the same-named lower-priority entry instead of falling through to it. Linked cards shadowed into a chat by a tool update keep their portrait (the avatar pair now rides the derived lore piece, so avatar enrichment no longer re-renders one the card already has), and /pov resolves a same-name collision to the chat piece like every other surface.
 - The model picker's dropdown can be scrolled by touch again: rows used to commit on pointerdown, so a drag meant to scroll the list selected a model and closed the popover. Rows now pick on click (never fired after a scroll gesture) and the popover declares vertical panning.
+
+### v4.11.7
+
+**Added**
+
+- The cadence lore pass is now a full maintenance pass. Besides proposing new pieces, it reviews the chat's whole knowledge state against the recent conversation — all merged lore (scenario, chat overlay, and linked character cards) plus the visible memory notes — and can rewrite an existing piece or revise a stale memory note. Piece updates land like `update_character` writes: scenario/global targets are shadowed into the chat overlay and the update is a stamped revision, so the original card never mutates, other chats never see it, and rewind or a sibling branch brings the old text back. Memory revisions never rewrite a card: the revised text lands as a fresh stamped note and the stale one is marked superseded, hidden by derivation only on branches past the revision point (it surfaces in the Inspector as "Not injected · superseded" and keeps a "superseded" badge in the Memory tab). Each update carries a one-line change note, shown in the review queue and in the piece editor's Change history.
+- Suggested-lore review now covers the new proposal kinds: updates are badged "update" and memory revisions "memory", each with the change note and a was-preview of the text being replaced. Accepting a new piece is unchanged (it becomes yours, visible on every branch); accepting an update or memory revision keeps its branch stamps, so the rewrite only exists where you accepted it.
+- The pass feeds the branch-current view of every piece: a character card already shadowed and revised at chat scope is presented (and updated further) at its current chat revision, never at the stale scenario/global original.
+
+**Changed**
+
+- The default lore-extraction prompt now specifies the three-part maintenance contract (new / updates / memories). A custom extraction prompt written for the old bare-array contract keeps working — array replies parse as new-pieces-only.
+- The extraction reply budget default (`loreExtractMaxTokens`) rises from 1500 to 3000, since updates carry full rewritten card text.
+
+**Fixed**
+
+- Regenerating the root greeting (or `/pov` on a greeting-only chat) no longer overwrites the swipe you were viewing: generation entry points now write the appended swipe through the ref-syncing save path, so the generation re-base always sees it (the old code depended on a React flush that a fully synchronous prep never waits for).
+- Stopping a `/continue` during prep (or a prep error there) no longer deletes a real existing swipe — the empty-swipe discard now only touches state the caller actually appended.
+- Editing and saving a lore piece no longer strips the change notes from its Change history (the piece normalizer now carries revision notes through).
