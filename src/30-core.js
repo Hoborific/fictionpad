@@ -1758,7 +1758,7 @@ function normalizeScenario(s) {
     name: asStr(o.name), description: asStr(o.description),
     tags: asArr(o.tags).map(String),
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
-    // Uncropped ≤1024 companion to the 256² avatar thumb — the chat lightbox
+    // Uncropped full-res companion to the 256² avatar thumb — the chat lightbox
     // and PNG card export read avatarFull || avatar; '' falls back to the thumb.
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
@@ -1779,7 +1779,7 @@ function normalizeCharacter(c) {
   return { ...o, name: asStr(o.name), content: asStr(o.content),
     keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
-    // Uncropped ≤1024 companion to the 256² avatar thumb (see normalizeScenario).
+    // Uncropped full-res companion to the 256² avatar thumb (see normalizeScenario).
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     // Alternate first messages (card imports) — greeting swipes in new direct chats.
     alternateGreetings: asArr(o.alternateGreetings).map(String),

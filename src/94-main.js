@@ -321,12 +321,25 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterColors = useMemo(() => Object.fromEntries(
     Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
       .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
+  // Branch-visibility scope for the avatar derivations below: the node ids on
+  // the active path plus the viewed swipe per node are exactly the message
+  // state pieceVisibleAt reads. Keyed on a STRUCTURAL signature rather than
+  // chat.messages identity — applyText rebuilds the messages map per streamed
+  // token, and a messages-keyed memo would recompute (and re-render every
+  // MessageItem through the avatars prop) on each one. Under an unchanged
+  // signature a stale messages identity is equivalent.
+  const branchSig = chat
+    ? chat.activeLeafId + '|' + Object.values(chat.messages ?? {}).map(n => `${n.id}:${n.activeSwipe ?? 0}`).sort().join(',')
+    : '';
+  const chatPathIds = useMemo(
+    () => (chat ? pathIdSet(chat.messages, chat.activeLeafId) : null),
+    [branchSig]);
   // Avatar images: linked global character cards with one set (scenario ∪
   // chat links — an UNLINKED card never speaks, so it must never lend its
   // avatar), keyed by lowercase name, then the scenario's and the chat's
   // character-type lore pieces, and finally the active chat's persona. Each
   // entry is { src, full } — the 256² thumb for the column/chips, the
-  // uncropped ≤1024 companion (avatarFull || avatar) for the click-to-expand
+  // uncropped full-res companion (avatarFull || avatar) for the click-to-expand
   // lightbox. A piece overlays by NAME: with an avatar it replaces the
   // lower-priority entry, WITHOUT one it still shadows the name (a same-named
   // chat/scenario piece wins the collision — its missing avatar is
@@ -338,11 +351,12 @@ function Main({ storage, storageKind, storageFailed }) {
     const map = Object.fromEntries(
       Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim() && linked.has(c.id))
         .map(c => [c.name.trim().toLowerCase(), { src: c.avatar, full: c.avatarFull || c.avatar }]));
-    // Deliberately NOT scoped by pieceVisibleAt: a same-name piece on a
-    // hidden branch leaking its avatar is the only bleed vector, and such
-    // cross-branch name collisions are vanishingly rare.
+    // Scoped by pieceVisibleAt: a tool-registered character whose registering
+    // swipe/branch is off view lends no avatar — swiping the registration away
+    // restores the pre-registration formatting, swiping back restores it.
     for (const p of [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]) {
       if (p?.type !== 'character' || !(p.title ?? '').trim()) continue;
+      if (!pieceVisibleAt(p, chatPathIds, chat?.messages)) continue;
       const key = p.title.trim().toLowerCase();
       if (p.avatar) map[key] = { src: p.avatar, full: p.avatarFull || p.avatar };
       else delete map[key]; // the winning piece has no image — show no image
@@ -350,18 +364,18 @@ function Main({ storage, storageKind, storageFailed }) {
     if (persona?.avatar && persona.name?.trim())
       map[persona.name.trim().toLowerCase()] = { src: persona.avatar, full: persona.avatarFull || persona.avatar };
     return map;
-  }, [characters, chatScenario, chat?.lorePieces, persona]);
+  }, [characters, chatScenario, chat?.lorePieces, persona, chatPathIds]);
   // The avatar column shows only when something this chat can speak as has an
-  // image: a linked character (scenario ∪ chat links), a scenario- or
-  // chat-owned character piece, or the active persona.
+  // image: a linked character (scenario ∪ chat links), a branch-visible
+  // scenario- or chat-owned character piece, or the active persona.
   const chatHasAvatars = useMemo(() => {
     if (persona?.avatar) return true;
     const pieceHas = [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]
-      .some(p => p?.type === 'character' && p.avatar);
+      .some(p => p?.type === 'character' && p.avatar && pieceVisibleAt(p, chatPathIds, chat?.messages));
     if (pieceHas) return true;
     return [...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]
       .some(id => characters?.[id]?.avatar);
-  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona]);
+  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona, chatPathIds]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.

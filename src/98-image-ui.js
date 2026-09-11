@@ -203,8 +203,8 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
   };
   // ✦: hand the host the live draft (a character card's .content; otherwise
   // persona/scenario .description + scenario .backstory), then crop the
-  // generated portrait like an upload. The ≤1024 generation lands on
-  // avatarFull at crop confirm, exactly like an upload's working copy.
+  // generated portrait like an upload. The native-resolution generation lands
+  // on avatarFull at crop confirm (an upload's working copy stays ≤1024).
   const generate = async () => {
     setGenBusy(true);
     try {

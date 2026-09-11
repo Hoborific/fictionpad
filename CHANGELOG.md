@@ -1328,3 +1328,12 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 **Changed**
 
 - README documents the maintenance pass and the `FICTIONPAD_UPSTREAM_TIMEOUT_MS` / `FICTIONPAD_MAX_BODY_MB` env knobs.
+
+
+### v4.11.10
+
+**Fixed**
+
+- Generated images no longer lose resolution and format on the way in: both image backends (OpenAI-compatible and ComfyUI) used to re-encode every result to JPEG capped at 1024px on the long edge, so a 960x1440 render came back as a 683x1024 JPEG. The backend's image now lands as-is — native resolution, original format (a ComfyUI PNG stays PNG) — for chat images, ✦ avatar portraits, and auto-enrichment portraits alike, and `imageSize` is honored exactly.
+
+- A tool-registered character's avatar no longer outlives its branch: the chat avatar map and the avatar-column layout gate are now scoped by branch/swipe visibility, so swiping away (or rewinding past) the generation that registered the character restores the pre-registration no-avatar formatting — previously every message kept the avatar-column layout with empty letter tiles. Swiping back restores the avatar, by the same derivation.

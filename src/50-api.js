@@ -594,7 +594,9 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
 }
 
 // ---- /images/generations (OpenAI-compatible; /image command) ----
-// One image per call, always returned as a JPEG data URL capped at 1024px.
+// One image per call, returned as a data URL at the backend's native
+// resolution and format — no downscale, no re-encode: imageSize is the
+// user's explicit size control, so a 960x1440 PNG render stays exactly that.
 // b64_json is the primary shape; a url response is fetched and converted
 // (through our own /proxy when the request went through it, so an absolute
 // image URL on a CORS-less host still loads). The LLM key is never sent on
@@ -648,8 +650,7 @@ async function generateImage({ endpoint, apiKey, serverToken, model, prompt, siz
   } else {
     throw new Error('Malformed images response — no b64_json or url in data[0]');
   }
-  const img = await loadImage(dataURL);
-  return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+  return dataURL;
 }
 
 const blobToDataURL = (blob) => new Promise((resolve, reject) => {
@@ -661,8 +662,9 @@ const blobToDataURL = (blob) => new Promise((resolve, reject) => {
 
 // ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
 // Queue the substituted workflow, poll /history until the run lands, then
-// download the first output image from /view. Same JPEG-data-URL contract as
-// the OpenAI path. ComfyUI answers identical graphs from its cache, so the
+// download the first output image from /view. Same native-resolution
+// data-URL contract as the OpenAI path (no downscale, no re-encode).
+// ComfyUI answers identical graphs from its cache, so the
 // history is checked BEFORE the first sleep — a cached run returns at once.
 // The workflow comes from settings.imageWorkflow (web UI "Save (API Format)"
 // export); substitution + seed rules live in substituteComfyWorkflow (core).
@@ -715,9 +717,7 @@ async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, pro
         err.status = imgRes.status;
         throw err;
       }
-      const dataURL = await blobToDataURL(await imgRes.blob());
-      const img = await loadImage(dataURL);
-      return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+      return blobToDataURL(await imgRes.blob());
     }
     if (Date.now() > deadline) throw new Error('ComfyUI timed out — the run never landed in history');
     await sleep(1500);

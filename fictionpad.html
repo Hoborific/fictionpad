@@ -962,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.9';
+const APP_VERSION = '4.11.10';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2993,7 +2993,7 @@ function normalizeScenario(s) {
     name: asStr(o.name), description: asStr(o.description),
     tags: asArr(o.tags).map(String),
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
-    // Uncropped ≤1024 companion to the 256² avatar thumb — the chat lightbox
+    // Uncropped full-res companion to the 256² avatar thumb — the chat lightbox
     // and PNG card export read avatarFull || avatar; '' falls back to the thumb.
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     backstory: asStr(o.backstory), greeting: asStr(o.greeting),
@@ -3014,7 +3014,7 @@ function normalizeCharacter(c) {
   return { ...o, name: asStr(o.name), content: asStr(o.content),
     keys: asArr(o.keys).map(String), greeting: asStr(o.greeting), color: asStr(o.color),
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
-    // Uncropped ≤1024 companion to the 256² avatar thumb (see normalizeScenario).
+    // Uncropped full-res companion to the 256² avatar thumb (see normalizeScenario).
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
     // Alternate first messages (card imports) — greeting swipes in new direct chats.
     alternateGreetings: asArr(o.alternateGreetings).map(String),
@@ -4337,7 +4337,9 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
 }
 
 // ---- /images/generations (OpenAI-compatible; /image command) ----
-// One image per call, always returned as a JPEG data URL capped at 1024px.
+// One image per call, returned as a data URL at the backend's native
+// resolution and format — no downscale, no re-encode: imageSize is the
+// user's explicit size control, so a 960x1440 PNG render stays exactly that.
 // b64_json is the primary shape; a url response is fetched and converted
 // (through our own /proxy when the request went through it, so an absolute
 // image URL on a CORS-less host still loads). The LLM key is never sent on
@@ -4391,8 +4393,7 @@ async function generateImage({ endpoint, apiKey, serverToken, model, prompt, siz
   } else {
     throw new Error('Malformed images response — no b64_json or url in data[0]');
   }
-  const img = await loadImage(dataURL);
-  return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+  return dataURL;
 }
 
 const blobToDataURL = (blob) => new Promise((resolve, reject) => {
@@ -4404,8 +4405,9 @@ const blobToDataURL = (blob) => new Promise((resolve, reject) => {
 
 // ---- ComfyUI backend (settings.imageBackend === 'comfyui') ----
 // Queue the substituted workflow, poll /history until the run lands, then
-// download the first output image from /view. Same JPEG-data-URL contract as
-// the OpenAI path. ComfyUI answers identical graphs from its cache, so the
+// download the first output image from /view. Same native-resolution
+// data-URL contract as the OpenAI path (no downscale, no re-encode).
+// ComfyUI answers identical graphs from its cache, so the
 // history is checked BEFORE the first sleep — a cached run returns at once.
 // The workflow comes from settings.imageWorkflow (web UI "Save (API Format)"
 // export); substitution + seed rules live in substituteComfyWorkflow (core).
@@ -4458,9 +4460,7 @@ async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, pro
         err.status = imgRes.status;
         throw err;
       }
-      const dataURL = await blobToDataURL(await imgRes.blob());
-      const img = await loadImage(dataURL);
-      return downscaleImageToDataURL(img, 1024, 'image/jpeg', 0.85);
+      return blobToDataURL(await imgRes.blob());
     }
     if (Date.now() > deadline) throw new Error('ComfyUI timed out — the run never landed in history');
     await sleep(1500);
@@ -8894,8 +8894,8 @@ function AvatarField({ draft, set, onGenerateAvatar = null }) {
   };
   // ✦: hand the host the live draft (a character card's .content; otherwise
   // persona/scenario .description + scenario .backstory), then crop the
-  // generated portrait like an upload. The ≤1024 generation lands on
-  // avatarFull at crop confirm, exactly like an upload's working copy.
+  // generated portrait like an upload. The native-resolution generation lands
+  // on avatarFull at crop confirm (an upload's working copy stays ≤1024).
   const generate = async () => {
     setGenBusy(true);
     try {
@@ -9248,12 +9248,25 @@ function Main({ storage, storageKind, storageFailed }) {
   const characterColors = useMemo(() => Object.fromEntries(
     Object.values(characters ?? {}).filter(c => c?.color && c.name?.trim())
       .map(c => [c.name.trim().toLowerCase(), c.color])), [characters]);
+  // Branch-visibility scope for the avatar derivations below: the node ids on
+  // the active path plus the viewed swipe per node are exactly the message
+  // state pieceVisibleAt reads. Keyed on a STRUCTURAL signature rather than
+  // chat.messages identity — applyText rebuilds the messages map per streamed
+  // token, and a messages-keyed memo would recompute (and re-render every
+  // MessageItem through the avatars prop) on each one. Under an unchanged
+  // signature a stale messages identity is equivalent.
+  const branchSig = chat
+    ? chat.activeLeafId + '|' + Object.values(chat.messages ?? {}).map(n => `${n.id}:${n.activeSwipe ?? 0}`).sort().join(',')
+    : '';
+  const chatPathIds = useMemo(
+    () => (chat ? pathIdSet(chat.messages, chat.activeLeafId) : null),
+    [branchSig]);
   // Avatar images: linked global character cards with one set (scenario ∪
   // chat links — an UNLINKED card never speaks, so it must never lend its
   // avatar), keyed by lowercase name, then the scenario's and the chat's
   // character-type lore pieces, and finally the active chat's persona. Each
   // entry is { src, full } — the 256² thumb for the column/chips, the
-  // uncropped ≤1024 companion (avatarFull || avatar) for the click-to-expand
+  // uncropped full-res companion (avatarFull || avatar) for the click-to-expand
   // lightbox. A piece overlays by NAME: with an avatar it replaces the
   // lower-priority entry, WITHOUT one it still shadows the name (a same-named
   // chat/scenario piece wins the collision — its missing avatar is
@@ -9265,11 +9278,12 @@ function Main({ storage, storageKind, storageFailed }) {
     const map = Object.fromEntries(
       Object.values(characters ?? {}).filter(c => c?.avatar && c.name?.trim() && linked.has(c.id))
         .map(c => [c.name.trim().toLowerCase(), { src: c.avatar, full: c.avatarFull || c.avatar }]));
-    // Deliberately NOT scoped by pieceVisibleAt: a same-name piece on a
-    // hidden branch leaking its avatar is the only bleed vector, and such
-    // cross-branch name collisions are vanishingly rare.
+    // Scoped by pieceVisibleAt: a tool-registered character whose registering
+    // swipe/branch is off view lends no avatar — swiping the registration away
+    // restores the pre-registration formatting, swiping back restores it.
     for (const p of [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]) {
       if (p?.type !== 'character' || !(p.title ?? '').trim()) continue;
+      if (!pieceVisibleAt(p, chatPathIds, chat?.messages)) continue;
       const key = p.title.trim().toLowerCase();
       if (p.avatar) map[key] = { src: p.avatar, full: p.avatarFull || p.avatar };
       else delete map[key]; // the winning piece has no image — show no image
@@ -9277,18 +9291,18 @@ function Main({ storage, storageKind, storageFailed }) {
     if (persona?.avatar && persona.name?.trim())
       map[persona.name.trim().toLowerCase()] = { src: persona.avatar, full: persona.avatarFull || persona.avatar };
     return map;
-  }, [characters, chatScenario, chat?.lorePieces, persona]);
+  }, [characters, chatScenario, chat?.lorePieces, persona, chatPathIds]);
   // The avatar column shows only when something this chat can speak as has an
-  // image: a linked character (scenario ∪ chat links), a scenario- or
-  // chat-owned character piece, or the active persona.
+  // image: a linked character (scenario ∪ chat links), a branch-visible
+  // scenario- or chat-owned character piece, or the active persona.
   const chatHasAvatars = useMemo(() => {
     if (persona?.avatar) return true;
     const pieceHas = [...(chatScenario?.lorePieces ?? []), ...(chat?.lorePieces ?? [])]
-      .some(p => p?.type === 'character' && p.avatar);
+      .some(p => p?.type === 'character' && p.avatar && pieceVisibleAt(p, chatPathIds, chat?.messages));
     if (pieceHas) return true;
     return [...(chatScenario?.characterIds ?? []), ...(chat?.characterIds ?? [])]
       .some(id => characters?.[id]?.avatar);
-  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona]);
+  }, [chatScenario, chat?.characterIds, chat?.lorePieces, characters, persona, chatPathIds]);
   const sidebarCollapsed = ui.sidebarCollapsed ?? (window.innerWidth <= 700); // phones start with the drawer closed
   const toggleSidebar = () => { setPeek(null); setUi(u => ({ ...u, sidebarCollapsed: !sidebarCollapsed })); };
   // Right drawer: ui.drawer is the open tab ('inspector' | 'samplers' | 'memory' | 'chat') or null.
