@@ -104,10 +104,14 @@ function RailScroll({ className, children }) {
 // blur/Enter — clamping on every keystroke fights mid-edit input (typing "3"
 // into a min-5 field would snap to 5 before the "0" for "30" arrives).
 // While focused, the text is authoritative; unfocused, it follows the prop.
-// A typed-but-unblurred edit also survives the enclosing modal closing under
-// it (Escape/scrim): commit runs on Escape (target-phase keydown fires before
-// the modal's window-level close handler) and once on unmount — commit()
-// no-ops when the value is unchanged.
+// A typed-but-unblurred VALID edit also survives the enclosing modal closing
+// under it (Escape/scrim/tab switch): commit runs on Escape (target-phase
+// keydown fires before the modal's window-level close handler) and once on
+// unmount. Both paths only fire on a complete, valid number — empty or
+// garbage text at those points means an interrupted edit, so the last good
+// value stays instead of the field snapping back to its fallback/default
+// (blur keeps the full semantics: empty commits the fallback/null — a
+// deliberate clear).
 function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
   const [text, setText] = useState(String(value ?? ''));
   const [focused, setFocused] = useState(false);
@@ -125,8 +129,12 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     if (n !== value) onCommit(n);
     setText(String(n ?? ''));
   };
-  const commitRef = useRef(commit);
-  commitRef.current = commit; // the unmount cleanup always sees the live closure
+  const commitIfValid = () => {
+    const raw = text.trim();
+    if (raw !== '' && Number.isFinite(Number(raw))) commit();
+  };
+  const commitRef = useRef(commitIfValid);
+  commitRef.current = commitIfValid; // the unmount cleanup always sees the live closure
   useEffect(() => () => commitRef.current(), []);
   return html`<input type="number" min=${min} max=${max} step=${step} placeholder=${placeholder} value=${text}
     onFocus=${() => setFocused(true)}
@@ -134,7 +142,7 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
     onBlur=${() => { setFocused(false); commit(); }}
     onKeyDown=${(e) => {
       if (e.key === 'Enter') e.currentTarget.blur();
-      else if (e.key === 'Escape') commit();
+      else if (e.key === 'Escape') commitIfValid();
     }} />`;
 }
 

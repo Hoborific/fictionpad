@@ -1337,3 +1337,10 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 - Generated images no longer lose resolution and format on the way in: both image backends (OpenAI-compatible and ComfyUI) used to re-encode every result to JPEG capped at 1024px on the long edge, so a 960x1440 render came back as a 683x1024 JPEG. The backend's image now lands as-is — native resolution, original format (a ComfyUI PNG stays PNG) — for chat images, ✦ avatar portraits, and auto-enrichment portraits alike, and `imageSize` is honored exactly.
 
 - A tool-registered character's avatar no longer outlives its branch: the chat avatar map and the avatar-column layout gate are now scoped by branch/swipe visibility, so swiping away (or rewinding past) the generation that registered the character restores the pre-registration no-avatar formatting — previously every message kept the avatar-column layout with empty letter tiles. Swiping back restores the avatar, by the same derivation.
+
+### v4.11.11
+
+**Fixed**
+
+- Number fields no longer reset to their default when a dialog, pane tab, or drawer closes under a half-finished edit. v4.11.8 made number inputs commit a typed-but-unblurred edit on unmount so it wouldn't be lost — but the commit also fired for a cleared or invalid field (and `type="number"` self-sanitizes partial input like `1.` to empty), snapping live values (Samplers tab, per-chat overrides) back to the field's default. The Escape/unmount commit now only fires on a complete, valid number; an interrupted edit keeps the last good value. Blur keeps the full semantics — clearing a field and clicking away still commits the fallback (or clears a nullable field).
+- "Save settings" no longer drops a still-focused number field's pending edit on macOS Firefox and Safari: those browsers don't blur the focused input when a button is clicked, so the save used to write the field's OLD value while the form showed the new one. The Save button now blurs the active field on pointerdown, landing its commit in the draft before the save reads it.

@@ -343,10 +343,16 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       ${content}
     </div>`;
 
+  // Save flushes a still-focused field first (pointerdown blur → its commit
+  // lands in the draft before the click reads it): on macOS Firefox/Safari a
+  // button click never blurs the focused input, so the pending edit would
+  // otherwise save as the OLD value.
   return html`
     <${Modal} title="Settings" wide onClose=${guardClose}
       footer=${html`<button class="btn ghost" onClick=${guardClose}>Cancel</button>
-        <button class="btn primary" onClick=${() => onSave(draft)}>Save settings</button>`}>
+        <button class="btn primary"
+          onPointerDown=${() => document.activeElement?.blur?.()}
+          onClick=${() => onSave(draft)}>Save settings</button>`}>
       <div class="m-tabs">
         ${SETTINGS_TABS.map(([id, label]) => html`
           <button key=${id} class="m-tab ${tab === id ? 'active' : ''}" onClick=${() => setTab(id)}>${label}</button>`)}
