@@ -1494,12 +1494,23 @@ function Main({ storage, storageKind, storageFailed }) {
           });
           let loreResults = [];
           if (loreCalls.length) commit((c) => {
+            // Tool dedupe sees the BRANCH-CURRENT lore view (same derivation
+            // the maintenance pass uses), not the raw merged list: a name
+            // that exists only on a replaced take of this node or on a
+            // sibling branch does NOT dedupe — register_character lands as a
+            // fresh piece stamped to the active take, so two distinct
+            // same-named characters never collapse into one card (and each
+            // take keeps its own enrichment/avatar).
+            const viewIds = new Set(getActivePath(c.messages, c.activeLeafId).map(n => n.id));
+            const view = mergedLorePieces(scen, c, gchars)
+              .filter(p => pieceVisibleAt(p, viewIds, c.messages))
+              .map(p => pieceAtPath(p, viewIds, c.messages));
             const applied = applyToolCalls(c, loreCalls, {
               nodeId, now: Date.now(), cap: callCap,
               queueLore: (scen?.emergentLore ?? 'queue') === 'queue',
               atLen: getActivePath(c.messages, nodeId).length,
               createdSwipe: c.messages[nodeId]?.activeSwipe ?? null,
-            }, mergedLorePieces(scen, c, gchars));
+            }, view);
             loreResults = applied.results;
             return applied.chat;
           });

@@ -1219,6 +1219,74 @@ section('add_lore cross-origin dedupe');
     'lore shadow copy carries fresh provenance');
 }
 
+// ---- take-scoped re-registration (branch-current dedupe view) ----
+section('take-scoped re-registration');
+{
+  // The generation path dedupes against the branch-CURRENT view: a name that
+  // exists only on a replaced take or sibling branch must NOT collapse the
+  // new registration into the hidden piece's card (model name reuse clobber).
+  const viewAt = (c) => {
+    const ids = pathIdSet(c.messages, c.activeLeafId);
+    return mergedLorePieces(baseScenario, c)
+      .filter(p => pieceVisibleAt(p, ids, c.messages))
+      .map(p => pieceAtPath(p, ids, c.messages));
+  };
+  let chat = baseChat;
+  const a1 = appendMessage(chat, 'root', 'assistant', 'take one', null); chat = a1.chat;
+  const nodeId = a1.id;
+  // take 0 of the node registers Vex (fresh piece, stamped node + swipe 0)
+  let r = applyToolCalls(chat, [{ name: 'register_character', args: { name: 'Vex', description: 'dock informant' } }],
+    { nodeId, now: 100, atLen: 2, createdSwipe: 0 });
+  chat = r.chat;
+  ok(r.results[0].note.startsWith('registered'), 'first take registers fresh');
+  // the node gains a second take and is viewed at swipe 1
+  chat = { ...chat, messages: { ...chat.messages,
+    [nodeId]: { ...chat.messages[nodeId],
+      swipes: [...chat.messages[nodeId].swipes, { text: 'take two', createdAt: 2, modelId: null }],
+      activeSwipe: 1 } } };
+  ok(!viewAt(chat).some(p => (p.title ?? '').toLowerCase() === 'vex'),
+    'take-0 registration hidden from the branch-current view while take 1 is viewed');
+  // update_character against a name that exists only on the hidden take
+  // fails strict — the model must register fresh on this take
+  const ru = applyToolCalls(chat, [{ name: 'update_character', args: { name: 'Vex', content: 'x' } }],
+    { nodeId, now: 150, atLen: 2, createdSwipe: 1 }, viewAt(chat));
+  ok(!ru.results[0].ok && ru.results[0].note.includes('register it first'),
+    'update_character on a hidden-take name is rejected (register fresh instead)');
+  // take 1 registers the same name again (a DIFFERENT character — the model
+  // reused it): no dedupe against the hidden piece, a fresh take-scoped piece
+  r = applyToolCalls(chat, [{ name: 'register_character', args: { name: 'Vex', description: 'rival smuggler' } }],
+    { nodeId, now: 200, atLen: 2, createdSwipe: 1 }, viewAt(chat));
+  chat = r.chat;
+  ok(r.results[0].note.startsWith('registered') && chat.lorePieces.length === 2,
+    'same-name re-registration on a replaced take creates a fresh piece, not a revision collapse');
+  const vexes1 = viewAt(chat).filter(p => (p.title ?? '').toLowerCase() === 'vex');
+  ok(vexes1.length === 1 && vexes1[0].content === 'rival smuggler', 'take 1 sees its own Vex card');
+  const back = { ...chat, messages: { ...chat.messages, [nodeId]: { ...chat.messages[nodeId], activeSwipe: 0 } } };
+  const vexes0 = viewAt(back).filter(p => (p.title ?? '').toLowerCase() === 'vex');
+  ok(vexes0.length === 1 && vexes0[0].content === 'dock informant',
+    'swiping back restores the original take-0 card (no clobber)');
+  // same-batch duplicate: two same-named registrations in ONE reply dedupe
+  // against the evolving overlay even though the view snapshot predates them
+  let c2 = baseChat;
+  const b1 = appendMessage(c2, 'root', 'assistant', 'reply', null); c2 = b1.chat;
+  const preBatch = viewAt(c2); // snapshot BEFORE the batch — no Vex in it
+  const rb = applyToolCalls(c2, [
+    { name: 'register_character', args: { name: 'Vex', description: 'first' } },
+    { name: 'register_character', args: { name: 'vex', description: 'refined' } },
+  ], { nodeId: b1.id, now: 300, atLen: 2, createdSwipe: 0 }, preBatch);
+  ok(rb.chat.lorePieces.length === 1 && rb.chat.lorePieces[0].content === 'refined'
+    && rb.results[1].note.startsWith('updated'),
+    'same-batch duplicate registration dedupes against the evolving overlay');
+  // same-branch refinement still dedupes: the take-0 piece viewed at its own
+  // take is on view, so a later registration updates it (revision appended)
+  const rr = applyToolCalls(back, [{ name: 'register_character', args: { name: 'Vex', description: 'informant, older' } }],
+    { nodeId, now: 400, atLen: 2, createdSwipe: 0 }, viewAt(back));
+  ok(rr.chat.lorePieces.filter(p => (p.title ?? '').toLowerCase() === 'vex').length === 2
+    && rr.results[0].note.startsWith('updated')
+    && rr.chat.lorePieces.find(p => p.createdSwipe === 0)?.revisions?.length === 2,
+    're-registration on the SAME viewed take keeps update semantics (revision appended)');
+}
+
 // ---- update_character + revision history ----
 section('update_character revisions');
 {

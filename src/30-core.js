@@ -1266,18 +1266,26 @@ function comfyHistoryResult(history, promptId) {
 // Updates keep the original piece's provenance.
 // opts.queueLore: add_lore calls for NEW titles go to the review queue
 // (emergent-lore 'queue' mode) instead of straight into lorePieces.
-// allPieces (optional): the full merged piece list (scenario + global
-// characters + chat overlay) — used ONLY for register_character dedupe, so a
+// allPieces (optional): the caller's merged piece list (scenario + global
+// characters + chat overlay) — the dedupe haystack beyond the overlay, so a
 // name that exists outside the chat overlay is shadowed via the overlay
-// instead of duplicated. Omit it and dedupe stays overlay-local (old shape).
+// instead of duplicated. Callers pass the BRANCH-CURRENT view (off-branch
+// pieces filtered out, revisions derived): a same-named piece that exists
+// only on a replaced take or sibling branch then does NOT dedupe — the call
+// lands as a fresh take-scoped piece instead of collapsing two distinct
+// same-named characters into one card. Omit it and dedupe stays
+// overlay-local (old shape). batchBase (internal): overlay ids from before
+// this batch — a piece created by an earlier call in the SAME batch is a
+// dedupe candidate even though the allPieces snapshot predates it.
 function applyToolCalls(chat, calls, { cap = TOOL_CALL_CAP, ...opts } = {}, allPieces = null) {
   let work = chat;
   const results = [];
   let applied = 0;
+  const batchBase = new Set((Array.isArray(chat?.lorePieces) ? chat.lorePieces : []).map(p => p?.id));
   for (const c of calls ?? []) {
     if (c.error) { results.push({ name: '(unparsed)', args: {}, ok: false, note: `${c.error}: ${c.raw ?? ''}` }); continue; }
     if (applied >= cap) { results.push({ name: c.name, args: c.args, ok: false, note: 'call cap reached' }); continue; }
-    const r = applyToolCall(work, c, { ...opts, allPieces });
+    const r = applyToolCall(work, c, { ...opts, allPieces, batchBase });
     results.push({ name: c.name, args: c.args, ok: r.ok, note: r.note });
     if (r.ok) { work = r.chat; applied++; }
   }
@@ -1361,7 +1369,7 @@ function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = D
     loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
 
-function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null, createdSwipe = null } = {}) {
+function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore = false, allPieces = null, atLen = null, createdSwipe = null, batchBase = null } = {}) {
   const fail = (note) => ({ ok: false, note, chat });
   const args = call?.args ?? {};
   const pieces = Array.isArray(chat?.lorePieces) ? chat.lorePieces : [];
@@ -1370,6 +1378,22 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     wholeWord: false, caseSensitive: false, smart: false,
   };
   const save = (lorePieces, note) => ({ ok: true, note, chat: { ...chat, lorePieces } });
+  // Dedupe haystack: the evolving overlay first (a piece written by an
+  // earlier call in the SAME batch must match — allPieces is the caller's
+  // snapshot from before the batch ran), then the caller's view. With an
+  // allPieces view, a pre-batch overlay piece is a candidate only when the
+  // view can see it (same id): callers pass the BRANCH-CURRENT view, so a
+  // same-named piece that exists only on a replaced take or sibling branch
+  // is skipped and the call lands as a FRESH take-scoped piece instead of
+  // collapsing two distinct same-named pieces into one card. Without
+  // allPieces the overlay is the whole world (legacy call shape).
+  const dedupe = (match) => {
+    const seeable = (p) => !Array.isArray(allPieces)
+      || (batchBase && !batchBase.has(p.id))
+      || allPieces.some(q => q.id === p.id);
+    return pieces.find(p => match(p) && seeable(p))
+      ?? (Array.isArray(allPieces) ? allPieces.find(match) ?? null : null);
+  };
   // createdSwipe: the active swipe of nodeId at write time — scopes the write
   // to that take of the reply (a regenerate's new swipe starts clean, the
   // replaced swipe keeps its own state; derivation, never deletion).
@@ -1402,11 +1426,12 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
     if (!cname) return fail('register_character: name required');
     if (!desc) return fail('register_character: description required');
-    // Dedupe by title across EVERYTHING the caller can see (allPieces =
-    // scenario + global + chat overlay); without it only the overlay is
-    // checked and a same-named scenario character would be duplicated.
-    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
-    const existing = haystack.find(p => p.type === 'character'
+    // Dedupe by title across everything the caller can see (scenario +
+    // global + the branch-visible overlay); without allPieces only the
+    // overlay is checked and a same-named scenario character would be
+    // duplicated. A name that exists only on a replaced take or sibling
+    // branch is NOT seen — this registers a fresh take-scoped piece.
+    const existing = dedupe(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
       return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, desc, null) : p),
@@ -1429,10 +1454,11 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const keys = Array.isArray(args.keys)
       ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
       : null; // omitted → keep the current keys; explicit [] clears them
-    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
-    const existing = haystack.find(p => p.type === 'character'
+    const existing = dedupe(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
     // Strict: updates never invent characters — the model must register first.
+    // A character that exists only on a replaced take/sibling branch is not
+    // in the caller's view, so this fails and the model registers fresh.
     if (!existing)
       return fail(`update_character: no character named "${cname}" — register it first`);
     if (pieces.some(p => p.id === existing.id))
@@ -1456,11 +1482,10 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const keys = Array.isArray(args.keys)
       ? args.keys.map(k => String(k).trim()).filter(k => k.length >= MIN_KEY_LENGTH).slice(0, 5)
       : null;
-    // Dedupe by title across EVERYTHING the caller can see (same rationale as
-    // register_character above) — a same-titled scenario/global piece would
-    // otherwise be duplicated in the merged view and injected twice.
-    const haystack = Array.isArray(allPieces) ? allPieces : pieces;
-    const existing = haystack.find(p => (p.type ?? 'lore') === 'lore'
+    // Dedupe by title across everything the caller can see (same rationale
+    // as register_character above) — a same-titled scenario/global piece
+    // would otherwise be duplicated in the merged view and injected twice.
+    const existing = dedupe(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
       return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
