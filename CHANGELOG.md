@@ -1362,3 +1362,15 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 **Changed**
 
 - Global characters are now pinned by default: a new character from the sidebar editor (manually or ✦-generated) starts with pinned on, and a character lore piece exported to a global card (the ⇪ button) lands pinned regardless of the piece's own flag, so a generated character is always injected wherever it's linked instead of waiting for a keyword hit. The pinned checkbox in the Character Editor still flips it off; existing characters and card imports are untouched.
+
+
+### v4.11.14
+
+**Fixed**
+
+- Memory and lore-maintenance passes no longer skip messages. Each pass used to read the last `memoryEvery` messages and then jump its cursor to the current path length — so whenever the uncovered span was one message wider than the window (any odd increment: continue-as-new-node, /image, /pov) or much wider (a backlog), the messages in between were marked summarized without ever entering a summary. Passes now cover the OLDEST uncovered chunk of the active path and the cursor advances by exactly that chunk, so backlogs are worked off piece by piece and nothing is ever marked covered without being summarized. The manual buttons ("Summarize now", "Run maintenance now") follow the same rule — on a fully covered chat they re-run over the last window and leave the cursor alone, exactly as before.
+- Branch switches no longer leave the summary/extraction cursors stale. Swiping or jumping to another branch re-bases both cursors to the shared prefix of the old and new paths (`activateBranch`), matching how the memory cards themselves hide off-branch — previously a switch to a shorter branch read the old cursor as "covered", which could stall the cadence and let the max-messages cap drop messages that branch had never summarized.
+
+**Changed**
+
+- The memory summary pass now sees the full kept window as raw text instead of comprehending the recent past through its own cards. With max messages kept at 60, the pass is fed up to 60 raw messages — the already-summarized half labeled "context only", the new chunk labeled as the part to record — with prior cards listed only as a do-not-repeat guard. Feeding the pass a lossy digest of messages that were still available in full compounded summary drift; the raw window is in context anyway.

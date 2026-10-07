@@ -2000,6 +2000,26 @@ section('in-chat branching');
     // nothing deleted while browsing
     ok(Object.keys(next.messages).length === 5, 'hidden branch nodes stay in the tree');
   }
+  // cadence cursors re-base to the shared id-prefix on a branch switch
+  {
+    const chat = { ...branchChatFx(), emergentCursor: 3,
+      memoryStore: { memories: [], cursor: 3 } }; // path root,u1,a1 fully covered
+    const swiped = { ...chat, messages: { ...chat.messages, root: { ...chat.messages.root, activeSwipe: 1 } } };
+    const next = activateBranch(swiped, 'root', { keepPath: true });
+    ok(next.memoryStore.cursor === 1 && next.emergentCursor === 1,
+      'cursors clamp to the shared prefix (root) on a branch switch');
+    // a cursor inside the shared prefix is left alone
+    const inside = { ...branchChatFx(), emergentCursor: 1,
+      memoryStore: { memories: [], cursor: 1 } };
+    const insideSwiped = { ...inside, messages: { ...inside.messages, root: { ...inside.messages.root, activeSwipe: 1 } } };
+    const insideNext = activateBranch(insideSwiped, 'root', { keepPath: true });
+    ok(insideNext.memoryStore.cursor === 1 && insideNext.emergentCursor === 1,
+      'cursor within the shared prefix unchanged');
+    // swiping back can only see the same shared prefix — the clamp holds (no restore)
+    const back = activateBranch({ ...next, messages: { ...next.messages, root: { ...next.messages.root, activeSwipe: 0 } } }, 'root', { keepPath: true });
+    ok(back.memoryStore.cursor === 1 && back.emergentCursor === 1,
+      'switching back keeps the clamped cursor (coverage re-derives forward)');
+  }
   // no continuation under the new swipe → the path truncates to the swiped node
   {
     const chat = branchChatFx();

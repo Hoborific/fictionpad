@@ -962,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.13';
+const APP_VERSION = '4.11.14';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1437,7 +1437,21 @@ function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapSt
     tip = next.id;
   }
   if (messages === msgs && tip === chat.activeLeafId) return chat;
-  return { ...chat, messages, activeLeafId: tip };
+  // Re-base the cadence cursors on the new path: they are position counts, and
+  // coverage honestly holds only over the shared id-prefix of the old and new
+  // paths — passes that ran past the divergence wrote cards stamped with
+  // off-branch leaves, which hide on this path anyway. Clamping (never
+  // deleting) keeps a switched-to shorter branch from reading a stale cursor
+  // as "covered" — the memory cap's floor and the pass cadence both derive
+  // from this. rewindChat sets the same cursors explicitly.
+  const oldPath = getActivePath(msgs, chat.activeLeafId);
+  const newPath = getActivePath(messages, tip);
+  let shared = 0;
+  while (shared < oldPath.length && shared < newPath.length && oldPath[shared].id === newPath[shared].id) shared++;
+  const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
+  return { ...chat, messages, activeLeafId: tip,
+    memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, shared) },
+    emergentCursor: Math.min(chat.emergentCursor ?? 0, shared) };
 }
 
 // Ids on the active path — the branch-visibility scope for world state.
@@ -9582,15 +9596,21 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- memory subsystem ----
-  // Shared memory-card generation (auto-summarize + /memory). Returns the note
-  // text (≤ memoryMaxChars), or null when there's nothing to summarize.
-  // Throws on endpoint/HTTP errors.
-  // Windows are independent (no message overlap) but the pass sees the newest
-  // prior cards as read-only context and is asked for NEW developments only —
-  // a rolling rewrite would drift and can't roll back per-position, and
-  // overlapping windows would double-record the same events.
+  // Shared memory-card generation (auto-summarize + /memory). Returns
+  // { text, from, to, advance } (text ≤ memoryMaxChars), or null when there's
+  // nothing to summarize. Throws on endpoint/HTTP errors.
+  // Windows are independent (no message overlap): each auto pass covers the
+  // OLDEST uncovered chunk of the active path ([cursor, cursor+every)) and the
+  // cursor advances by exactly that chunk, so a span larger than one window is
+  // worked off in chunks instead of skipping the middle — no message is ever
+  // marked covered without having been summarized. The pass sees the newest
+  // prior cards as a repeat-guard and is asked for NEW developments only — a
+  // rolling rewrite would drift and can't roll back per-position. With a
+  // history cap (maxMessages) the pass is fed the whole KEPT window as raw
+  // text (the covered half labeled as context): comprehending the recent half
+  // through its own lossy cards would compound digest loss.
   const MEM_PRIOR_MAX = 10, MEM_PRIOR_CHARS = 3000; // prior-cards context: newest N, whole cards past the char budget dropped oldest-first
-  async function generateMemory(chatObj, messageCount = null) {
+  async function generateMemory(chatObj, span = null) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     const conn = roleApi(st, 'aux');
@@ -9598,10 +9618,20 @@ function Main({ storage, storageKind, storageFailed }) {
     const every = st.memoryEvery ?? MEMORY_EVERY;
     const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
     const path = getActivePath(chatObj.messages, chatObj.activeLeafId);
-    const recent = path.slice(-(messageCount ?? every))
-      .map(n => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`)
-      .join('\n\n');
-    if (!recent.trim()) return null;
+    // span = explicit [from, to) (manual /memory N — cursor untouched). Auto:
+    // the oldest uncovered chunk, or — nothing uncovered (manual "Summarize
+    // now" on a covered chat) — a re-run over the last window, cursor untouched.
+    const cursor = chatObj.memoryStore?.cursor ?? 0;
+    const uncovered = path.length - cursor;
+    const from = span ? span.from : uncovered > 0 ? cursor : Math.max(0, path.length - every);
+    const to = span ? span.to : uncovered > 0 ? Math.min(cursor + every, path.length) : path.length;
+    const advance = !span && uncovered > 0;
+    const max = Number(st.maxMessages) || 0;
+    const fromInput = max > 0 ? Math.min(from, Math.max(0, to - max)) : from;
+    const fmt = (n) => `${n.role === 'user' ? pName : 'Character'}: ${subUser(activeText(n), pName)}`;
+    const ctxText = path.slice(fromInput, from).map(fmt).join('\n\n');
+    const targetText = path.slice(from, to).map(fmt).join('\n\n');
+    if (!targetText.trim()) return null;
     const maxChars = st.memoryMaxChars ?? 5000;
     // Priors context: branch-visible, non-superseded cards only (the lore
     // pass's predicates) — a superseded or off-branch card must not suppress
@@ -9615,13 +9645,16 @@ function Main({ storage, storageKind, storageFailed }) {
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
       ? `Memory notes already recorded (do not repeat these):\n${priorTexts.map(t => `- ${t}`).join('\n')}\n\n` : '';
+    const convo = ctxText.trim()
+      ? `Earlier conversation (context only, already covered by earlier notes):\n\n${ctxText}\n\nNew messages to summarize:\n\n${targetText}`
+      : `Recent conversation:\n\n${targetText}`;
     const out = await auxLogged('memory', {
       endpoint: conn.endpoint, apiKey: conn.apiKey, serverToken: st.serverToken, model,
       system: subUser(st.memoryPrompt || DEFAULT_MEMORY_PROMPT, pName).replaceAll('{{chars}}', String(maxChars)),
-      user: `${prior}Recent conversation:\n\n${recent}\n\nMemory note (max ${maxChars} characters${prior ? '; new developments only' : ''}):`,
+      user: `${prior}${convo}\n\nMemory note (max ${maxChars} characters${prior || ctxText.trim() ? '; new developments only' : ''}):`,
       maxTokens: st.memoryMaxTokens ?? 1500, temperature: st.memoryTemp ?? 0.3, stop: st.stopStrings,
     }, chatObj.id);
-    return out.slice(0, maxChars) || null;
+    return { text: out.slice(0, maxChars) || null, from, to, advance };
   }
   // Append a memory to a chat's store, stamped with atLen (the chat's current
   // active-path message count) so rewind keeps memories by position, not
@@ -9630,27 +9663,37 @@ function Main({ storage, storageKind, storageFailed }) {
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
       getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
-  async function summarizeNow(chatObj, messageCount = null) {
+  async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
-      const text = await generateMemory(chatObj, messageCount);
-      if (text) {
+      const r = await generateMemory(chatObj);
+      if (r?.text) {
         // Merge-on-write: the chat may have changed (or been deleted) during
-        // the aux call — re-read it and overwrite only memoryStore.
+        // the aux call — re-read it and overwrite only memoryStore. The cursor
+        // advances by exactly the covered chunk (clamped to the live path in
+        // case it shrank mid-call); a manual re-run (advance false) leaves it.
         // touch:false — a background pass must not re-sort the sidebar.
         const cur = ref.current.chats[chatObj.id];
         if (cur)
-          saveChat({ ...cur, memoryStore: { ...pushMemory(cur, text),
-            cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
+          saveChat({ ...cur, memoryStore: { ...pushMemory(cur, r.text),
+            cursor: r.advance
+              ? Math.min(r.to, getActivePath(cur.messages, cur.activeLeafId).length)
+              : (cur.memoryStore?.cursor ?? 0) } }, { touch: false });
       }
     } catch (e) {
-      // Degrade like lore extraction: warn and advance the cursor — a failing
-      // aux endpoint must not re-banner after every generation.
+      // Degrade like lore extraction: warn and skip the failed window (advance
+      // by one chunk, never to pathLen) — a failing aux endpoint must not
+      // re-banner after every generation.
       console.warn('Memory summarization failed:', e);
       const cur = ref.current.chats[chatObj.id];
-      if (cur)
-        saveChat({ ...cur, memoryStore: { ...(cur.memoryStore ?? { memories: [], cursor: 0 }),
-          cursor: getActivePath(cur.messages, cur.activeLeafId).length } }, { touch: false });
+      if (cur) {
+        const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
+        const store = cur.memoryStore ?? { memories: [], cursor: 0 };
+        const pathLen = getActivePath(cur.messages, cur.activeLeafId).length;
+        saveChat({ ...cur, memoryStore: { ...store,
+          cursor: pathLen - (store.cursor ?? 0) > 0
+            ? Math.min((store.cursor ?? 0) + every, pathLen) : (store.cursor ?? 0) } }, { touch: false });
+      }
     } finally {
       setSummarizing(false);
     }
@@ -9661,12 +9704,11 @@ function Main({ storage, storageKind, storageFailed }) {
     const max = Number(st.maxMessages) || 0;
     const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
     const uncovered = pathLen - (chatObj.memoryStore?.cursor ?? 0);
-    // Normal cadence, or early compaction (max messages kept): the history cap
-    // is tighter than the cadence, so the pass fires as soon as the uncovered
-    // span exceeds the cap — window = exactly the uncovered span (< every), so
-    // windows stay non-overlapping and no message slips through unsummarized.
-    if (uncovered >= every) summarizeNow(chatObj);
-    else if (max > 0 && uncovered > max) summarizeNow(chatObj, uncovered);
+    // Cadence, or early compaction (max messages kept tighter than the
+    // cadence): fire as soon as the uncovered span exceeds the cap. The pass
+    // covers the OLDEST uncovered chunk per run and the cursor advances by
+    // exactly that chunk, so no message slips through unsummarized.
+    if (uncovered >= every || (max > 0 && uncovered > max)) summarizeNow(chatObj);
   }
 
   // ---- emergent lore maintenance ----
@@ -9697,11 +9739,17 @@ function Main({ storage, storageKind, storageFailed }) {
     // the sidebar.
     const advance = (fn) => {
       const cur = ref.current.chats[chatObj.id];
-      if (cur) saveChat({ ...fn(cur), emergentCursor: getActivePath(cur.messages, cur.activeLeafId).length }, { touch: false });
+      // Advance by exactly the covered chunk (never a blind jump to pathLen —
+      // a backlog is worked off in chunks, nothing gets skipped), clamped to
+      // the live path; a forced re-run on a covered chat leaves the cursor.
+      if (cur) saveChat({ ...fn(cur), emergentCursor: spanTo != null
+        ? Math.min(spanTo, getActivePath(cur.messages, cur.activeLeafId).length)
+        : (cur.emergentCursor ?? 0) }, { touch: false });
     };
     // Fire-and-forget at the call site: guard the WHOLE body (the digest
     // build runs aux-free but touches plenty of derivations) so nothing can
     // reject unhandled — summarizeNow's pattern.
+    let spanTo = null; // set once the window is known; null = leave the cursor
     try {
       const { scenarios: sc, personas: pe, settings: st } = ref.current;
       const scen = sc[chatObj.scenarioId];
@@ -9715,7 +9763,14 @@ function Main({ storage, storageKind, storageFailed }) {
       const every = st.memoryEvery ?? MEMORY_EVERY;
       if (!force && pathLen - (chatObj.emergentCursor ?? 0) < every) return;
       const pName = (chatObj.personaId && pe[chatObj.personaId]?.name?.trim()) || 'User';
-      const recent = path.slice(-every)
+      // Same oldest-uncovered-chunk window as the memory pass: the cursor
+      // advances by exactly what the pass saw. A forced run with nothing
+      // uncovered re-reads the last window and leaves the cursor.
+      const emCursor = chatObj.emergentCursor ?? 0;
+      const uncovered = pathLen - emCursor;
+      const spanFrom = uncovered > 0 ? emCursor : Math.max(0, pathLen - every);
+      spanTo = uncovered > 0 ? Math.min(emCursor + every, pathLen) : null;
+      const recent = path.slice(spanFrom, spanTo ?? pathLen)
         .map(n => `${n.role === 'user' ? pName : 'Narrator'}: ${subUser(activeText(n), pName)}`)
         .join('\n\n');
       if (!recent.trim()) return;
@@ -10935,13 +10990,17 @@ function Main({ storage, storageKind, storageFailed }) {
   async function memoryCommand(c, n) {
     setComposerInject({ chatId: c.id, hint: 'Generating memory…', nonce: Date.now() });
     try {
-      const text = await generateMemory(c, n);
-      if (!text) { setComposerInject({ chatId: c.id, hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
+      // Explicit span (last N messages, default one cadence window) — a manual
+      // command, so the cursor is left untouched on purpose.
+      const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
+      const pathLen = getActivePath(c.messages, c.activeLeafId).length;
+      const r = await generateMemory(c, { from: Math.max(0, pathLen - (n ?? every)), to: pathLen });
+      if (!r?.text) { setComposerInject({ chatId: c.id, hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
       // Merge-on-write: re-read the chat after the aux call and overwrite
       // only memoryStore (manual /memory: cursor untouched).
       const cur = ref.current.chats[c.id];
       if (!cur) { setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() }); return; }
-      const store = pushMemory(cur, text);
+      const store = pushMemory(cur, r.text);
       saveChat({ ...cur, memoryStore: { ...store, cursor: cur.memoryStore?.cursor ?? 0 } });
       setComposerInject({ chatId: c.id, hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
     } catch (e) {

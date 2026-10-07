@@ -202,7 +202,21 @@ function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapSt
     tip = next.id;
   }
   if (messages === msgs && tip === chat.activeLeafId) return chat;
-  return { ...chat, messages, activeLeafId: tip };
+  // Re-base the cadence cursors on the new path: they are position counts, and
+  // coverage honestly holds only over the shared id-prefix of the old and new
+  // paths — passes that ran past the divergence wrote cards stamped with
+  // off-branch leaves, which hide on this path anyway. Clamping (never
+  // deleting) keeps a switched-to shorter branch from reading a stale cursor
+  // as "covered" — the memory cap's floor and the pass cadence both derive
+  // from this. rewindChat sets the same cursors explicitly.
+  const oldPath = getActivePath(msgs, chat.activeLeafId);
+  const newPath = getActivePath(messages, tip);
+  let shared = 0;
+  while (shared < oldPath.length && shared < newPath.length && oldPath[shared].id === newPath[shared].id) shared++;
+  const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
+  return { ...chat, messages, activeLeafId: tip,
+    memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, shared) },
+    emergentCursor: Math.min(chat.emergentCursor ?? 0, shared) };
 }
 
 // Ids on the active path — the branch-visibility scope for world state.
