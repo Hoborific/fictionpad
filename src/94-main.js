@@ -641,10 +641,10 @@ function Main({ storage, storageKind, storageFailed }) {
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
       getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
-  async function summarizeNow(chatObj) {
+  async function summarizeNow(chatObj, messageCount = null) {
     setSummarizing(true);
     try {
-      const text = await generateMemory(chatObj);
+      const text = await generateMemory(chatObj, messageCount);
       if (text) {
         // Merge-on-write: the chat may have changed (or been deleted) during
         // the aux call — re-read it and overwrite only memoryStore.
@@ -667,9 +667,17 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
   function maybeSummarize(chatObj) {
-    const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
+    const st = ref.current.settings;
+    const every = st.memoryEvery ?? MEMORY_EVERY;
+    const max = Number(st.maxMessages) || 0;
     const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
+    const uncovered = pathLen - (chatObj.memoryStore?.cursor ?? 0);
+    // Normal cadence, or early compaction (max messages kept): the history cap
+    // is tighter than the cadence, so the pass fires as soon as the uncovered
+    // span exceeds the cap — window = exactly the uncovered span (< every), so
+    // windows stay non-overlapping and no message slips through unsummarized.
+    if (uncovered >= every) summarizeNow(chatObj);
+    else if (max > 0 && uncovered > max) summarizeNow(chatObj, uncovered);
   }
 
   // ---- emergent lore maintenance ----

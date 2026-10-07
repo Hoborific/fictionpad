@@ -317,7 +317,7 @@ section('characterFromPiece');
     'title/content/keys map to name/content/keys');
   ok(c.id !== 'LP1' && typeof c.id === 'string' && c.id.length > 0, 'fresh id minted');
   ok(c.pinned === true && c.weight === 2 && c.smart === true && c.enabled === true,
-    'pinned/weight/smart/enabled carried over');
+    'pinned by default; weight/smart/enabled carried over');
   ok(c.avatar.endsWith('THUMB') && c.avatarFull.endsWith('FULL'), 'avatar pair carried over');
   ok(!('createdBy' in c) && !('atLen' in c) && !('createdSwipe' in c) && !('revisions' in c)
     && !('links' in c) && !('sticky' in c) && !('group' in c) && !('type' in c),
@@ -328,9 +328,9 @@ section('characterFromPiece');
   const healed = normalizeCharacter(c);
   ok(healed.name === 'Mira' && healed.keys.length === 2, 'survives normalizeCharacter round-trip');
   const disabled = characterFromPiece({ title: 'X', enabled: false });
-  ok(disabled.enabled === false && disabled.pinned === false && disabled.weight === 0
+  ok(disabled.enabled === false && disabled.pinned === true && disabled.weight === 0
     && disabled.avatar === '' && disabled.keys.length === 0,
-    'sparse piece heals to safe defaults');
+    'sparse piece heals to safe defaults (pinned by default)');
   ok(characterFromPiece(null).name === '', 'null piece → blank card, no throw');
 }
 
@@ -860,6 +860,53 @@ section('assembler budgeting & manifest');
     settings: { contextLength: 8192, maxTokens: 400, tokenChars: 2 }, platformPrompt: '',
   });
   ok(fine.manifest.totalTokens > coarse.manifest.totalTokens, 'smaller chars/token inflates all layer estimates');
+}
+
+// ---- max messages kept: count cap gated on the memory-summary cursor ----
+section('max messages kept');
+{
+  let chat = baseChat;
+  for (let i = 0; i < 20; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant';
+    chat = appendMessage(chat, chat.activeLeafId, role, `capped msg ${i}`).chat;
+  }
+  const pathLen = 21; // root greeting + 20 history
+  const capped = { ...chat, memoryStore: { memories: [], cursor: pathLen } }; // all memory-covered
+  const wide = { contextLength: 8192, maxTokens: 400 }; // token budget never binds on these tiny messages
+
+  // control: cap off → everything kept
+  const off = assemblePrompt({ scenario: baseScenario, persona, chat: capped, settings: wide, platformPrompt: '' }).manifest;
+  ok(off.layers.history.kept === 20 && off.layers.history.dropped === 0, 'cap off (unset) keeps full history');
+
+  const zero = assemblePrompt({ scenario: baseScenario, persona, chat: capped,
+    settings: { ...wide, maxMessages: 0 }, platformPrompt: '' }).manifest;
+  ok(zero.layers.history.kept === 20, 'maxMessages 0 = no limit');
+
+  // fully covered → count cap trims to the N newest; greeting is not counted
+  const trimmed = assemblePrompt({ scenario: baseScenario, persona, chat: capped,
+    settings: { ...wide, maxMessages: 8 }, platformPrompt: '' });
+  ok(trimmed.manifest.layers.history.kept === 8,
+    'covered history capped at the N newest');
+  ok(trimmed.manifest.warnings.some(w => w.includes('max messages kept')), 'count cap records a manifest warning');
+  ok(!trimmed.messages.some(m => m.content.includes('capped msg 0'))
+    && trimmed.messages.some(m => m.content.includes('capped msg 19')), 'cap drops oldest, keeps newest');
+  ok(trimmed.messages.some(m => m.role === 'assistant' && m.content.startsWith('Welcome to Veyra')),
+    'greeting still injected, not counted against the cap');
+
+  // nothing covered → cursor floor keeps everything despite the cap
+  const floored = assemblePrompt({ scenario: baseScenario, persona,
+    chat: { ...chat, memoryStore: { memories: [], cursor: 0 } },
+    settings: { ...wide, maxMessages: 8 }, platformPrompt: '' }).manifest;
+  ok(floored.layers.history.kept === 20, 'uncovered messages are never dropped by the count cap');
+  ok(!floored.warnings.some(w => w.includes('max messages kept')), 'floor keeps all → no cap warning');
+
+  // partially covered, uncovered span wider than the cap → floor wins
+  const partial = assemblePrompt({ scenario: baseScenario, persona,
+    chat: { ...chat, memoryStore: { memories: [], cursor: pathLen - 12 } },
+    settings: { ...wide, maxMessages: 8 }, platformPrompt: '' }).manifest;
+  ok(partial.layers.history.kept === 12, 'floor widens the cap to the uncovered span');
+  ok(partial.layers.history.keptIds.length === 12
+    && partial.warnings.some(w => w.includes('max messages kept')), 'floor-kept overflow is still surfaced');
 }
 
 // ---- estimateTokens / scanLore option plumbing ----

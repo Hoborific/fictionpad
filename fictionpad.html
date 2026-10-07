@@ -962,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.12';
+const APP_VERSION = '4.11.13';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2109,6 +2109,22 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   }
   const greetingTokens = greetingNode ? est(histText(greetingNode)) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
+  // Max-messages cap (settings.maxMessages, default 60, 0 = no limit): history is trimmed to the
+  // N newest — but never past the memory-summary cursor: an uncovered message
+  // (path position >= cursor) stays until the pass covers it, so the count cap
+  // can never drop an unsummarized message (maybeSummarize fires the pass early
+  // to keep the excess small). The token cap below still applies on top.
+  const maxMsgs = Number(settings.maxMessages) || 0;
+  if (maxMsgs > 0) {
+    const cursor = chat?.memoryStore?.cursor ?? 0;
+    const uncovered = Math.max(0, path.length - cursor); // incl. greeting — always injected anyway
+    const keepN = Math.max(maxMsgs, uncovered);
+    if (historyNodes.length > keepN) {
+      const trimmedN = historyNodes.length - keepN;
+      historyNodes = historyNodes.slice(-keepN);
+      manifest.warnings.push(`History capped at ${keepN} newest message(s) (max messages kept); ${trimmedN} older message(s) are represented by memory summaries.`);
+    }
+  }
   const conversationText = path.map(activeText).join('\n');
   // Timed activation (sticky/cooldown/delay) derives from the per-message path.
   loreOpts.messages = path.map(activeText);
@@ -3051,7 +3067,9 @@ function normalizeCharacter(c) {
 }
 // Export a character-type lore piece (chat-registered or scenario-owned) as a
 // global character card. Content/keys are taken as stored — they mirror the
-// piece's latest revision, which is what the piece editor shows. Provenance
+// piece's latest revision, which is what the piece editor shows. The card is
+// pinned by default (always injected wherever linked), unlike the piece it
+// came from. Provenance
 // (createdBy/atLen/createdSwipe, revisions) and lore-only fields (links,
 // timed activation, search flags) are stripped: a global card is branch-global
 // by construction. Fresh id — a same-named card never clobbers (the single-
@@ -3062,7 +3080,7 @@ function characterFromPiece(p) {
   return {
     id: uid(), name: asStr(o.title), content: asStr(o.content),
     keys: asArr(o.keys).map(String),
-    pinned: !!o.pinned, weight: Number.isFinite(o.weight) ? o.weight : 0,
+    pinned: true, weight: Number.isFinite(o.weight) ? o.weight : 0,
     smart: !!o.smart, enabled: o.enabled !== false,
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
@@ -5432,6 +5450,7 @@ const DEFAULT_SETTINGS = {
   avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
+  maxMessages: 60, // history messages kept in context; older ones leave only once memory-covered (0 = no limit)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
   memoryMaxTokens: 1500, // aux response cap for a summary
@@ -6095,6 +6114,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <${NumInput} value=${draft.memoryEvery ?? MEMORY_EVERY} min=${5} max=${200} fallback=${MEMORY_EVERY}
                 onCommit=${(n) => set({ memoryEvery: n })} />
               <span class="hint">Also the lore-extraction cadence.</span></label>
+            <label class="field"><span>Max messages kept in context</span>
+              <${NumInput} value=${draft.maxMessages ?? 60} min=${0} max=${500} fallback=${60}
+                onCommit=${(n) => set({ maxMessages: n })} />
+              <span class="hint">0 = no limit. Older messages leave context only after the memory summary covers them; the summary pass fires early to keep up.</span></label>
           </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}
@@ -8519,7 +8542,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
 function newCharacter() {
   return {
     id: uid(), name: '', content: '', keys: [],
-    pinned: false, weight: 0, smart: false, enabled: true,
+    pinned: true, weight: 0, smart: false, enabled: true,
     color: '', // speaker-name colour override (hex); '' = auto (hashed from the name)
     greeting: '', // first assistant message of chats started directly with this character
     createdAt: Date.now(), updatedAt: Date.now(),
@@ -9607,10 +9630,10 @@ function Main({ storage, storageKind, storageFailed }) {
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
       getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
-  async function summarizeNow(chatObj) {
+  async function summarizeNow(chatObj, messageCount = null) {
     setSummarizing(true);
     try {
-      const text = await generateMemory(chatObj);
+      const text = await generateMemory(chatObj, messageCount);
       if (text) {
         // Merge-on-write: the chat may have changed (or been deleted) during
         // the aux call — re-read it and overwrite only memoryStore.
@@ -9633,9 +9656,17 @@ function Main({ storage, storageKind, storageFailed }) {
     }
   }
   function maybeSummarize(chatObj) {
-    const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
+    const st = ref.current.settings;
+    const every = st.memoryEvery ?? MEMORY_EVERY;
+    const max = Number(st.maxMessages) || 0;
     const pathLen = getActivePath(chatObj.messages, chatObj.activeLeafId).length;
-    if (pathLen - (chatObj.memoryStore?.cursor ?? 0) >= every) summarizeNow(chatObj);
+    const uncovered = pathLen - (chatObj.memoryStore?.cursor ?? 0);
+    // Normal cadence, or early compaction (max messages kept): the history cap
+    // is tighter than the cadence, so the pass fires as soon as the uncovered
+    // span exceeds the cap — window = exactly the uncovered span (< every), so
+    // windows stay non-overlapping and no message slips through unsummarized.
+    if (uncovered >= every) summarizeNow(chatObj);
+    else if (max > 0 && uncovered > max) summarizeNow(chatObj, uncovered);
   }
 
   // ---- emergent lore maintenance ----

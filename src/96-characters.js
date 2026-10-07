@@ -8,7 +8,7 @@
 function newCharacter() {
   return {
     id: uid(), name: '', content: '', keys: [],
-    pinned: false, weight: 0, smart: false, enabled: true,
+    pinned: true, weight: 0, smart: false, enabled: true,
     color: '', // speaker-name colour override (hex); '' = auto (hashed from the name)
     greeting: '', // first assistant message of chats started directly with this character
     createdAt: Date.now(), updatedAt: Date.now(),

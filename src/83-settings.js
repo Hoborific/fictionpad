@@ -62,6 +62,7 @@ const DEFAULT_SETTINGS = {
   avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
+  maxMessages: 60, // history messages kept in context; older ones leave only once memory-covered (0 = no limit)
   memoryPrompt: DEFAULT_MEMORY_PROMPT,
   memoryTemp: 0.3,
   memoryMaxTokens: 1500, // aux response cap for a summary
@@ -725,6 +726,10 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <${NumInput} value=${draft.memoryEvery ?? MEMORY_EVERY} min=${5} max=${200} fallback=${MEMORY_EVERY}
                 onCommit=${(n) => set({ memoryEvery: n })} />
               <span class="hint">Also the lore-extraction cadence.</span></label>
+            <label class="field"><span>Max messages kept in context</span>
+              <${NumInput} value=${draft.maxMessages ?? 60} min=${0} max=${500} fallback=${60}
+                onCommit=${(n) => set({ maxMessages: n })} />
+              <span class="hint">0 = no limit. Older messages leave context only after the memory summary covers them; the summary pass fires early to keep up.</span></label>
           </div>
           <div class="grid3">
             ${numField('memoryTemp', 'Summary temperature', 0.3, { min: 0, max: 2, step: 0.05 })}

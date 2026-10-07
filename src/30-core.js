@@ -874,6 +874,22 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   }
   const greetingTokens = greetingNode ? est(histText(greetingNode)) : 0;
   manifest.layers.greeting = { tokens: greetingTokens };
+  // Max-messages cap (settings.maxMessages, default 60, 0 = no limit): history is trimmed to the
+  // N newest — but never past the memory-summary cursor: an uncovered message
+  // (path position >= cursor) stays until the pass covers it, so the count cap
+  // can never drop an unsummarized message (maybeSummarize fires the pass early
+  // to keep the excess small). The token cap below still applies on top.
+  const maxMsgs = Number(settings.maxMessages) || 0;
+  if (maxMsgs > 0) {
+    const cursor = chat?.memoryStore?.cursor ?? 0;
+    const uncovered = Math.max(0, path.length - cursor); // incl. greeting — always injected anyway
+    const keepN = Math.max(maxMsgs, uncovered);
+    if (historyNodes.length > keepN) {
+      const trimmedN = historyNodes.length - keepN;
+      historyNodes = historyNodes.slice(-keepN);
+      manifest.warnings.push(`History capped at ${keepN} newest message(s) (max messages kept); ${trimmedN} older message(s) are represented by memory summaries.`);
+    }
+  }
   const conversationText = path.map(activeText).join('\n');
   // Timed activation (sticky/cooldown/delay) derives from the per-message path.
   loreOpts.messages = path.map(activeText);
@@ -1816,7 +1832,9 @@ function normalizeCharacter(c) {
 }
 // Export a character-type lore piece (chat-registered or scenario-owned) as a
 // global character card. Content/keys are taken as stored — they mirror the
-// piece's latest revision, which is what the piece editor shows. Provenance
+// piece's latest revision, which is what the piece editor shows. The card is
+// pinned by default (always injected wherever linked), unlike the piece it
+// came from. Provenance
 // (createdBy/atLen/createdSwipe, revisions) and lore-only fields (links,
 // timed activation, search flags) are stripped: a global card is branch-global
 // by construction. Fresh id — a same-named card never clobbers (the single-
@@ -1827,7 +1845,7 @@ function characterFromPiece(p) {
   return {
     id: uid(), name: asStr(o.title), content: asStr(o.content),
     keys: asArr(o.keys).map(String),
-    pinned: !!o.pinned, weight: Number.isFinite(o.weight) ? o.weight : 0,
+    pinned: true, weight: Number.isFinite(o.weight) ? o.weight : 0,
     smart: !!o.smart, enabled: o.enabled !== false,
     avatar: typeof o.avatar === 'string' ? o.avatar : '',
     avatarFull: typeof o.avatarFull === 'string' ? o.avatarFull : '',
