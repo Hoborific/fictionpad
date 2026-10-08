@@ -4,7 +4,7 @@ Yet another single-file frontend, the entire app is one html file with an option
 
 ![FictionPad chat view](docs/screenshot.png)
 
-Mostly AI readme below.
+live copy of fictionpad.html served [here](https://hoborific.github.io/fictionpad/fictionpad.html), mostly AI readme below.
 ## Features
 
 - Scenario-centric roleplay: per-scenario prompts, a lorebook with keyword triggers (whole-word / case-sensitive options) and semantic embedding-based activation, per-chat lore overlays, auto-memory, author's note
