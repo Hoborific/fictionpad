@@ -1,9 +1,10 @@
 # FictionPad
 
-A single-file LLM roleplay and story-writing frontend. The entire app is one HTML file: open it in a browser and it runs, whether from `file://` or any web server. It talks to any OpenAI-compatible chat-completions endpoint (vLLM, OpenRouter, OpenAI, llama.cpp, koboldcpp, TabbyAPI, ...) with your own API key.
+Yet another single-file frontend, the entire app is one html file with an optional server for remote storage and proxying LLM calls.
 
-Download `fictionpad.html` from any [release](../../releases) and open it locally.
+![FictionPad chat view](docs/screenshot.png)
 
+Mostly AI readme below.
 ## Features
 
 - Scenario-centric roleplay: per-scenario prompts, a lorebook with keyword triggers (whole-word / case-sensitive options) and semantic embedding-based activation, per-chat lore overlays, auto-memory, author's note
@@ -12,16 +13,14 @@ Download `fictionpad.html` from any [release](../../releases) and open it locall
 - Full conversation control: swipes and branching, message editing, drafts, lore templates, full-text chat search, complete export/import, and SillyTavern-style character card import (PNG or JSON)
 - Generation introspection: token-probability heatmap with resampling, logit bias editor, sampler controls with per-chat overrides and per-scenario/character defaults, custom user-defined samplers, model reasoning ("thinking") display
 - Automatic context limits: detects each model's context length from `/v1/models` (vLLM, llama.cpp, OpenRouter) and sizes the context budget and response reserve to match — manual pinning and per-chat overrides included
-- Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation — plus a cadence-based maintenance pass that reviews the chat's lore and memory notes against the recent story and can propose new pieces, rewrite stale pieces (chat-scoped, branch-safe), and revise memory notes, all through a review queue (or fully automatic)
-- Personas: reusable user identities with per-chat pick and an optional default
-- Polish: themes (including Catppuccin), a mobile UI with swipe gestures, configurable date formats, chat previews and a context inspector showing exactly what was sent to the model
+- Pseudo Tool calling: the model registers characters and lore mid-reply via built-in tools, story variables, emergent lore generation — plus a cadence-based maintenance pass that reviews the chat's lore and memory notes against the recent story and can propose new pieces, rewrite stale pieces (chat-scoped, branch-safe), and revise memory notes, all through a review queue (or fully automatic)
 - Runs fully client-side with IndexedDB persistence; the optional Node server adds LLM proxying and server-side session storage
 
 ## Quick start
 
-### Just the app
+### Client only
 
-Download `fictionpad.html` from the [latest release](../../releases/latest) and open it in a browser. Releases from v3.4 up are fully self-contained (all dependencies inlined); v3.3 and earlier load their JS dependencies from esm.sh on open, so they need an internet connection.
+Download `fictionpad.html` from the [latest release](../../releases/latest) and open it in a browser.
 
 ### With the server (recommended)
 
@@ -35,11 +34,11 @@ node server.mjs 9000     # or pick any port
 Then open http://localhost:8788 and point the in-app endpoint at the built-in proxy, which forwards to your real LLM server:
 
 ```
-http://localhost:8788/proxy/https://api.openai.com
 http://localhost:8788/proxy/http://127.0.0.1:8080
 ```
+Proxying through the server is optional if your backend supports CORS/ACAO.
 
-The server serves the app, proxies LLM calls (no CORS pain, your API key goes upstream as `X-Real-Authorization`), and optionally stores sessions in SQLite so they sync across browsers.
+The server serves the app, optionally proxies LLM calls and stores sessions in SQLite so they sync across browsers.
 
 On first run the server builds the fully self-contained app (`fictionpad.compiled.html`) in the background — the pinned JS dependencies are fetched from esm.sh once, and after that nothing loads from any CDN. Until that build exists (e.g. an offline first run), the repo's dev build is served instead, which needs esm.sh reachable on every page open; the server log says which one it's serving.
 
@@ -61,7 +60,7 @@ All via environment variables:
 Example, basic auth on a custom port:
 
 ```sh
-FICTIONPAD_AUTH=me:hunter2 node server.mjs 8788
+FICTIONPAD_AUTH=me:hunter2 node server.mjs 9000
 ```
 
 Safety note: with no auth configured, `/proxy` only forwards to loopback targets, so an exposed unauthenticated server is not an open relay. Still, put `FICTIONPAD_AUTH` on anything reachable from the network.
@@ -75,10 +74,7 @@ The app ships as one HTML file, but the source is split for maintainability:
 - `node vendor.mjs --check` fails if the generated artifacts are stale
 - Tests: `node tests/assembler.test.mjs` and `node tests/server.test.mjs`
 
-## Version history
 
-This repository's history through v4.2 was reconstructed retroactively from dated snapshots: every commit is one milestone version, with rapid patch snapshots folded into their minor line. Development since follows the same commit-per-release convention with full semver tags (`vX.Y.Z`); the per-release detail lives in [CHANGELOG.md](CHANGELOG.md). Every tag has a GitHub release with the runnable `fictionpad.html` attached.
+## Credits and Licensing
 
-## Credits
-
-FictionPad was designed, implemented and documented end to end by Kimi (K3, high effort), an AI coding agent by Moonshot AI, working under the direction of [@Hoborific](https://github.com/Hoborific). That covers the app, the server, the tests, the build tooling, this README, the changelog, and the reconstructed history itself.
+This project was written entirely by Kimi K3 High, there is no license, do as you please.
