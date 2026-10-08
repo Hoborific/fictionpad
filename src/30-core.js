@@ -894,14 +894,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // can never drop an unsummarized message (maybeSummarize fires the pass early
   // to keep the excess small). The token cap below still applies on top.
   const maxMsgs = Number(settings.maxMessages) || 0;
+  const histTotal = historyNodes.length; // before any trim (excludes the greeting) — the Inspector's kept/total note
   if (maxMsgs > 0) {
     const cursor = chat?.memoryStore?.cursor ?? 0;
     const uncovered = Math.max(0, path.length - cursor); // incl. greeting — always injected anyway
     const keepN = Math.max(maxMsgs, uncovered);
     if (historyNodes.length > keepN) {
-      const trimmedN = historyNodes.length - keepN;
+      manifest.warnings.push(`${keepN}/${historyNodes.length} messages kept (max messages kept)`);
       historyNodes = historyNodes.slice(-keepN);
-      manifest.warnings.push(`History capped at ${keepN} newest message(s) (max messages kept); ${trimmedN} older message(s) are represented by memory summaries.`);
     }
   }
   const conversationText = path.map(activeText).join('\n');
@@ -1052,11 +1052,11 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     histUsed += cost;
   }
   const dropped = historyNodes.length - kept.length;
-  if (dropped > 0) manifest.warnings.push(`${dropped} oldest message(s) dropped to fit the context window.`);
+  if (dropped > 0) manifest.warnings.push(`${kept.length}/${historyNodes.length} messages kept (context length)`);
   // keptIds drives the chat log's context-horizon marker (which messages the
   // last generation actually saw); the exact-count guard in runGeneration
   // shifts it when it drops more.
-  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, keptIds: kept.map(n => n.id) };
+  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, total: histTotal, keptIds: kept.map(n => n.id) };
 
   // 6. chat-completions message array
   const messages = [{ role: 'system', content: staticText }];

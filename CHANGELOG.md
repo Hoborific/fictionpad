@@ -1390,3 +1390,17 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 
 - Feature defaults rebalanced for fresh installs: token probabilities (logprobs + per-token alternatives), response suggestions, and tool-registered character enrichment (the ✦ generator flesh-out) are now ON by default — enrichment also sheds its "experimental" tag in Settings → Features. The "✦ Draft my reply" impersonate chip under the latest reply is now OFF by default (the /impersonate command always works regardless). Existing installs keep their stored settings; only the out-of-box defaults change.
 - Forked chats are now named "(fork)" instead of "(branch)" — "branch" is the in-chat tree terminology since v4.9, and the ⑂ action has been "fork" ever since. Existing chat names are untouched.
+
+
+### v4.11.16
+
+**Added**
+
+- Pending lore reviews can no longer go unnoticed: when proposals wait in the review queue, a slim notice bar above the composer shows the pending count with a Review button (opens the Chat tab) — dismissable, and it reappears whenever the count changes. The Inspector and Chat panel tabs also carry a pending-count badge.
+- The Inspector's "Suggested lore" section is now actionable: every row has accept/dismiss buttons, so proposals no longer have to be reviewed from the Chat tab alone. The rows stay collapsed one-liners (click the title to expand), and the expanded view mirrors the Chat tab's review card — change note, was/now split for updates, keys — so a proposal reads the same on both surfaces. All review surfaces (Chat tab, Inspector rows, Accept all) route through one shared accept step, so the rules (new pieces become user-owned, updates keep their branch stamps, memory revisions supersede) can't drift between surfaces.
+- Update and memory-revision proposals now show a "stale" pill in the Chat tab when the target changed since the proposal was written (tool write, user edit, another branch) — a warning that the was/now preview no longer reflects the live card.
+
+**Changed**
+
+- History trims no longer show as big ⚠ warnings in the Inspector: the History card's note carries them instead, as an honest kept/total with the reason in parens — "60/140 messages kept (max messages kept · context length)" — replacing the misleading "all 60 messages kept" it showed when the max-messages cap had trimmed (its drop count only ever reflected the token fill, not the count cap). The Lore card's note now reads "10 injected · 14 skipped" instead of "14 not".
+- A maintenance-pass proposal naming an already-queued piece or memory note now refreshes the queued entry in place (same id, fresh content and was/now previews) instead of being dropped by dedupe. Previously an ignored proposal froze its topic: the pass would never re-propose that title, so the queue entry went staler the longer it sat. Refreshes don't count against the per-pass proposal caps, and content-identical re-proposals are skipped.

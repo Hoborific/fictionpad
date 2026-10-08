@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null, onRunMaintenance = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, dateFormat = null, onRunMaintenance = null, onAcceptQueue = null, onDismissQueue = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
@@ -15,33 +15,33 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   const allPieces = mergedLorePieces(scenario, chat, characters);
   const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => update({ ...chat, lorePieces });
-  // Queue accept routing: new pieces become user-owned (provenance stripped,
-  // visible on every branch); UPDATE proposals keep their stamps (a rewrite
-  // must stay scoped to the branch that accepted it); memory revisions land
-  // as a fresh card superseding the stale one. One pure step against a
-  // working chat so Accept all can fold the whole queue through it.
-  const acceptStep = (work, q) => {
-    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
-    if (q.kind === 'memory')
-      return acceptQueuedMemory(work, q.id, { atLen: path.length,
-        atMsg: work.activeLeafId ?? null, cap: cap ?? MEMORY_CAP,
-        maxChars: memMaxChars ?? DEFAULT_SETTINGS.memoryMaxChars });
-    if (q.updateOf) {
-      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
-      const view = mergedLorePieces(scenario, work, characters)
-        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
-        .map(p => pieceAtPath(p, ids, work.messages ?? null));
-      return acceptQueuedUpdate(work, q.id, { allPieces: view,
-        nodeId: work.activeLeafId ?? null, atLen: path.length,
-        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
-    }
-    return acceptQueuedLore(work, q.id);
-  };
-  const acceptQueued = (q) => update(acceptStep(chat, q));
-  const acceptAll = () => update((chat.loreQueue ?? []).reduce(acceptStep, chat));
+  // Queue accepts route through Main's ONE shared step (same implementation
+  // as the Inspector's Suggested-lore rows): new pieces become user-owned,
+  // updates keep their branch stamps, memory revisions supersede. Each call
+  // re-reads the live chat (saveChat syncs the ref), so Accept all is the
+  // queue folded through sequential accepts.
+  const acceptAll = () => (chat.loreQueue ?? []).forEach(q => onAcceptQueue(q));
   const dismissAll = () => {
     if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
       update({ ...chat, loreQueue: [] });
+  };
+  // "stale" pill: the target moved since the proposal was written (tool
+  // write, user edit, another branch) and the pass hasn't refreshed the entry
+  // yet — the was/now preview no longer reflects the live card.
+  const curContentByTitle = new Map(allPieces
+    .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
+    .map(p => [(p.title ?? '').trim().toLowerCase(),
+      String(pieceAtPath(p, pathIds, chat.messages ?? null).content ?? '').trim()]));
+  const memTextById = new Map((chat.memoryStore?.memories ?? []).map(m => [m?.id, String(m?.text ?? '').trim()]));
+  const isStale = (q) => {
+    if (q.oldContent == null) return false;
+    const old = String(q.oldContent).trim();
+    if (q.kind === 'memory') return memTextById.has(q.memoryId) && memTextById.get(q.memoryId) !== old;
+    if (q.updateOf) {
+      const cur = curContentByTitle.get((q.updateOf ?? '').trim().toLowerCase());
+      return cur != null && cur !== old;
+    }
+    return false;
   };
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
@@ -82,8 +82,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
                 <span class="pill">${queuePillOf(q)}</span>
-                <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
-                <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
+                ${isStale(q) && html`<span class="pill" title="The target changed since this proposal was written — compare the 'was' text against the live card before accepting">stale</span>`}
+                <button class="btn small" onClick=${() => onAcceptQueue(q)}>accept</button>
+                <button class="btn small danger" title="Dismiss proposal" onClick=${() => onDismissQueue(q.id)}>✕</button>
               </div>
               ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
               ${q.oldContent != null ? html`

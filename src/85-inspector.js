@@ -19,6 +19,42 @@ function InspectorRow({ pills = [], title, meta, preview, content, dimmed = fals
     </div>`;
 }
 
+// Suggested-lore review row: collapsed one-liner (pill + title + accept/✕),
+// click to expand. The expanded view mirrors the Chat tab's review card —
+// change note, was/now split for updates, keys — so a proposal reads the
+// same on both surfaces.
+function QueueRow({ q, onAccept = null, onDismiss = null }) {
+  const [open, setOpen] = useState(false);
+  const old = q.oldContent != null ? String(q.oldContent) : null;
+  return html`
+    <div class="lore-item-row">
+      <div class="row" style=${{ cursor: 'pointer' }} onClick=${() => setOpen(!open)}>
+        <span class="hint">${open ? '▾' : '▸'}</span>
+        <span class="pill">${queuePillOf(q)}</span>
+        <span style=${{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          title=${q.title || '(untitled)'}>${q.title || '(untitled)'}</span>
+        ${onAccept && html`
+          <span onClick=${(e) => e.stopPropagation()} style=${{ display: 'flex', gap: '4px' }}>
+            <button class="btn small" title="Accept — moves this into the chat's lore (updates keep their branch scope)" onClick=${() => onAccept(q)}>accept</button>
+            <button class="btn small danger" title="Dismiss proposal" onClick=${() => onDismiss(q.id)}>✕</button>
+          </span>`}
+      </div>
+      ${!open && html`<div class="ir-preview">${toPreview(q.content, 140)}</div>`}
+      ${open && html`
+        <div class="ir-content" style=${{ whiteSpace: 'normal' }}>
+          ${q.note && html`<div class="hint" style=${{ marginBottom: '4px' }}>change: ${q.note}</div>`}
+          ${old != null ? html`
+            <div class="grid2">
+              <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>was: ${old.slice(0, 400)}${old.length > 400 ? '…' : ''}</div>
+              <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>now: ${q.content}</div>
+            </div>` : html`
+            <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>${q.content}</div>`}
+          ${(q.keys ?? []).length > 0 && html`
+            <div class="hint" style=${{ marginTop: '4px' }}>keys: ${q.keys.join(', ')}</div>`}
+        </div>`}
+    </div>`;
+}
+
 // Collapsible section header (Context / Lore / Memories) — open by default,
 // collapse state persisted per section. `meta` renders dim after the title.
 function InspectorSection({ title, count, meta, children }) {
@@ -53,7 +89,7 @@ function LayerCard({ name, tokens, cap, note, about }) {
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [] }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [], onAcceptQueue = null, onDismissQueue = null }) {
   const [showInactive, setShowInactive] = useState(false);
   const [showInactiveMem, setShowInactiveMem] = useState(false);
   // Aux calls (memory summaries, lore extraction, suggestions, /improve,
@@ -73,13 +109,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
   // branches: a queue can be waiting before any generation has run.
   const queueSection = (loreQueue ?? []).length > 0 && html`
     <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
-      ${loreQueue.map(q => html`
-        <${InspectorRow} key=${q.id}
-          pills=${[{ text: queuePillOf(q), cls: '' }]}
-          title=${q.title || '(untitled)'}
-          preview=${toPreview(q.content, 140)}
-          content=${`${q.note ? `[change] ${q.note}\n\n` : ''}${q.content ?? ''}${q.oldContent != null ? `\n\n[was] ${q.oldContent}` : ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
-      <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accept or dismiss in the Chat tab.</div>
+      ${loreQueue.map(q => html`<${QueueRow} key=${q.id} q=${q} onAccept=${onAcceptQueue} onDismiss=${onDismissQueue} />`)}
+      <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accepted pieces join this chat's lore.</div>
     <//>`;
   if (!manifest?.layers) return html`
     <div>
@@ -102,8 +133,18 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
   const histTok = tok(L.history.tokens + (L.greeting?.tokens ?? 0),
     exact ? (realCounts?.history ?? 0) + (realCounts?.greeting ?? 0) : null);
   const histCap = L.history.cap + (L.greeting?.tokens ?? 0);
-  const keptNote = L.history.dropped
-    ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
+  // History trim, kept/total with reasons: `total` is the pre-trim message
+  // count (max-messages trim happens before the token fill, so countTrimmed
+  // is what the count cap removed and `dropped` what the context length did).
+  // The card note carries it — the trim never shows as a big ⚠ warning.
+  const histTotal = L.history.total ?? (L.history.kept + L.history.dropped);
+  const countTrimmed = Math.max(0, histTotal - L.history.kept - L.history.dropped);
+  const trimReasons = [
+    countTrimmed > 0 ? 'max messages kept' : null,
+    L.history.dropped > 0 ? 'context length' : null,
+  ].filter(Boolean);
+  const keptNote = trimReasons.length
+    ? `${L.history.kept}/${histTotal} messages kept (${trimReasons.join(' · ')})`
     : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
   const memPinned = L.memory.memories.filter(m => m.pinned).length;
   // Semantic activation observability: per-piece cosine scores from the last
@@ -129,7 +170,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
           about="Platform system prompt, multi-speaker and tool-calling instructions, scenario instructions and backstory, persona, per-chat custom instructions, author's note, and the length directive — always sent in full." />
         <${LayerCard} name="Lore"
           tokens=${tok(L.lore.tokens, realCounts?.lore)} cap=${L.lore.cap}
-          note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} not` : ''}`}
+          note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} skipped` : ''}`}
           about="Lore pieces pinned or triggered by recent messages, ordered by weight and trimmed to budget." />
         <${LayerCard} name="Memory"
           tokens=${tok(L.memory.tokens, realCounts?.memory)} cap=${L.memory.cap}
@@ -146,7 +187,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         <div class="hint" style=${{ margin: '2px 0 8px' }}>
           ${src} counts · ctx ${manifest.contextLength} − ${manifest.reserve} reserve
         </div>
-        ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
+        ${manifest.warnings.filter(w => !/^\d+\/\d+ messages kept \(/.test(w)).map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
       <//>
       <${InspectorSection} title="Lore injected" count=${L.lore.pieces.length}>
         ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}

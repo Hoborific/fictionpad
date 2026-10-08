@@ -127,6 +127,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [generating, setGenerating] = useState(null); // { chatId, nodeId }
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
+  const [queueChipOff, setQueueChipOff] = useState({}); // chatId → pending count the notice was dismissed at (session-only)
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
@@ -826,27 +827,56 @@ function Main({ storage, storageKind, storageFailed }) {
         }, chatObj.id);
         const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
         const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
-        const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-        const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
-        const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+        const queue = chatObj.loreQueue ?? [];
+        const queuedNewByTitle = new Map(queue.filter(q => !q.updateOf && q.kind !== 'memory')
+          .map(q => [(q.title ?? '').trim().toLowerCase(), q]));
+        const queuedUpdByTitle = new Map(queue.filter(q => q.updateOf)
+          .map(q => [(q.updateOf ?? '').trim().toLowerCase(), q]));
+        const queuedMemById = new Map(queue.filter(q => q.memoryId).map(q => [q.memoryId, q]));
+        const differs = (a, b) => String(a ?? '').trim() !== String(b ?? '').trim();
         const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+        // Truly-new proposals: no live piece, no queued entry. Capped per pass.
         const freshOk = fresh
-          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedNewByTitle.has(p.title.toLowerCase()))
           .slice(0, maxNew);
+        // A proposal naming an already-QUEUED item REFRESHES that entry in
+        // place (same id, fresh content/note/oldContent) instead of being
+        // dropped — an ignored queue no longer freezes a topic at a stale
+        // proposal. Refreshes don't count against the per-pass caps (the
+        // queue doesn't grow), and a content-identical one is skipped.
+        const freshRefresh = fresh
+          .filter(p => {
+            const q = queuedNewByTitle.get(p.title.toLowerCase());
+            return q && (differs(p.content, q.content) || differs(p.note, q.note));
+          });
         // Updates must name a known piece and actually change its current text.
-        const updatesOk = updates
+        const updTargets = updates
           .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
-          .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
-            && u.content !== String(u.target.content ?? '').trim())
+          .filter(u => u.target && differs(u.content, u.target.content));
+        const updatesOk = updTargets
+          .filter(u => !queuedUpdByTitle.has(u.title.toLowerCase()))
           .slice(0, maxNew);
+        const updatesRefresh = updTargets
+          .filter(u => {
+            const q = queuedUpdByTitle.get(u.title.toLowerCase());
+            return q && (differs(u.content, q.content) || differs(u.target.content, q.oldContent));
+          });
         // Memory revisions must name a visible card and change its text.
         // Dedupe by id first (keep last) — two entries for one card in a
         // single pass would supersede it twice.
-        const memsOk = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
+        const memTargets = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
           .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
-          .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+          .filter(u => u.target && differs(u.text, u.target.text));
+        const memsOk = memTargets
+          .filter(u => !queuedMemById.has(u.id))
           .slice(0, PASS_MEM_CAP);
-        if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+        const memsRefresh = memTargets
+          .filter(u => {
+            const q = queuedMemById.get(u.id);
+            return q && (differs(u.text, q.content) || differs(u.target.text, q.oldContent));
+          });
+        if (!freshOk.length && !updatesOk.length && !memsOk.length
+          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c); return; }
         const now = Date.now();
         const stamps = () => {
           const cur = ref.current.chats[chatObj.id];
@@ -856,6 +886,26 @@ function Main({ storage, storageKind, storageFailed }) {
         };
         advance((cur) => {
           let work = cur;
+          // Refresh-in-place runs in BOTH modes — a 'queue' stint (or an
+          // over-long auto update) can leave entries even under auto mode.
+          // Patched by id, so an entry the user accepted/dismissed mid-pass
+          // is simply skipped.
+          const patchQ = (id, patch) => {
+            work = { ...work, loreQueue: (work.loreQueue ?? []).map(e => e.id === id ? { ...e, ...patch } : e) };
+          };
+          for (const p of freshRefresh) {
+            const q = queuedNewByTitle.get(p.title.toLowerCase());
+            if (q) patchQ(q.id, { content: p.content, keys: p.keys ?? [], hasKeys: p.hasKeys, note: p.note });
+          }
+          for (const u of updatesRefresh) {
+            const q = queuedUpdByTitle.get(u.title.toLowerCase());
+            if (q) patchQ(q.id, { content: u.content, keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys,
+              note: u.note, oldContent: String(u.target.content ?? '') });
+          }
+          for (const u of memsRefresh) {
+            const q = queuedMemById.get(u.id);
+            if (q) patchQ(q.id, { content: u.text, note: u.note, oldContent: String(u.target.text ?? '') });
+          }
           if (mode === 'auto') {
             // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
             // stay scoped to the branch they were made on — derivation replaces
@@ -918,6 +968,39 @@ function Main({ storage, storageKind, storageFailed }) {
   const onRunMaintenance = (c) => {
     if (!c || genRef.current || auxBusy.length) return;
     maybeExtractLore(c, true);
+  };
+
+  // ---- lore review queue (chat.loreQueue) ----
+  // ONE accept step shared by every review surface (Chat tab, Inspector's
+  // Suggested lore rows, Accept all): new pieces become user-owned (provenance
+  // stripped, visible on every branch); UPDATE proposals keep their stamps (a
+  // rewrite stays scoped to the branch that accepted it); memory revisions
+  // land as a fresh card superseding the stale one. Each call re-reads the
+  // CURRENT chat (saveChat syncs the ref), so sequential accepts compose.
+  const queueAcceptStep = (work, q, chatScenario) => {
+    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
+    if (q.kind === 'memory')
+      return acceptQueuedMemory(work, q.id, { atLen: path.length,
+        atMsg: work.activeLeafId ?? null, cap: settings.memoryCap ?? MEMORY_CAP,
+        maxChars: settings.memoryMaxChars ?? 5000 });
+    if (q.updateOf) {
+      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
+      const view = mergedLorePieces(chatScenario, work, ref.current.characters)
+        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
+        .map(p => pieceAtPath(p, ids, work.messages ?? null));
+      return acceptQueuedUpdate(work, q.id, { allPieces: view,
+        nodeId: work.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
+    }
+    return acceptQueuedLore(work, q.id);
+  };
+  const onAcceptQueue = (chatId, q) => {
+    const c = ref.current.chats[chatId];
+    if (c) saveChat(queueAcceptStep(c, q, ref.current.scenarios[c.scenarioId]), { touch: false });
+  };
+  const onDismissQueue = (chatId, qid) => {
+    const c = ref.current.chats[chatId];
+    if (c) saveChat(dismissQueuedLore(c, qid), { touch: false });
   };
 
   // ---- character enrichment (settings.toolsEnrich) ----
@@ -2645,6 +2728,9 @@ function Main({ storage, storageKind, storageFailed }) {
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
+              queueCount=${(chat?.loreQueue?.length ?? 0) > 0 && queueChipOff[chat.id] !== chat.loreQueue.length ? chat.loreQueue.length : 0}
+              onOpenQueue=${() => peekRight ? setPeekTab('chat') : setUi(u => ({ ...u, drawer: 'chat' }))}
+              onDismissQueueNotice=${() => setQueueChipOff(m => ({ ...m, [chat.id]: chat.loreQueue?.length ?? 0 }))}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
         </div>
@@ -2668,6 +2754,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${onOpenBranches}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -2749,6 +2836,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}

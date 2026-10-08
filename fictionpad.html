@@ -495,6 +495,15 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   color: var(--c-dim); border: 1px solid var(--c-border); background: var(--c-bg-1);
 }
 .gen-reply .gen-pill:hover { color: var(--c-text); border-color: var(--c-accent); }
+/* Pending-lore-review notice: slim bar above the composer so an unreviewed
+   queue can't go unnoticed for many messages. Dismiss hides it until the
+   pending count changes. */
+.queue-notice {
+  display: flex; gap: 8px; align-items: center; justify-content: center;
+  max-width: var(--chat-w); margin: 0 auto; padding: 4px 14px; width: 100%;
+  font-size: 12.5px; color: var(--c-dim);
+}
+.queue-notice span { flex: 0 1 auto; }
 .sugg-row {
   display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
   max-width: var(--chat-w); margin: -6px auto 14px; padding: 0 4px;
@@ -962,7 +971,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.15';
+const APP_VERSION = '4.11.16';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -2129,14 +2138,14 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   // can never drop an unsummarized message (maybeSummarize fires the pass early
   // to keep the excess small). The token cap below still applies on top.
   const maxMsgs = Number(settings.maxMessages) || 0;
+  const histTotal = historyNodes.length; // before any trim (excludes the greeting) — the Inspector's kept/total note
   if (maxMsgs > 0) {
     const cursor = chat?.memoryStore?.cursor ?? 0;
     const uncovered = Math.max(0, path.length - cursor); // incl. greeting — always injected anyway
     const keepN = Math.max(maxMsgs, uncovered);
     if (historyNodes.length > keepN) {
-      const trimmedN = historyNodes.length - keepN;
+      manifest.warnings.push(`${keepN}/${historyNodes.length} messages kept (max messages kept)`);
       historyNodes = historyNodes.slice(-keepN);
-      manifest.warnings.push(`History capped at ${keepN} newest message(s) (max messages kept); ${trimmedN} older message(s) are represented by memory summaries.`);
     }
   }
   const conversationText = path.map(activeText).join('\n');
@@ -2287,11 +2296,11 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     histUsed += cost;
   }
   const dropped = historyNodes.length - kept.length;
-  if (dropped > 0) manifest.warnings.push(`${dropped} oldest message(s) dropped to fit the context window.`);
+  if (dropped > 0) manifest.warnings.push(`${kept.length}/${historyNodes.length} messages kept (context length)`);
   // keptIds drives the chat log's context-horizon marker (which messages the
   // last generation actually saw); the exact-count guard in runGeneration
   // shifts it when it drops more.
-  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, keptIds: kept.map(n => n.id) };
+  manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, total: histTotal, keptIds: kept.map(n => n.id) };
 
   // 6. chat-completions message array
   const messages = [{ role: 'system', content: staticText }];
@@ -6319,6 +6328,42 @@ function InspectorRow({ pills = [], title, meta, preview, content, dimmed = fals
     </div>`;
 }
 
+// Suggested-lore review row: collapsed one-liner (pill + title + accept/✕),
+// click to expand. The expanded view mirrors the Chat tab's review card —
+// change note, was/now split for updates, keys — so a proposal reads the
+// same on both surfaces.
+function QueueRow({ q, onAccept = null, onDismiss = null }) {
+  const [open, setOpen] = useState(false);
+  const old = q.oldContent != null ? String(q.oldContent) : null;
+  return html`
+    <div class="lore-item-row">
+      <div class="row" style=${{ cursor: 'pointer' }} onClick=${() => setOpen(!open)}>
+        <span class="hint">${open ? '▾' : '▸'}</span>
+        <span class="pill">${queuePillOf(q)}</span>
+        <span style=${{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          title=${q.title || '(untitled)'}>${q.title || '(untitled)'}</span>
+        ${onAccept && html`
+          <span onClick=${(e) => e.stopPropagation()} style=${{ display: 'flex', gap: '4px' }}>
+            <button class="btn small" title="Accept — moves this into the chat's lore (updates keep their branch scope)" onClick=${() => onAccept(q)}>accept</button>
+            <button class="btn small danger" title="Dismiss proposal" onClick=${() => onDismiss(q.id)}>✕</button>
+          </span>`}
+      </div>
+      ${!open && html`<div class="ir-preview">${toPreview(q.content, 140)}</div>`}
+      ${open && html`
+        <div class="ir-content" style=${{ whiteSpace: 'normal' }}>
+          ${q.note && html`<div class="hint" style=${{ marginBottom: '4px' }}>change: ${q.note}</div>`}
+          ${old != null ? html`
+            <div class="grid2">
+              <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>was: ${old.slice(0, 400)}${old.length > 400 ? '…' : ''}</div>
+              <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>now: ${q.content}</div>
+            </div>` : html`
+            <div class="hint" style=${{ whiteSpace: 'pre-wrap' }}>${q.content}</div>`}
+          ${(q.keys ?? []).length > 0 && html`
+            <div class="hint" style=${{ marginTop: '4px' }}>keys: ${q.keys.join(', ')}</div>`}
+        </div>`}
+    </div>`;
+}
+
 // Collapsible section header (Context / Lore / Memories) — open by default,
 // collapse state persisted per section. `meta` renders dim after the title.
 function InspectorSection({ title, count, meta, children }) {
@@ -6353,7 +6398,7 @@ function LayerCard({ name, tokens, cap, note, about }) {
     </div>`;
 }
 
-function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [] }) {
+function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [], loreQueue = [], onAcceptQueue = null, onDismissQueue = null }) {
   const [showInactive, setShowInactive] = useState(false);
   const [showInactiveMem, setShowInactiveMem] = useState(false);
   // Aux calls (memory summaries, lore extraction, suggestions, /improve,
@@ -6373,13 +6418,8 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
   // branches: a queue can be waiting before any generation has run.
   const queueSection = (loreQueue ?? []).length > 0 && html`
     <${InspectorSection} title="Suggested lore" count=${loreQueue.length} meta="awaiting review">
-      ${loreQueue.map(q => html`
-        <${InspectorRow} key=${q.id}
-          pills=${[{ text: queuePillOf(q), cls: '' }]}
-          title=${q.title || '(untitled)'}
-          preview=${toPreview(q.content, 140)}
-          content=${`${q.note ? `[change] ${q.note}\n\n` : ''}${q.content ?? ''}${q.oldContent != null ? `\n\n[was] ${q.oldContent}` : ''}${(q.keys ?? []).length ? `\n\n[keys] ${q.keys.join(', ')}` : ''}`} />`)}
-      <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accept or dismiss in the Chat tab.</div>
+      ${loreQueue.map(q => html`<${QueueRow} key=${q.id} q=${q} onAccept=${onAcceptQueue} onDismiss=${onDismissQueue} />`)}
+      <div class="hint" style=${{ margin: '2px 0 8px' }}>Not in context yet — accepted pieces join this chat's lore.</div>
     <//>`;
   if (!manifest?.layers) return html`
     <div>
@@ -6402,8 +6442,18 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
   const histTok = tok(L.history.tokens + (L.greeting?.tokens ?? 0),
     exact ? (realCounts?.history ?? 0) + (realCounts?.greeting ?? 0) : null);
   const histCap = L.history.cap + (L.greeting?.tokens ?? 0);
-  const keptNote = L.history.dropped
-    ? `${L.history.kept} of ${L.history.kept + L.history.dropped} messages kept — oldest dropped to fit`
+  // History trim, kept/total with reasons: `total` is the pre-trim message
+  // count (max-messages trim happens before the token fill, so countTrimmed
+  // is what the count cap removed and `dropped` what the context length did).
+  // The card note carries it — the trim never shows as a big ⚠ warning.
+  const histTotal = L.history.total ?? (L.history.kept + L.history.dropped);
+  const countTrimmed = Math.max(0, histTotal - L.history.kept - L.history.dropped);
+  const trimReasons = [
+    countTrimmed > 0 ? 'max messages kept' : null,
+    L.history.dropped > 0 ? 'context length' : null,
+  ].filter(Boolean);
+  const keptNote = trimReasons.length
+    ? `${L.history.kept}/${histTotal} messages kept (${trimReasons.join(' · ')})`
     : `all ${L.history.kept} message${L.history.kept === 1 ? '' : 's'} kept`;
   const memPinned = L.memory.memories.filter(m => m.pinned).length;
   // Semantic activation observability: per-piece cosine scores from the last
@@ -6429,7 +6479,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
           about="Platform system prompt, multi-speaker and tool-calling instructions, scenario instructions and backstory, persona, per-chat custom instructions, author's note, and the length directive — always sent in full." />
         <${LayerCard} name="Lore"
           tokens=${tok(L.lore.tokens, realCounts?.lore)} cap=${L.lore.cap}
-          note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} not` : ''}`}
+          note=${`${L.lore.pieces.length} injected${(L.lore.inactive ?? []).length ? ` · ${L.lore.inactive.length} skipped` : ''}`}
           about="Lore pieces pinned or triggered by recent messages, ordered by weight and trimmed to budget." />
         <${LayerCard} name="Memory"
           tokens=${tok(L.memory.tokens, realCounts?.memory)} cap=${L.memory.cap}
@@ -6446,7 +6496,7 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
         <div class="hint" style=${{ margin: '2px 0 8px' }}>
           ${src} counts · ctx ${manifest.contextLength} − ${manifest.reserve} reserve
         </div>
-        ${manifest.warnings.map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
+        ${manifest.warnings.filter(w => !/^\d+\/\d+ messages kept \(/.test(w)).map((w, i) => html`<div class="warn" key=${i}>⚠\uFE0E ${w}</div>`)}
       <//>
       <${InspectorSection} title="Lore injected" count=${L.lore.pieces.length}>
         ${L.lore.pieces.length === 0 && html`<div class="hint">No lore pieces active.</div>`}
@@ -6560,7 +6610,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
 // ============================================================================
 // COMPONENTS: CHAT OPTIONS TAB — per-chat settings.
 // ============================================================================
-function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, cap = null, memMaxChars = null, dateFormat = null, onRunMaintenance = null }) {
+function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExport, onDelete, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, dateFormat = null, onRunMaintenance = null, onAcceptQueue = null, onDismissQueue = null }) {
   const [editing, setEditing] = useState(null); // { piece, isNew } | null — lore piece editor popout
   const [histOpen, setHistOpen] = useState(false); // maintenance history modal
   if (!chat) return html`<div class="hint">Select a chat first.</div>`;
@@ -6574,33 +6624,33 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   const allPieces = mergedLorePieces(scenario, chat, characters);
   const linkedChars = resolveCharacters(scenario, chat, characters);
   const setPieces = (lorePieces) => update({ ...chat, lorePieces });
-  // Queue accept routing: new pieces become user-owned (provenance stripped,
-  // visible on every branch); UPDATE proposals keep their stamps (a rewrite
-  // must stay scoped to the branch that accepted it); memory revisions land
-  // as a fresh card superseding the stale one. One pure step against a
-  // working chat so Accept all can fold the whole queue through it.
-  const acceptStep = (work, q) => {
-    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
-    if (q.kind === 'memory')
-      return acceptQueuedMemory(work, q.id, { atLen: path.length,
-        atMsg: work.activeLeafId ?? null, cap: cap ?? MEMORY_CAP,
-        maxChars: memMaxChars ?? DEFAULT_SETTINGS.memoryMaxChars });
-    if (q.updateOf) {
-      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
-      const view = mergedLorePieces(scenario, work, characters)
-        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
-        .map(p => pieceAtPath(p, ids, work.messages ?? null));
-      return acceptQueuedUpdate(work, q.id, { allPieces: view,
-        nodeId: work.activeLeafId ?? null, atLen: path.length,
-        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
-    }
-    return acceptQueuedLore(work, q.id);
-  };
-  const acceptQueued = (q) => update(acceptStep(chat, q));
-  const acceptAll = () => update((chat.loreQueue ?? []).reduce(acceptStep, chat));
+  // Queue accepts route through Main's ONE shared step (same implementation
+  // as the Inspector's Suggested-lore rows): new pieces become user-owned,
+  // updates keep their branch stamps, memory revisions supersede. Each call
+  // re-reads the live chat (saveChat syncs the ref), so Accept all is the
+  // queue folded through sequential accepts.
+  const acceptAll = () => (chat.loreQueue ?? []).forEach(q => onAcceptQueue(q));
   const dismissAll = () => {
     if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
       update({ ...chat, loreQueue: [] });
+  };
+  // "stale" pill: the target moved since the proposal was written (tool
+  // write, user edit, another branch) and the pass hasn't refreshed the entry
+  // yet — the was/now preview no longer reflects the live card.
+  const curContentByTitle = new Map(allPieces
+    .filter(p => pieceVisibleAt(p, pathIds, chat.messages ?? null))
+    .map(p => [(p.title ?? '').trim().toLowerCase(),
+      String(pieceAtPath(p, pathIds, chat.messages ?? null).content ?? '').trim()]));
+  const memTextById = new Map((chat.memoryStore?.memories ?? []).map(m => [m?.id, String(m?.text ?? '').trim()]));
+  const isStale = (q) => {
+    if (q.oldContent == null) return false;
+    const old = String(q.oldContent).trim();
+    if (q.kind === 'memory') return memTextById.has(q.memoryId) && memTextById.get(q.memoryId) !== old;
+    if (q.updateOf) {
+      const cur = curContentByTitle.get((q.updateOf ?? '').trim().toLowerCase());
+      return cur != null && cur !== old;
+    }
+    return false;
   };
   // Metadata edits (name, persona, lore, notes) don't touch the message tree —
   // touch:false keeps them from bumping updatedAt and re-sorting the sidebar.
@@ -6641,8 +6691,9 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
               <div class="lc-head">
                 <span class="t">${q.title || '(untitled)'}</span>
                 <span class="pill">${queuePillOf(q)}</span>
-                <button class="btn small" onClick=${() => acceptQueued(q)}>accept</button>
-                <button class="btn small danger" title="Dismiss proposal" onClick=${() => update(dismissQueuedLore(chat, q.id))}>✕</button>
+                ${isStale(q) && html`<span class="pill" title="The target changed since this proposal was written — compare the 'was' text against the live card before accepting">stale</span>`}
+                <button class="btn small" onClick=${() => onAcceptQueue(q)}>accept</button>
+                <button class="btn small danger" title="Dismiss proposal" onClick=${() => onDismissQueue(q.id)}>✕</button>
               </div>
               ${q.note && html`<div class="hint" style=${{ padding: '2px 8px 0' }}>change: ${q.note}</div>`}
               ${q.oldContent != null ? html`
@@ -7814,7 +7865,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -8112,6 +8163,12 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       ${!generating && !genElsewhere && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
+        </div>`}
+      ${queueCount > 0 && html`
+        <div class="queue-notice">
+          <span>✦ ${queueCount} lore proposal${queueCount === 1 ? '' : 's'} await review</span>
+          <button class="btn small" onClick=${() => actions.onOpenQueue()}>Review</button>
+          <button class="btn small ghost" title="Hide until the pending count changes" onClick=${() => actions.onDismissQueueNotice()}>✕</button>
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
@@ -8477,16 +8534,29 @@ function ContextMenu({ x, y, items, onClose }) {
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memory', chat: 'Chat' };
 
+// Pending lore reviews badge the two tabs that surface them (Inspector rows,
+// Chat tab list) — without this an unreviewed queue is invisible.
+const queueTabBadge = (chat, t) => {
+  const n = chat?.loreQueue?.length ?? 0;
+  return n > 0 && (t === 'chat' || t === 'inspector') ? ` (${n})` : '';
+};
+
 // Shared tab body for ChatPanelModal and RightDrawer — same tab branches,
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                    onAcceptQueue = null, onDismissQueue = null }) {
+  // Queue handlers arrive keyed by chatId — curry them here so both review
+  // surfaces (Chat tab, Inspector rows) take the bare entry/id.
+  const acceptQ = chat && onAcceptQueue ? (q) => onAcceptQueue(chat.id, q) : null;
+  const dismissQ = chat && onDismissQueue ? (qid) => onDismissQueue(chat.id, qid) : null;
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
       ${chat && tab === 'inspector' && html`
-        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} loreQueue=${chat.loreQueue} />`}
+        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} loreQueue=${chat.loreQueue}
+          onAcceptQueue=${acceptQ} onDismissQueue=${dismissQ} />`}
       ${chat && tab === 'samplers' && html`
         <${ChatSamplers} chat=${chat} settings=${settings} onUpdateChat=${onUpdateChat} onUpdateSettings=${onUpdateSettings} />`}
       ${chat && tab === 'memory' && html`
@@ -8494,26 +8564,28 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat}
-          onRunMaintenance=${onRunMaintenance} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} dateFormat=${dateFormat}
+          onRunMaintenance=${onRunMaintenance} onAcceptQueue=${acceptQ} onDismissQueue=${dismissQ} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                         onAcceptQueue = null, onDismissQueue = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
         ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-          <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+          <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}${queueTabBadge(chat, t)}</button>`)}
       </div>
       <${PanelBody} chat=${chat} tab=${tab} manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue} />
     <//>`;
 }
 
@@ -8527,7 +8599,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                      onAcceptQueue = null, onDismissQueue = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -8535,7 +8608,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
       <div class="head">
         <div class="ptabs">
           ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}</button>`)}
+            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}${queueTabBadge(chat, t)}</button>`)}
         </div>
         <button class="btn small ghost" title="Close panel" onClick=${onClose}>✕</button>
       </div>
@@ -8544,7 +8617,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}
@@ -9134,6 +9208,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const [generating, setGenerating] = useState(null); // { chatId, nodeId }
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
+  const [queueChipOff, setQueueChipOff] = useState({}); // chatId → pending count the notice was dismissed at (session-only)
   const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
@@ -9833,27 +9908,56 @@ function Main({ storage, storageKind, storageFailed }) {
         }, chatObj.id);
         const { fresh, updates, memoryUpdates } = parseLorePassOutput(out);
         const byTitle = new Map(view.map(p => [(p.title ?? '').trim().toLowerCase(), p]));
-        const queuedTitles = new Set((chatObj.loreQueue ?? []).map(q => (q.title ?? '').trim().toLowerCase()));
-        const queuedUpdates = new Set((chatObj.loreQueue ?? []).map(q => (q.updateOf ?? '').trim().toLowerCase()).filter(Boolean));
-        const queuedMems = new Set((chatObj.loreQueue ?? []).map(q => q.memoryId).filter(Boolean));
+        const queue = chatObj.loreQueue ?? [];
+        const queuedNewByTitle = new Map(queue.filter(q => !q.updateOf && q.kind !== 'memory')
+          .map(q => [(q.title ?? '').trim().toLowerCase(), q]));
+        const queuedUpdByTitle = new Map(queue.filter(q => q.updateOf)
+          .map(q => [(q.updateOf ?? '').trim().toLowerCase(), q]));
+        const queuedMemById = new Map(queue.filter(q => q.memoryId).map(q => [q.memoryId, q]));
+        const differs = (a, b) => String(a ?? '').trim() !== String(b ?? '').trim();
         const maxNew = Math.max(1, st.loreExtractMax ?? 5);
+        // Truly-new proposals: no live piece, no queued entry. Capped per pass.
         const freshOk = fresh
-          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedTitles.has(p.title.toLowerCase()))
+          .filter(p => !byTitle.has(p.title.toLowerCase()) && !queuedNewByTitle.has(p.title.toLowerCase()))
           .slice(0, maxNew);
+        // A proposal naming an already-QUEUED item REFRESHES that entry in
+        // place (same id, fresh content/note/oldContent) instead of being
+        // dropped — an ignored queue no longer freezes a topic at a stale
+        // proposal. Refreshes don't count against the per-pass caps (the
+        // queue doesn't grow), and a content-identical one is skipped.
+        const freshRefresh = fresh
+          .filter(p => {
+            const q = queuedNewByTitle.get(p.title.toLowerCase());
+            return q && (differs(p.content, q.content) || differs(p.note, q.note));
+          });
         // Updates must name a known piece and actually change its current text.
-        const updatesOk = updates
+        const updTargets = updates
           .map(u => ({ ...u, target: byTitle.get(u.title.toLowerCase()) }))
-          .filter(u => u.target && !queuedUpdates.has(u.title.toLowerCase())
-            && u.content !== String(u.target.content ?? '').trim())
+          .filter(u => u.target && differs(u.content, u.target.content));
+        const updatesOk = updTargets
+          .filter(u => !queuedUpdByTitle.has(u.title.toLowerCase()))
           .slice(0, maxNew);
+        const updatesRefresh = updTargets
+          .filter(u => {
+            const q = queuedUpdByTitle.get(u.title.toLowerCase());
+            return q && (differs(u.content, q.content) || differs(u.target.content, q.oldContent));
+          });
         // Memory revisions must name a visible card and change its text.
         // Dedupe by id first (keep last) — two entries for one card in a
         // single pass would supersede it twice.
-        const memsOk = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
+        const memTargets = [...new Map(memoryUpdates.filter(u => u?.id != null).map(u => [u.id, u])).values()]
           .map(u => ({ ...u, target: memVisible.find(m => m.id === u.id) }))
-          .filter(u => u.target && !queuedMems.has(u.id) && u.text !== (u.target.text ?? '').trim())
+          .filter(u => u.target && differs(u.text, u.target.text));
+        const memsOk = memTargets
+          .filter(u => !queuedMemById.has(u.id))
           .slice(0, PASS_MEM_CAP);
-        if (!freshOk.length && !updatesOk.length && !memsOk.length) { advance((c) => c); return; }
+        const memsRefresh = memTargets
+          .filter(u => {
+            const q = queuedMemById.get(u.id);
+            return q && (differs(u.text, q.content) || differs(u.target.text, q.oldContent));
+          });
+        if (!freshOk.length && !updatesOk.length && !memsOk.length
+          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c); return; }
         const now = Date.now();
         const stamps = () => {
           const cur = ref.current.chats[chatObj.id];
@@ -9863,6 +9967,26 @@ function Main({ storage, storageKind, storageFailed }) {
         };
         advance((cur) => {
           let work = cur;
+          // Refresh-in-place runs in BOTH modes — a 'queue' stint (or an
+          // over-long auto update) can leave entries even under auto mode.
+          // Patched by id, so an entry the user accepted/dismissed mid-pass
+          // is simply skipped.
+          const patchQ = (id, patch) => {
+            work = { ...work, loreQueue: (work.loreQueue ?? []).map(e => e.id === id ? { ...e, ...patch } : e) };
+          };
+          for (const p of freshRefresh) {
+            const q = queuedNewByTitle.get(p.title.toLowerCase());
+            if (q) patchQ(q.id, { content: p.content, keys: p.keys ?? [], hasKeys: p.hasKeys, note: p.note });
+          }
+          for (const u of updatesRefresh) {
+            const q = queuedUpdByTitle.get(u.title.toLowerCase());
+            if (q) patchQ(q.id, { content: u.content, keys: u.hasKeys ? u.keys : [], hasKeys: u.hasKeys,
+              note: u.note, oldContent: String(u.target.content ?? '') });
+          }
+          for (const u of memsRefresh) {
+            const q = queuedMemById.get(u.id);
+            if (q) patchQ(q.id, { content: u.text, note: u.note, oldContent: String(u.target.text ?? '') });
+          }
           if (mode === 'auto') {
             // Stamped with the live leaf (+ its viewed swipe): auto-mode writes
             // stay scoped to the branch they were made on — derivation replaces
@@ -9925,6 +10049,39 @@ function Main({ storage, storageKind, storageFailed }) {
   const onRunMaintenance = (c) => {
     if (!c || genRef.current || auxBusy.length) return;
     maybeExtractLore(c, true);
+  };
+
+  // ---- lore review queue (chat.loreQueue) ----
+  // ONE accept step shared by every review surface (Chat tab, Inspector's
+  // Suggested lore rows, Accept all): new pieces become user-owned (provenance
+  // stripped, visible on every branch); UPDATE proposals keep their stamps (a
+  // rewrite stays scoped to the branch that accepted it); memory revisions
+  // land as a fresh card superseding the stale one. Each call re-reads the
+  // CURRENT chat (saveChat syncs the ref), so sequential accepts compose.
+  const queueAcceptStep = (work, q, chatScenario) => {
+    const path = getActivePath(work.messages ?? {}, work.activeLeafId);
+    if (q.kind === 'memory')
+      return acceptQueuedMemory(work, q.id, { atLen: path.length,
+        atMsg: work.activeLeafId ?? null, cap: settings.memoryCap ?? MEMORY_CAP,
+        maxChars: settings.memoryMaxChars ?? 5000 });
+    if (q.updateOf) {
+      const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
+      const view = mergedLorePieces(chatScenario, work, ref.current.characters)
+        .filter(p => pieceVisibleAt(p, ids, work.messages ?? null))
+        .map(p => pieceAtPath(p, ids, work.messages ?? null));
+      return acceptQueuedUpdate(work, q.id, { allPieces: view,
+        nodeId: work.activeLeafId ?? null, atLen: path.length,
+        createdSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null });
+    }
+    return acceptQueuedLore(work, q.id);
+  };
+  const onAcceptQueue = (chatId, q) => {
+    const c = ref.current.chats[chatId];
+    if (c) saveChat(queueAcceptStep(c, q, ref.current.scenarios[c.scenarioId]), { touch: false });
+  };
+  const onDismissQueue = (chatId, qid) => {
+    const c = ref.current.chats[chatId];
+    if (c) saveChat(dismissQueuedLore(c, qid), { touch: false });
   };
 
   // ---- character enrichment (settings.toolsEnrich) ----
@@ -11652,6 +11809,9 @@ function Main({ storage, storageKind, storageFailed }) {
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
               onImpersonate=${settings.impersonate ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
+              queueCount=${(chat?.loreQueue?.length ?? 0) > 0 && queueChipOff[chat.id] !== chat.loreQueue.length ? chat.loreQueue.length : 0}
+              onOpenQueue=${() => peekRight ? setPeekTab('chat') : setUi(u => ({ ...u, drawer: 'chat' }))}
+              onDismissQueueNotice=${() => setQueueChipOff(m => ({ ...m, [chat.id]: chat.loreQueue?.length ?? 0 }))}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
         </div>
@@ -11675,6 +11835,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${onOpenBranches}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onClose=${peekRight ? () => setPeek(null) : closeDrawer} />
       </div>
     </div>
@@ -11756,6 +11917,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         onExportPiece=${onExportPieceToCharacter}
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onExport=${() => onExportChat(chats[modal.chatId])}
         onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}

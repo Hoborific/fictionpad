@@ -1,7 +1,7 @@
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, ...actions }) {
+                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -299,6 +299,12 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
       ${!generating && !genElsewhere && !auxBusy.length && leaf?.role === 'user' && html`
         <div class="gen-reply">
           <button class="btn gen-pill" onClick=${() => actions.onGenerateReply()}>✦ Generate response</button>
+        </div>`}
+      ${queueCount > 0 && html`
+        <div class="queue-notice">
+          <span>✦ ${queueCount} lore proposal${queueCount === 1 ? '' : 's'} await review</span>
+          <button class="btn small" onClick=${() => actions.onOpenQueue()}>Review</button>
+          <button class="btn small ghost" title="Hide until the pending count changes" onClick=${() => actions.onDismissQueueNotice()}>✕</button>
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}

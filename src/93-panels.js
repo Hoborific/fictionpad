@@ -5,16 +5,29 @@
 // ============================================================================
 const PANEL_TABS = { inspector: 'Inspector', samplers: 'Samplers', memory: 'Memory', chat: 'Chat' };
 
+// Pending lore reviews badge the two tabs that surface them (Inspector rows,
+// Chat tab list) — without this an unreviewed queue is invisible.
+const queueTabBadge = (chat, t) => {
+  const n = chat?.loreQueue?.length ?? 0;
+  return n > 0 && (t === 'chat' || t === 'inspector') ? ` (${n})` : '';
+};
+
 // Shared tab body for ChatPanelModal and RightDrawer — same tab branches,
 // same props. Without a chat, only the drawer can be open, and it shows a hint.
 function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                     onUpdateChat, onSummarize, summarizing, onExport, onDelete, dateFormat, memoryEvery, cap,
-                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                    settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                    onAcceptQueue = null, onDismissQueue = null }) {
+  // Queue handlers arrive keyed by chatId — curry them here so both review
+  // surfaces (Chat tab, Inspector rows) take the bare entry/id.
+  const acceptQ = chat && onAcceptQueue ? (q) => onAcceptQueue(chat.id, q) : null;
+  const dismissQ = chat && onDismissQueue ? (qid) => onDismissQueue(chat.id, qid) : null;
   return html`
     <div class="pbody">
       ${!chat && html`<div class="hint">Select a chat to inspect its context and memories.</div>`}
       ${chat && tab === 'inspector' && html`
-        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} loreQueue=${chat.loreQueue} />`}
+        <${ContextInspector} manifest=${manifest} hasChat=${true} onPreview=${onPreview} realCounts=${realCounts} auxLog=${auxLog} loreQueue=${chat.loreQueue}
+          onAcceptQueue=${acceptQ} onDismissQueue=${dismissQ} />`}
       ${chat && tab === 'samplers' && html`
         <${ChatSamplers} chat=${chat} settings=${settings} onUpdateChat=${onUpdateChat} onUpdateSettings=${onUpdateSettings} />`}
       ${chat && tab === 'memory' && html`
@@ -22,26 +35,28 @@ function PanelBody({ chat, tab, manifest, realCounts, onPreview, auxLog, persona
       ${chat && tab === 'chat' && html`
         <${ChatOptions} chat=${chat} personas=${personas} scenario=${scenario} characters=${characters}
           onUpdateChat=${onUpdateChat} onExport=${onExport} onDelete=${onDelete} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} cap=${cap} memMaxChars=${memMaxChars} dateFormat=${dateFormat}
-          onRunMaintenance=${onRunMaintenance} />`}
+          onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} dateFormat=${dateFormat}
+          onRunMaintenance=${onRunMaintenance} onAcceptQueue=${acceptQ} onDismissQueue=${dismissQ} />`}
     </div>`;
 }
 
 function ChatPanelModal({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog, personas, scenario, characters,
                          onUpdateChat, onSummarize, summarizing, onExport, onDelete, onClose, dateFormat, memoryEvery, cap,
-                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                         settings, onUpdateSettings, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                         onAcceptQueue = null, onDismissQueue = null }) {
   return html`
     <${Modal} title=${chat.name} cls="sheet" onClose=${onClose}>
       <div class="ptabs">
         ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-          <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}</button>`)}
+          <button key=${t} class=${tab === t ? 'active' : ''} onClick=${() => onTab(t)}>${label}${queueTabBadge(chat, t)}</button>`)}
       </div>
       <${PanelBody} chat=${chat} tab=${tab} manifest=${manifest} realCounts=${realCounts} onPreview=${onPreview}
         auxLog=${auxLog} personas=${personas} scenario=${scenario} characters=${characters}
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue} />
     <//>`;
 }
 
@@ -55,7 +70,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
                       personas, scenario, characters, onExport, onDelete,
                       onUpdateChat, onSummarize, summarizing,
                       width, onDragStart, onResetWidth, onClose, dateFormat, memoryEvery, cap,
-                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null }) {
+                      settings, onUpdateSettings, peek, peekLeave, onGenerate, onOpenBranches, onGenerateAvatar = null, onExportPiece = null, memMaxChars = null, onRunMaintenance = null,
+                      onAcceptQueue = null, onDismissQueue = null }) {
   return html`
     <div class="drawer ${tab ? '' : 'collapsed'} ${tab && width < PANE_NARROW ? 'narrow' : ''} ${peek ? 'peek' : ''}"
       style=${{ width: tab ? width : 0, minWidth: tab ? width : 0 }}
@@ -63,7 +79,7 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
       <div class="head">
         <div class="ptabs">
           ${Object.entries(PANEL_TABS).map(([t, label]) => html`
-            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}</button>`)}
+            <button key=${t} class=${tab === t ? 'active' : ''} title=${label} onClick=${() => onTab(t)}>${label}${queueTabBadge(chat, t)}</button>`)}
         </div>
         <button class="btn small ghost" title="Close panel" onClick=${onClose}>✕</button>
       </div>
@@ -72,7 +88,8 @@ function RightDrawer({ chat, tab, onTab, manifest, realCounts, onPreview, auxLog
         onUpdateChat=${onUpdateChat} onSummarize=${onSummarize} summarizing=${summarizing}
         onExport=${onExport} onDelete=${onDelete} dateFormat=${dateFormat} memoryEvery=${memoryEvery} cap=${cap}
         settings=${settings} onUpdateSettings=${onUpdateSettings} onGenerate=${onGenerate} onOpenBranches=${onOpenBranches}
-        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance} />
+        onGenerateAvatar=${onGenerateAvatar} onExportPiece=${onExportPiece} memMaxChars=${memMaxChars} onRunMaintenance=${onRunMaintenance}
+        onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue} />
       ${tab && html`<div class="pane-handle left" title="Drag to resize · double-click to reset"
         onPointerDown=${(e) => { e.preventDefault(); onDragStart(e.clientX); }}
         onDoubleClick=${onResetWidth} />`}

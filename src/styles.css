@@ -476,6 +476,15 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   color: var(--c-dim); border: 1px solid var(--c-border); background: var(--c-bg-1);
 }
 .gen-reply .gen-pill:hover { color: var(--c-text); border-color: var(--c-accent); }
+/* Pending-lore-review notice: slim bar above the composer so an unreviewed
+   queue can't go unnoticed for many messages. Dismiss hides it until the
+   pending count changes. */
+.queue-notice {
+  display: flex; gap: 8px; align-items: center; justify-content: center;
+  max-width: var(--chat-w); margin: 0 auto; padding: 4px 14px; width: 100%;
+  font-size: 12.5px; color: var(--c-dim);
+}
+.queue-notice span { flex: 0 1 auto; }
 .sugg-row {
   display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
   max-width: var(--chat-w); margin: -6px auto 14px; padding: 0 4px;
