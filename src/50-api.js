@@ -91,7 +91,8 @@ async function fetchAPI(endpoint, url, opts = {}) {
 
 // Returns { ids, ctxs }: sorted model ids, plus per-model context lengths
 // from vendor extensions to the OpenAI model card — vLLM `max_model_len`,
-// llama.cpp `n_ctx`, OpenRouter `context_length` (absent elsewhere → {}).
+// llama.cpp `n_ctx` (nested under `meta` on current builds), OpenRouter
+// `context_length` (absent elsewhere → {}).
 async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   const res = await fetchAPI(endpoint, modelsURL(endpoint), { headers: { ...authHeaders(apiKey, endpoint, serverToken) }, signal });
   if (!res.ok) {
@@ -106,7 +107,7 @@ async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   for (const m of json.data ?? []) {
     if (!m?.id) continue;
     ids.push(m.id);
-    const ctx = Number(m.max_model_len ?? m.n_ctx ?? m.context_length);
+    const ctx = Number(m.max_model_len ?? m.n_ctx ?? m.meta?.n_ctx ?? m.context_length);
     if (Number.isFinite(ctx) && ctx > 0) ctxs[m.id] = ctx;
   }
   return { ids: ids.sort(), ctxs };

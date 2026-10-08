@@ -1404,3 +1404,10 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 
 - History trims no longer show as big ⚠ warnings in the Inspector: the History card's note carries them instead, as an honest kept/total with the reason in parens — "60/140 messages kept (max messages kept · context length)" — replacing the misleading "all 60 messages kept" it showed when the max-messages cap had trimmed (its drop count only ever reflected the token fill, not the count cap). The Lore card's note now reads "10 injected · 14 skipped" instead of "14 not".
 - A maintenance-pass proposal naming an already-queued piece or memory note now refreshes the queued entry in place (same id, fresh content and was/now previews) instead of being dropped by dedupe. Previously an ignored proposal froze its topic: the pass would never re-propose that title, so the queue entry went staler the longer it sat. Refreshes don't count against the per-pass proposal caps, and content-identical re-proposals are skipped.
+
+
+### v4.11.17
+
+**Fixed**
+
+- Auto context detection works against current llama.cpp builds again: `/v1/models` nests the running context under `meta.n_ctx` there (top-level `n_ctx` is gone), so the Fetch-detected context silently missed and fell back to the 8192 default. Detection now reads `meta.n_ctx` too (vLLM `max_model_len` and OpenRouter `context_length` unchanged).
