@@ -558,6 +558,12 @@ function Main({ storage, storageKind, storageFailed }) {
         return;
       }
       case 'export': return onExportChat(c);
+      case 'fork': { // whole-chat fork: branchChat at the active leaf (root→leaf path only)
+        const b = branchChat(c, c.activeLeafId);
+        upsertChat(b.id, b);
+        setUi(u => ({ ...u, chatId: b.id }));
+        return;
+      }
       case 'delete': if (confirm(`Delete chat "${c.name}"?`)) onDeleteChat(chatId);
     }
   };
@@ -914,7 +920,7 @@ function Main({ storage, storageKind, storageFailed }) {
     maybeExtractLore(c, true);
   };
 
-  // ---- character enrichment (experimental, settings.toolsEnrich) ----
+  // ---- character enrichment (settings.toolsEnrich) ----
   // Newly tool-registered characters get fleshed out by the ✦ generator
   // ('piece' kind) — one aux call per new character, all concurrent, after
   // the generation completes. Only CONTENT is rewritten and keys are merged;
@@ -1692,7 +1698,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         maybeSummarize(work);
         maybeExtractLore(work);
-        // Experimental (settings.toolsEnrich): flesh out characters this
+        // Enrichment (settings.toolsEnrich): flesh out characters this
         // generation registered, via the ✦ generator. Fire-and-forget like
         // the passes above; merge-on-write at save time.
         if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
@@ -2637,7 +2643,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onJump=${onJump} onOpenBranches=${onOpenBranches}
               onOpenCharacter=${onOpenCharacterPiece}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
-              onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
+              onImpersonate=${settings.impersonate ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
@@ -2758,6 +2764,7 @@ function Main({ storage, storageKind, storageFailed }) {
         items=${ctxMenu.items ?? [
           { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Branches', fn: () => chatAction(ctxMenu.chatId, 'branches') },
+          { label: 'Fork to new chat', fn: () => chatAction(ctxMenu.chatId, 'fork') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

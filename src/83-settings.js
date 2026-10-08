@@ -49,16 +49,16 @@ const DEFAULT_SETTINGS = {
   // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
   customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
-  tokenProbs: false, // request logprobs + top_logprobs on generations (opt-in)
+  tokenProbs: true, // request logprobs + top_logprobs on generations
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
+  suggestions: true, // response-suggestion chips after generations (they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
-  impersonate: true, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
+  impersonate: false, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
   avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
@@ -98,7 +98,7 @@ const DEFAULT_SETTINGS = {
   imageNegative: '', // comfyui: negative prompt substituted into {{negative}}
   imageWorkflow: '', // comfyui: API-format workflow JSON ("Save (API Format)" export) with {{prompt}} etc.
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
-  toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
+  toolsEnrich: true, // flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   imagePrompt: '', // generate_image instructions, appended when image generation is on; blank = DEFAULT_IMAGE_PROMPT
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -649,7 +649,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Response suggestions ("what you might do next" chips after each AI reply)
           </label>
           <label class="check">
-            <input type="checkbox" checked=${draft.impersonate !== false} onChange=${(e) => set({ impersonate: e.target.checked })} />
+            <input type="checkbox" checked=${!!draft.impersonate} onChange=${(e) => set({ impersonate: e.target.checked })} />
             Impersonate chip ("✦ Draft my reply" under the latest reply — the AI drafts your message to edit; /impersonate always works)
           </label>
           <label class="check">
@@ -659,7 +659,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="check" title="Each newly tool-registered character is fleshed out by the ✦ generator — one aux call per new character, fired concurrently after the generation completes. Failures keep the original description. Requires tool calling.">
             <input type="checkbox" disabled=${draft.toolsEnabled === false}
               checked=${!!draft.toolsEnrich} onChange=${(e) => set({ toolsEnrich: e.target.checked })} />
-            Flesh out tool-registered characters with the ✦ generator (experimental)
+            Flesh out tool-registered characters with the ✦ generator
           </label>
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />

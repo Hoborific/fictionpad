@@ -962,7 +962,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.11.14';
+const APP_VERSION = '4.11.15';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1667,7 +1667,7 @@ function rewindChat(chat, nodeId) {
 function branchChat(chat, nodeId) {
   const copy = deepClone(chat);
   if (!copy.messages?.[nodeId])
-    return { ...copy, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+    return { ...copy, id: uid(), name: `${chat.name} (fork)`, createdAt: Date.now() };
   // Keep only the fork node's ancestor chain (walk up, cycle-guarded).
   const keep = new Set();
   let top = nodeId;
@@ -1680,7 +1680,7 @@ function branchChat(chat, nodeId) {
   const pruned = { ...copy, messages,
     ...(messages[copy.rootMessageId] ? {} : { rootMessageId: top }) };
   const trimmed = rewindChat(pruned, nodeId);
-  return { ...trimmed, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+  return { ...trimmed, id: uid(), name: `${chat.name} (fork)`, createdAt: Date.now() };
 }
 
 // ---- lore engine --------------------------------------------------------
@@ -5451,16 +5451,16 @@ const DEFAULT_SETTINGS = {
   // User-registered sampler params (backend-specific): [{ id, name, key, type: 'number'|'boolean', min, max, step, def }]
   customSamplers: [],
   platformPrompt: DEFAULT_PLATFORM_PROMPT,
-  tokenProbs: false, // request logprobs + top_logprobs on generations (opt-in)
+  tokenProbs: true, // request logprobs + top_logprobs on generations
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: false, // response-suggestion chips after generations (opt-in; they fire an aux call per swipe)
+  suggestions: true, // response-suggestion chips after generations (they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
   suggestionsTemp: 0.9,
   suggestionsDepth: 6, // recent messages handed to the suggestions call
-  impersonate: true, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
+  impersonate: false, // "✦ Draft my reply" chip under the latest reply (aux model, on click only); /impersonate always works
   avatarsEnabled: true, // avatar images beside chat bubbles (letter-tile fallback); set images on characters/scenarios/personas
   auxShowSuggestions: false, // list suggestion calls in the Inspector's Aux calls (they fire per swipe — noisy)
   memoryEvery: MEMORY_EVERY, // messages between auto-summaries (and lore-extraction cadence)
@@ -5500,7 +5500,7 @@ const DEFAULT_SETTINGS = {
   imageNegative: '', // comfyui: negative prompt substituted into {{negative}}
   imageWorkflow: '', // comfyui: API-format workflow JSON ("Save (API Format)" export) with {{prompt}} etc.
   toolsEnabled: true, // prompt-based tool calling (register_character / add_lore → chat lore)
-  toolsEnrich: false, // experimental: flesh out newly tool-registered characters via the ✦ generator
+  toolsEnrich: true, // flesh out newly tool-registered characters via the ✦ generator
   toolsPrompt: TOOLS_PROMPT, // protocol instructions appended to the platform prompt; user-editable
   imagePrompt: '', // generate_image instructions, appended when image generation is on; blank = DEFAULT_IMAGE_PROMPT
   toolCallCap: TOOL_CALL_CAP, // tool calls executed per generation
@@ -6051,7 +6051,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             Response suggestions ("what you might do next" chips after each AI reply)
           </label>
           <label class="check">
-            <input type="checkbox" checked=${draft.impersonate !== false} onChange=${(e) => set({ impersonate: e.target.checked })} />
+            <input type="checkbox" checked=${!!draft.impersonate} onChange=${(e) => set({ impersonate: e.target.checked })} />
             Impersonate chip ("✦ Draft my reply" under the latest reply — the AI drafts your message to edit; /impersonate always works)
           </label>
           <label class="check">
@@ -6061,7 +6061,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <label class="check" title="Each newly tool-registered character is fleshed out by the ✦ generator — one aux call per new character, fired concurrently after the generation completes. Failures keep the original description. Requires tool calling.">
             <input type="checkbox" disabled=${draft.toolsEnabled === false}
               checked=${!!draft.toolsEnrich} onChange=${(e) => set({ toolsEnrich: e.target.checked })} />
-            Flesh out tool-registered characters with the ✦ generator (experimental)
+            Flesh out tool-registered characters with the ✦ generator
           </label>
           <label class="check">
             <input type="checkbox" checked=${draft.multiSpeaker !== false} onChange=${(e) => set({ multiSpeaker: e.target.checked })} />
@@ -7029,11 +7029,12 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
   // down one level at a time until it fits — each level drops one more detail
   // from the inline row, right to left (model, edited, gen time, date, #),
-  // then the action icons (t6). Never measured mid-stream (the row is widest
-  // while generating); re-probes from t0 on swipe change and row resizes.
-  // Pre-paint, so no flash. Applies at every width: without the t1–t6 rules a
-  // contested row shrinks its spans to min-content and wraps mid-item, which
-  // reads as a broken two-line row (worst with multi-speaker headers).
+  // then the action icons (t6). Measured mid-stream too: the token counter
+  // grows the row while generating, and without the collapse the swipe arrows
+  // get pushed past the pane edge. Re-probes from t0 on swipe change and row
+  // resizes. Pre-paint, so no flash. Applies at every width: without the t1–t6
+  // rules a contested row shrinks its spans to min-content and wraps mid-item,
+  // which reads as a broken two-line row (worst with multi-speaker headers).
   const metaRef = useRef(null);
   const [metaLevel, setMetaLevel] = useState(0);
   useEffect(() => {
@@ -7043,16 +7044,19 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const prevSwipeRef = useRef(swipe);
+  // The swipe OBJECT rebuilds per streamed token, so key the reset on
+  // node+index: a real swipe switch re-probes from t0, a token update doesn't.
+  const swipeKey = `${node.id}:${node.activeSwipe}`;
+  const prevSwipeRef = useRef(swipeKey);
   useLayoutEffect(() => {
-    if (prevSwipeRef.current !== swipe) { // swipe switched → re-probe from t0
-      prevSwipeRef.current = swipe;
+    if (prevSwipeRef.current !== swipeKey) { // swipe switched → re-probe from t0
+      prevSwipeRef.current = swipeKey;
       if (metaLevel) { setMetaLevel(0); return; }
     }
     const el = metaRef.current;
-    if (!el || streaming) return;
+    if (!el) return;
     if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
-  }, [metaLevel, streaming, swipe]);
+  }, [metaLevel, streaming, swipe, swipeKey]);
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());
@@ -9561,6 +9565,12 @@ function Main({ storage, storageKind, storageFailed }) {
         return;
       }
       case 'export': return onExportChat(c);
+      case 'fork': { // whole-chat fork: branchChat at the active leaf (root→leaf path only)
+        const b = branchChat(c, c.activeLeafId);
+        upsertChat(b.id, b);
+        setUi(u => ({ ...u, chatId: b.id }));
+        return;
+      }
       case 'delete': if (confirm(`Delete chat "${c.name}"?`)) onDeleteChat(chatId);
     }
   };
@@ -9917,7 +9927,7 @@ function Main({ storage, storageKind, storageFailed }) {
     maybeExtractLore(c, true);
   };
 
-  // ---- character enrichment (experimental, settings.toolsEnrich) ----
+  // ---- character enrichment (settings.toolsEnrich) ----
   // Newly tool-registered characters get fleshed out by the ✦ generator
   // ('piece' kind) — one aux call per new character, all concurrent, after
   // the generation completes. Only CONTENT is rewritten and keys are merged;
@@ -10695,7 +10705,7 @@ function Main({ storage, storageKind, storageFailed }) {
         }
         maybeSummarize(work);
         maybeExtractLore(work);
-        // Experimental (settings.toolsEnrich): flesh out characters this
+        // Enrichment (settings.toolsEnrich): flesh out characters this
         // generation registered, via the ✦ generator. Fire-and-forget like
         // the passes above; merge-on-write at save time.
         if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
@@ -11640,7 +11650,7 @@ function Main({ storage, storageKind, storageFailed }) {
               onJump=${onJump} onOpenBranches=${onOpenBranches}
               onOpenCharacter=${onOpenCharacterPiece}
               onBranch=${onBranch} onRewind=${onRewind} onDeleteMsg=${onDeleteMsg}
-              onImpersonate=${settings.impersonate !== false ? onImpersonate : null}
+              onImpersonate=${settings.impersonate ? onImpersonate : null}
               onOpenMemory=${() => peekRight ? setPeekTab('memory') : setUi(u => ({ ...u, drawer: 'memory' }))}
               onGenerateReply=${onGenerateReply} onReply=${onGenerateReply} onRegenFromToken=${onRegenFromToken} />
           <//>
@@ -11761,6 +11771,7 @@ function Main({ storage, storageKind, storageFailed }) {
         items=${ctxMenu.items ?? [
           { label: 'Inspector', fn: () => chatAction(ctxMenu.chatId, 'inspector') },
           { label: 'Branches', fn: () => chatAction(ctxMenu.chatId, 'branches') },
+          { label: 'Fork to new chat', fn: () => chatAction(ctxMenu.chatId, 'fork') },
           { label: 'Chat settings', fn: () => chatAction(ctxMenu.chatId, 'settings') },
           { label: 'Memories', fn: () => chatAction(ctxMenu.chatId, 'memory') },
           { label: 'Rename…', fn: () => chatAction(ctxMenu.chatId, 'rename') },

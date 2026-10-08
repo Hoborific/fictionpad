@@ -202,11 +202,12 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // Fit-based meta collapse (phones): the row renders fully expanded and steps
   // down one level at a time until it fits — each level drops one more detail
   // from the inline row, right to left (model, edited, gen time, date, #),
-  // then the action icons (t6). Never measured mid-stream (the row is widest
-  // while generating); re-probes from t0 on swipe change and row resizes.
-  // Pre-paint, so no flash. Applies at every width: without the t1–t6 rules a
-  // contested row shrinks its spans to min-content and wraps mid-item, which
-  // reads as a broken two-line row (worst with multi-speaker headers).
+  // then the action icons (t6). Measured mid-stream too: the token counter
+  // grows the row while generating, and without the collapse the swipe arrows
+  // get pushed past the pane edge. Re-probes from t0 on swipe change and row
+  // resizes. Pre-paint, so no flash. Applies at every width: without the t1–t6
+  // rules a contested row shrinks its spans to min-content and wraps mid-item,
+  // which reads as a broken two-line row (worst with multi-speaker headers).
   const metaRef = useRef(null);
   const [metaLevel, setMetaLevel] = useState(0);
   useEffect(() => {
@@ -216,16 +217,19 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const prevSwipeRef = useRef(swipe);
+  // The swipe OBJECT rebuilds per streamed token, so key the reset on
+  // node+index: a real swipe switch re-probes from t0, a token update doesn't.
+  const swipeKey = `${node.id}:${node.activeSwipe}`;
+  const prevSwipeRef = useRef(swipeKey);
   useLayoutEffect(() => {
-    if (prevSwipeRef.current !== swipe) { // swipe switched → re-probe from t0
-      prevSwipeRef.current = swipe;
+    if (prevSwipeRef.current !== swipeKey) { // swipe switched → re-probe from t0
+      prevSwipeRef.current = swipeKey;
       if (metaLevel) { setMetaLevel(0); return; }
     }
     const el = metaRef.current;
-    if (!el || streaming) return;
+    if (!el) return;
     if (el.scrollWidth > el.clientWidth + 1 && metaLevel < 6) setMetaLevel(l => l + 1);
-  }, [metaLevel, streaming, swipe]);
+  }, [metaLevel, streaming, swipe, swipeKey]);
   const text = subUser(swipe.text, personaName);
   const isUser = node.role === 'user';
   const isOOC = /^\[OOC:/i.test(text.trim());

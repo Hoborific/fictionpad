@@ -432,7 +432,7 @@ function rewindChat(chat, nodeId) {
 function branchChat(chat, nodeId) {
   const copy = deepClone(chat);
   if (!copy.messages?.[nodeId])
-    return { ...copy, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+    return { ...copy, id: uid(), name: `${chat.name} (fork)`, createdAt: Date.now() };
   // Keep only the fork node's ancestor chain (walk up, cycle-guarded).
   const keep = new Set();
   let top = nodeId;
@@ -445,7 +445,7 @@ function branchChat(chat, nodeId) {
   const pruned = { ...copy, messages,
     ...(messages[copy.rootMessageId] ? {} : { rootMessageId: top }) };
   const trimmed = rewindChat(pruned, nodeId);
-  return { ...trimmed, id: uid(), name: `${chat.name} (branch)`, createdAt: Date.now() };
+  return { ...trimmed, id: uid(), name: `${chat.name} (fork)`, createdAt: Date.now() };
 }
 
 // ---- lore engine --------------------------------------------------------

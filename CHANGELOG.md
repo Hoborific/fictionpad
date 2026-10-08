@@ -1374,3 +1374,19 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 **Changed**
 
 - The memory summary pass now sees the full kept window as raw text instead of comprehending the recent past through its own cards. With max messages kept at 60, the pass is fed up to 60 raw messages — the already-summarized half labeled "context only", the new chunk labeled as the part to record — with prior cards listed only as a do-not-repeat guard. Feeding the pass a lossy digest of messages that were still available in full compounded summary drift; the raw window is in context anyway.
+
+
+### v4.11.15
+
+**Added**
+
+- The chat context menu (right-click / long-press a chat in the sidebar) now has "Fork to new chat" — a whole-chat fork at the active leaf, same semantics as the ⑂ message button (only the root→leaf path comes over, world state intact).
+
+**Fixed**
+
+- The live token counter no longer pushes the swipe arrows out of the pane mid-generation. The meta row's fit collapse (the t1–t6 stages that drop details behind the › toggle) was never measured while streaming — exactly when the growing "N tok" readout widens the row — so on a contested row the rightmost swipe nav overflowed the chat column until the generation finished. The row now measures mid-stream too; the t0 re-probe is keyed on the swipe index instead of the swipe object (which rebuilds per token), so the collapse doesn't bounce while streaming.
+
+**Changed**
+
+- Feature defaults rebalanced for fresh installs: token probabilities (logprobs + per-token alternatives), response suggestions, and tool-registered character enrichment (the ✦ generator flesh-out) are now ON by default — enrichment also sheds its "experimental" tag in Settings → Features. The "✦ Draft my reply" impersonate chip under the latest reply is now OFF by default (the /impersonate command always works regardless). Existing installs keep their stored settings; only the out-of-box defaults change.
+- Forked chats are now named "(fork)" instead of "(branch)" — "branch" is the in-chat tree terminology since v4.9, and the ⑂ action has been "fork" ever since. Existing chat names are untouched.
