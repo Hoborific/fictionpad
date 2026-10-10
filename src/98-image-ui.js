@@ -4,17 +4,30 @@
 // editor behind Upload/Crop. Phase 2 of Images & avatars (v4.10).
 // ============================================================================
 
+// Lazy-image sentinel check (server storage keeps image payloads out of the
+// boot snapshot — an entity field can still hold an unresolved `imgref:<id>`
+// placeholder until storage hydrates that entity). Never true in eager mode
+// (IndexedDB / old servers rehydrate everything up front), so every guard on
+// this is inert there.
+function isImgRef(s) { return typeof s === 'string' && s.startsWith(IMGREF_PREFIX); }
+
 // Round avatar: the image when `src` is set, otherwise a letter tile (first
 // letter of the name) with the same name-hashed hue the speaker name gets —
 // the tile keeps avatar columns aligned when someone has no image. Clickable
-// (button semantics + pointer) only when onClick is passed.
-function Avatar({ name = '', src = '', size = 40, onClick = null }) {
+// (button semantics + pointer) only when onClick is passed. A sentinel src
+// renders the same no-image fallback while hStore/hKey (hydration hints:
+// the owning entity's store + id) let us ask storage to pull the real image;
+// the storechange re-render then swaps in the data URL.
+function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null, hKey = null }) {
+  useEffect(() => {
+    if (hStore && hKey && isImgRef(src)) requestHydration(hStore, hKey);
+  }, [src, hStore, hKey]);
   const px = `${size}px`;
   const interactive = onClick ? {
     role: 'button', tabIndex: 0, onClick,
     onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } },
   } : {};
-  if (src) return html`<img class="avatar ${onClick ? 'click' : ''}" src=${src} alt=${name}
+  if (src && !isImgRef(src)) return html`<img class="avatar ${onClick ? 'click' : ''}" src=${src} alt=${name}
     style=${{ width: px, height: px }} ...${interactive} />`;
   const letter = (String(name).trim()[0] ?? '?').toUpperCase();
   return html`<span class="avatar avatar-tile ${onClick ? 'click' : ''}"
@@ -37,7 +50,7 @@ function Avatar({ name = '', src = '', size = 40, onClick = null }) {
 // doesn't show the previous image while the next one decodes.
 function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null }) {
   useEffect(() => {
-    for (const u of takes ?? []) if (u && u !== src) { const im = new Image(); im.src = u; }
+    for (const u of takes ?? []) if (u && u !== src && !isImgRef(u)) { const im = new Image(); im.src = u; }
   }, [takes, src]);
   useEffect(() => {
     if (!onPrev && !onNext) return;
@@ -50,11 +63,17 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onPrev, onNext]);
+  // Sentinel src (lazy image not yet hydrated): keep the overlay chrome and
+  // take navigation, but show a muted loading note and no Save button —
+  // saving a sentinel would write a useless text file.
+  const loading = isImgRef(src);
   return html`
     <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
-      footer=${html`<button class="btn" title="Save this image as a file"
+      footer=${loading ? null : html`<button class="btn" title="Save this image as a file"
         onClick=${() => downloadDataURL(src, imageFilename(title, src, num))}>⬇${'\uFE0E'} Save image</button>`}>
-      <img class="lb-img" src=${src} alt=${title} />
+      ${loading
+        ? html`<div class="lb-loading">✦ Loading…</div>`
+        : html`<img class="lb-img" src=${src} alt=${title} />`}
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`
         <div class="lb-takes">

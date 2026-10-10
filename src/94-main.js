@@ -304,6 +304,17 @@ function Main({ storage, storageKind, storageFailed }) {
   // Names change only when the scenario, the chat's lore overlay/character
   // links, or the characters map actually change.
   const chatScenario = chat ? scenarios[chat.scenarioId] : null;
+  // Lazy images: hydrate the entities the chat column draws from — the chat
+  // itself (swipe images, piece avatars), its scenario and persona, and any
+  // linked global cards. No-op on eager adapters; in-flight deduped per key.
+  useEffect(() => {
+    if (!chat?.id) return;
+    requestHydration('Chats', chat.id);
+    if (chat.scenarioId) requestHydration('Scenarios', chat.scenarioId);
+    if (chat.personaId) requestHydration('Personas', chat.personaId);
+    for (const cid of [...(chat.characterIds ?? []), ...(chatScenario?.characterIds ?? [])])
+      requestHydration('Characters', cid);
+  }, [chat?.id]);
   const characterNames = useMemo(
     () => characterNamesOf(chatScenario, chat, characters),
     [chatScenario, chat?.lorePieces, chat?.characterIds, characters]);
@@ -423,6 +434,47 @@ function Main({ storage, storageKind, storageFailed }) {
     storage.addEventListener('savestate', on);
     return () => storage.removeEventListener('savestate', on);
   }, [storage]);
+
+  // Multi-device sync (server storage only — IndexedDB never emits these):
+  // a write refused by the rev guard (another device wrote first) parks as a
+  // conflict and pops the resolution modal; focus-sync pulls show a brief
+  // auto-dismissing notice.
+  const [conflicts, setConflicts] = useState(() => storage.conflictList?.() ?? []);
+  const [conflictOpen, setConflictOpen] = useState(false);
+  const [syncNotice, setSyncNotice] = useState(null);
+  useEffect(() => {
+    const onConflict = (e) => setConflicts(e.detail ?? []);
+    let noticeTimer = null;
+    const onSync = (e) => {
+      const { updated = 0, removed = 0 } = e.detail ?? {};
+      const parts = [];
+      if (updated) parts.push(`${updated} ${updated === 1 ? 'entry' : 'entries'} updated`);
+      if (removed) parts.push(`${removed} ${removed === 1 ? 'entry' : 'entries'} removed`);
+      setSyncNotice(`Synced from another device: ${parts.join(', ')}`);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => setSyncNotice(null), 8000);
+    };
+    storage.addEventListener('conflict', onConflict);
+    storage.addEventListener('sync', onSync);
+    return () => {
+      storage.removeEventListener('conflict', onConflict);
+      storage.removeEventListener('sync', onSync);
+      clearTimeout(noticeTimer);
+    };
+  }, [storage]);
+  // A NEW conflict interrupts (0 → n); dismissing the modal leaves a banner.
+  useEffect(() => { if (conflicts.length) setConflictOpen(true); }, [conflicts.length]);
+  const conflictName = (c) => {
+    if (c.store === 'Meta') return c.key === 'app.settings' ? 'app settings' : `settings (${c.key})`;
+    const label = { Chats: 'chat', Scenarios: 'scenario', Personas: 'persona', Characters: 'character' }[c.store] ?? c.store;
+    const map = { Chats: chats, Scenarios: scenarios, Personas: personas, Characters: characters }[c.store] ?? {};
+    // Delete conflicts carry a stashed name — the cache entry is long gone.
+    return `${label} "${map[c.key]?.name ?? c.name ?? '…'}"`;
+  };
+  const onResolveConflict = async (c, mode) => {
+    try { await storage.resolveConflict(c.store, c.key, mode); }
+    catch (e) { setError(`Could not resolve the sync conflict: ${e?.message ?? e}`); }
+  };
 
   // ---- side-pane sizing (auto slack-fill + drag-to-resize) ----
   const [viewportW, setViewportW] = useState(() => window.innerWidth);
@@ -544,7 +596,10 @@ function Main({ storage, storageKind, storageFailed }) {
   const [ctxMenu, setCtxMenu] = useState(null); // { chatId, x, y }
   // The panel is a modal view into a chat — it must NOT switch the open chat,
   // or the main pane and the right drawer would jump to it under the modal.
-  const openChatPanel = (chatId, tab) => setModal({ kind: 'chatPanel', chatId, tab });
+  const openChatPanel = async (chatId, tab) => {
+    await storage.hydrate('Chats', chatId); // avatars/images resolve before the panel seeds drafts
+    setModal({ kind: 'chatPanel', chatId, tab });
+  };
   const chatAction = (chatId, action) => {
     const c = ref.current.chats[chatId];
     if (!c) return;
@@ -1388,6 +1443,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // chat carrying the new empty swipe before firing (ref-synced), so the
     // stored copy always includes our node — never reintroduce a bare
     // upsertChat append upstream of fireGeneration.
+    // Coalesce persistence while streaming: applyText writes per token, and
+    // the storage layer stretches this key's flush debounce to 3 s until
+    // endStream (the finally) — the whole-chat row would otherwise re-upload
+    // twice a second for the stream's duration.
+    storage.beginStream('Chats', work.id);
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
@@ -1481,11 +1541,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // Stopped during the async prep (embeddings/tokenize)? Bail before
     // streaming — and discard the empty swipe/fresh node the caller already
     // created, or Stop during prep leaks it into the tree.
-    if (abort.signal.aborted) { discardEmptySwipe(); genRef.current = null; setGenerating(null); return; }
+    if (abort.signal.aborted) { discardEmptySwipe(); storage.endStream(); genRef.current = null; setGenerating(null); return; }
     if (prepError) {
       console.warn('FictionPad: generation prep failed:', prepError);
       setError(`Generation failed: ${describeApiError(prepError)}`);
-      discardEmptySwipe(); genRef.current = null; setGenerating(null); return;
+      discardEmptySwipe(); storage.endStream(); genRef.current = null; setGenerating(null); return;
     }
     setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
@@ -1554,6 +1614,7 @@ function Main({ storage, storageKind, storageFailed }) {
       if (e.name !== 'AbortError')
         setError(`Generation failed: ${describeApiError(e)}`);
     } finally {
+      storage.endStream(); // restore the 500 ms debounce + flush the tail
       genRef.current = null;
       setGenerating(null);
       // Tool calls: parse the finished text, strip protocol blocks
@@ -1861,29 +1922,52 @@ function Main({ storage, storageKind, storageFailed }) {
     setError('Configure an endpoint and chat model in Settings first.');
     return false;
   };
-  function sendUserMessage(c, content) {
+  // Pre-generation freshness guard (server storage only — checkFresh is
+  // undefined on IndexedDB): a tab can be behind the server even while
+  // focused (another device wrote since the last focus sync), and every
+  // entry below appends + saves immediately — that save would 409 and park
+  // the chat as a conflict mid-flow. Check the chat's server rev FIRST: a
+  // moved chat is pulled and `go` runs against the FRESH copy (read from the
+  // storage cache — ref.current only catches up at the next React render);
+  // an already-conflicted chat blocks on the resolution modal instead.
+  const genGuard = (c, go) => {
     if (!generationReady(c)) return;
-    const { chat: c1, id: userId } = appendMessage(c, c.activeLeafId, 'user', content);
-    const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
-    // saveChat, not bare upsertChat: the append must reach ref.current
-    // synchronously — runGeneration re-bases on the stored chat at stream
-    // start, and React may not have flushed a plain upsertChat yet (a
-    // greeting regen's prep is fully synchronous, so the re-base would read
-    // the pre-append snapshot and overwrite the viewed swipe).
-    saveChat(c2);
-    fireGeneration(c2, asstId, { fresh: true });
+    (async () => {
+      let base = c;
+      try {
+        const state = await storage.checkFresh?.('Chats', c.id);
+        if (state === 'conflict') { setConflictOpen(true); return; }
+        if (state === 'pulled' || state === 'removed') base = storage.get('Chats', c.id);
+        if (!base) { setError('This chat was deleted on another device.'); return; }
+      } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
+      go(base);
+    })();
+  };
+  function sendUserMessage(c, content) {
+    genGuard(c, (base) => {
+      const { chat: c1, id: userId } = appendMessage(base, base.activeLeafId, 'user', content);
+      const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
+      // saveChat, not bare upsertChat: the append must reach ref.current
+      // synchronously — runGeneration re-bases on the stored chat at stream
+      // start, and React may not have flushed a plain upsertChat yet (a
+      // greeting regen's prep is fully synchronous, so the re-base would read
+      // the pre-append snapshot and overwrite the viewed swipe).
+      saveChat(c2);
+      fireGeneration(c2, asstId, { fresh: true });
+    });
   }
   function handleContinue(c) {
-    if (!generationReady(c)) return;
-    const path = getActivePath(c.messages, c.activeLeafId);
-    const last = path[path.length - 1];
-    if (last?.role === 'assistant' && activeText(last)) {
-      fireGeneration(c, last.id, { continuation: true });
-    } else {
-      const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-      saveChat(c1);
-      fireGeneration(c1, id, { fresh: true });
-    }
+    genGuard(c, (base) => {
+      const path = getActivePath(base.messages, base.activeLeafId);
+      const last = path[path.length - 1];
+      if (last?.role === 'assistant' && activeText(last)) {
+        fireGeneration(base, last.id, { continuation: true });
+      } else {
+        const { chat: c1, id } = appendMessage(base, base.activeLeafId, 'assistant', '');
+        saveChat(c1);
+        fireGeneration(c1, id, { fresh: true });
+      }
+    });
   }
   function handleInput(raw) {
     const c = ref.current.chats[ui.chatId];
@@ -1902,35 +1986,36 @@ function Main({ storage, storageKind, storageFailed }) {
       if (cmd === '/continue') { handleContinue(c); return null; }
       if (cmd === '/pov') {
         if (!arg) return 'Usage: /pov <character> [steering text]';
-        // Reframe one generation around another character. The name is the
-        // longest leading run of words exactly matching a known character's
-        // title (so multi-word names work); any remainder is optional steering
-        // text for this one reply. No exact prefix match → the whole arg is
-        // the name query (exact, then substring), as before. A matched piece
-        // is force-injected (reason 'pov') so the model sees that definition.
-        const scen = ref.current.scenarios[c.scenarioId];
-        const chars = mergedLorePieces(scen, c, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
-        // mergedLorePieces order is scenario → linked globals → chat overlay;
-        // a same-name collision resolves the other way (chat wins, like the
-        // avatar map and speaker click-through) — search from the end.
-        const byPrio = chars.slice().reverse();
-        const words = arg.split(/\s+/);
-        let piece = null, name = '', text = '';
-        for (let n = words.length; n >= 1 && !piece; n--) {
-          const cand = words.slice(0, n).join(' ').toLowerCase();
-          piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
-          if (piece) { name = piece.title.trim(); text = words.slice(n).join(' '); }
-        }
-        if (!piece) {
-          const q = arg.toLowerCase();
-          piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === q)
-            ?? byPrio.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
-          name = piece?.title?.trim() || arg;
-        }
-        if (!generationReady(c)) return null;
-        const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '');
-        saveChat(c1);
-        fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
+        genGuard(c, (base) => {
+          // Reframe one generation around another character. The name is the
+          // longest leading run of words exactly matching a known character's
+          // title (so multi-word names work); any remainder is optional steering
+          // text for this one reply. No exact prefix match → the whole arg is
+          // the name query (exact, then substring), as before. A matched piece
+          // is force-injected (reason 'pov') so the model sees that definition.
+          const scen = ref.current.scenarios[base.scenarioId];
+          const chars = mergedLorePieces(scen, base, ref.current.characters).filter(p => p && p.enabled !== false && (p.type ?? 'lore') === 'character');
+          // mergedLorePieces order is scenario → linked globals → chat overlay;
+          // a same-name collision resolves the other way (chat wins, like the
+          // avatar map and speaker click-through) — search from the end.
+          const byPrio = chars.slice().reverse();
+          const words = arg.split(/\s+/);
+          let piece = null, name = '', text = '';
+          for (let n = words.length; n >= 1 && !piece; n--) {
+            const cand = words.slice(0, n).join(' ').toLowerCase();
+            piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === cand) ?? null;
+            if (piece) { name = piece.title.trim(); text = words.slice(n).join(' '); }
+          }
+          if (!piece) {
+            const q = arg.toLowerCase();
+            piece = byPrio.find(p => (p.title ?? '').trim().toLowerCase() === q)
+              ?? byPrio.find(p => (p.title ?? '').trim().toLowerCase().includes(q)) ?? null;
+            name = piece?.title?.trim() || arg;
+          }
+          const { chat: c1, id } = appendMessage(base, base.activeLeafId, 'assistant', '');
+          saveChat(c1);
+          fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
+        });
         return null;
       }
       if (cmd === '/improve') {
@@ -1942,18 +2027,20 @@ function Main({ storage, storageKind, storageFailed }) {
         const st = ref.current.settings;
         if (!st.imagesEnabled) return 'Image generation is off — enable it in Settings → Features.';
         if (!arg) return 'Usage: /image [PROMPT]';
-        // The pending bubble is the feedback: no text generation fires — the
-        // image job patches this swipe's entry when the backend answers (or
-        // marks it failed). An image-only swipe survives pruneInterrupted.
-        const { chat: c1, id } = appendMessage(c, c.activeLeafId, 'assistant', '', st.imageModel || null);
-        const n1 = c1.messages[id];
-        const slot = uid();
-        const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
-          swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
-        // saveChat: the image job's completion patch merge-on-writes against
-        // ref.current.chats — the pending node must be there synchronously.
-        saveChat(c2);
-        runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
+        genGuard(c, (base) => {
+          // The pending bubble is the feedback: no text generation fires — the
+          // image job patches this swipe's entry when the backend answers (or
+          // marks it failed). An image-only swipe survives pruneInterrupted.
+          const { chat: c1, id } = appendMessage(base, base.activeLeafId, 'assistant', '', st.imageModel || null);
+          const n1 = c1.messages[id];
+          const slot = uid();
+          const c2 = { ...c1, messages: { ...c1.messages, [id]: { ...n1,
+            swipes: [{ ...n1.swipes[0], speaker: 'Narrator', images: [{ pending: true, slot, prompt: arg, at: Date.now() }] }] } } };
+          // saveChat: the image job's completion patch merge-on-writes against
+          // ref.current.chats — the pending node must be there synchronously.
+          saveChat(c2);
+          runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
+        });
         return null;
       }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
@@ -2106,13 +2193,17 @@ function Main({ storage, storageKind, storageFailed }) {
   };
   const onRegenerate = (nodeId) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
-    if (!n || genRef.current || auxBusy.length || !generationReady(c)) return;
-    const swipes = [...n.swipes, { text: '', createdAt: Date.now(), modelId: null }];
-    // The regenerated node becomes the tip: the previous continuation is kept
-    // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
-    fireGeneration(c1, nodeId);
+    if (!n || genRef.current || auxBusy.length) return;
+    genGuard(c, (base) => {
+      const bn = base.messages[nodeId];
+      if (!bn) return; // a freshness pull may have changed the viewed branch
+      const swipes = [...bn.swipes, { text: '', createdAt: Date.now(), modelId: null }];
+      // The regenerated node becomes the tip: the previous continuation is kept
+      // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
+      fireGeneration(c1, nodeId);
+    });
   };
   // Regenerate from a token: new swipe whose text starts with tokens[0..i]
   // (+ chosen alternative), then continue generation from that prefix via the
@@ -2120,18 +2211,22 @@ function Main({ storage, storageKind, storageFailed }) {
   const onRegenFromToken = (nodeId, tokIdx, alt) => {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n || genRef.current || auxBusy.length) return;
-    const src = n.swipes[n.activeSwipe];
-    const toks = src?.tokens;
-    if (!toks?.length || !generationReady(c)) return;
-    const keep = toks.slice(0, alt == null ? tokIdx + 1 : tokIdx);
-    const prefix = keep.map(t => t.text).join('') + (alt ?? '');
-    const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
-    const swipes = [...n.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
-    const c1 = { ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
-    saveChat(c1);
-    // continuation drives the prefill mechanics, but the caller DID append a
-    // swipe — an abort may discard it (appendedSwipe).
-    fireGeneration(c1, nodeId, { continuation: true, appendedSwipe: true });
+    genGuard(c, (base) => {
+      const bn = base.messages[nodeId];
+      if (!bn) return; // a freshness pull may have changed the viewed branch
+      const src = bn.swipes[bn.activeSwipe];
+      const toks = src?.tokens;
+      if (!toks?.length) return;
+      const keep = toks.slice(0, alt == null ? tokIdx + 1 : tokIdx);
+      const prefix = keep.map(t => t.text).join('') + (alt ?? '');
+      const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
+      const swipes = [...bn.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      saveChat(c1);
+      // continuation drives the prefill mechanics, but the caller DID append a
+      // swipe — an abort may discard it (appendedSwipe).
+      fireGeneration(c1, nodeId, { continuation: true, appendedSwipe: true });
+    });
   };
   // Swiping a mid-chain node re-derives the visible branch below it: each
   // swipe keeps its own continuation (children record the parent swipe they
@@ -2187,18 +2282,29 @@ function Main({ storage, storageKind, storageFailed }) {
   // the character editor instead — its piece view is derived, the card is the
   // only honest surface. Narrator/persona/unregistered names never get here
   // (MessageItem only makes known character names clickable).
-  const onOpenCharacterPiece = (name) => {
+  const onOpenCharacterPiece = async (name) => {
     const key = String(name ?? '').trim().toLowerCase();
     if (!key || !chat) return;
     const byTitle = (p) => p?.type === 'character' && (p.title ?? '').trim().toLowerCase() === key;
     const chatPiece = (chat.lorePieces ?? []).find(byTitle);
-    if (chatPiece) return setModal({ kind: 'piece', source: 'chat', pieceId: chatPiece.id });
+    // Hydrate the owning entity before the editor/panel seeds its draft —
+    // lazy mode leaves avatar sentinels until then (no-op when eager).
+    if (chatPiece) {
+      await storage.hydrate('Chats', chat.id);
+      return setModal({ kind: 'piece', source: 'chat', pieceId: chatPiece.id });
+    }
     const scenPiece = (chatScenario?.lorePieces ?? []).find(byTitle);
-    if (scenPiece) return setModal({ kind: 'piece', source: 'scenario', pieceId: scenPiece.id });
+    if (scenPiece) {
+      await storage.hydrate('Scenarios', chatScenario.id);
+      return setModal({ kind: 'piece', source: 'scenario', pieceId: scenPiece.id });
+    }
     const linkedIds = [...(chatScenario?.characterIds ?? []), ...(chat.characterIds ?? [])];
     const card = linkedIds.map(id => characters[id])
       .find(c => c && (c.name ?? '').trim().toLowerCase() === key);
-    if (card) setModal({ kind: 'character', character: card });
+    if (card) {
+      await storage.hydrate('Characters', card.id);
+      setModal({ kind: 'character', character: storage.get('Characters', card.id) ?? card });
+    }
   };
   // The piece the 'piece' modal edits, resolved live by id (null = gone — a
   // delete elsewhere just closes the popout by not rendering it).
@@ -2344,34 +2450,51 @@ function Main({ storage, storageKind, storageFailed }) {
   // calls create sibling assistant branches — same semantics as swipes.
   const onGenerateReply = (nodeId = null) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
-    const parent = c.messages[nodeId ?? c.activeLeafId];
-    if (!parent || parent.role !== 'user') return;
-    const { chat: c1, id } = appendMessage(c, parent.id, 'assistant', '');
-    saveChat(c1);
-    fireGeneration(c1, id, { fresh: true });
+    if (!c || genRef.current || auxBusy.length) return;
+    genGuard(c, (base) => {
+      const parent = base.messages[nodeId ?? base.activeLeafId];
+      if (!parent || parent.role !== 'user') return;
+      const { chat: c1, id } = appendMessage(base, parent.id, 'assistant', '');
+      saveChat(c1);
+      fireGeneration(c1, id, { fresh: true });
+    });
   };
 
   // ---- export / import ----
   // A scenario export is a BUNDLE: the scenario plus its linked global
   // characters (scenario.characterIds), so the file works standalone on
   // import. The legacy single-scenario type stays importable (below).
-  const onExportScenario = (id) => {
-    const s = scenarios[id];
-    if (!s) return;
-    downloadJSON(`fictionpad-scenario-${s.name ?? id}.json`, {
+  const onExportScenario = async (id) => {
+    // Hydrate first (lazy images): an export must never carry imgref
+    // sentinels. Reads below take the fresh post-hydration cache copy.
+    await storage.hydrate('Scenarios', id);
+    const s0 = storage.get('Scenarios', id) ?? scenarios[id];
+    if (!s0) return;
+    const chars = [];
+    for (const cid of s0.characterIds ?? []) {
+      await storage.hydrate('Characters', cid);
+      const c = storage.get('Characters', cid) ?? characters[cid];
+      if (c) chars.push(c);
+    }
+    downloadJSON(`fictionpad-scenario-${s0.name ?? id}.json`, {
       type: 'fictionpad-scenario-bundle', version: 1,
-      data: { scenario: s, characters: (s.characterIds ?? []).map(cid => characters[cid]).filter(Boolean) },
+      data: { scenario: s0, characters: chars },
     });
   };
-  const onExportChat = (c) =>
-    downloadJSON(`fictionpad-chat-${c.name}.json`, { type: 'fictionpad-chat', version: 1, data: c });
+  const onExportChat = async (c) => {
+    await storage.hydrate('Chats', c.id);
+    const fresh = storage.get('Chats', c.id) ?? c;
+    downloadJSON(`fictionpad-chat-${fresh.name}.json`, { type: 'fictionpad-chat', version: 1, data: fresh });
+  };
   // ---- import/export: files from the sidebar's ↑ button. Imported JSON is
   // normalized (pure core) before upsert — a hand-edited/third-party file can
   // lack fields the editors and message UI assume (the draft.lorePieces crash
   // class); already-stored malformed entities heal at editor draft init.
-  const onExportCharacter = (id) =>
-    downloadJSON(`fictionpad-character-${characters[id]?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: characters[id] });
+  const onExportCharacter = async (id) => {
+    await storage.hydrate('Characters', id);
+    const c = storage.get('Characters', id) ?? characters[id];
+    downloadJSON(`fictionpad-character-${c?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: c });
+  };
   // Duplicate in place: deep clone with a fresh id and a " (copy)" name
   // suffix — the export → edit-the-id → reimport roundtrip as one click. A
   // scenario clone keeps its linked character ids (links, not copies).
@@ -2387,11 +2510,36 @@ function Main({ storage, storageKind, storageFailed }) {
     const copy = normalizeCharacter({ ...deepClone(c), id: uid(), name: `${c.name} (copy)` });
     upsertCharacter(copy.id, copy);
   };
+  // Editor opens hydrate the entity first (lazy images) and hand the modal
+  // the FRESH cache copy — the editor seeds its draft from it, avatars and
+  // all. No-op on eager adapters.
+  const openScenarioEditor = async (id) => {
+    await storage.hydrate('Scenarios', id);
+    setModal({ kind: 'scenario', scenario: storage.get('Scenarios', id) ?? scenarios[id] });
+  };
+  const openCharacterEditor = async (id) => {
+    await storage.hydrate('Characters', id);
+    setModal({ kind: 'character', character: storage.get('Characters', id) ?? characters[id] ?? null });
+  };
+  const openPersonas = async () => {
+    await Promise.all(Object.keys(personas ?? {}).map(id => storage.hydrate('Personas', id)));
+    setModal({ kind: 'personas' });
+  };
   // Export a character-type lore piece (chat-registered or scenario-owned) as
   // a global character card: pure-core mapping, fresh id, provenance stripped.
   // The new card just appears in the sidebar Characters section.
-  const onExportPieceToCharacter = (piece) => {
-    const c = normalizeCharacter(characterFromPiece(piece));
+  const onExportPieceToCharacter = async (piece) => {
+    // The piece may hold unresolved imgref avatars (lazy images): hydrate the
+    // likely owners and re-resolve the piece fresh before mapping it.
+    let p = piece;
+    if (chat?.id) {
+      await storage.hydrate('Chats', chat.id);
+      if (chatScenario?.id) await storage.hydrate('Scenarios', chatScenario.id);
+      p = (storage.get('Chats', chat.id)?.lorePieces ?? []).find(q => q.id === piece.id)
+        ?? (chatScenario?.id ? (storage.get('Scenarios', chatScenario.id)?.lorePieces ?? []).find(q => q.id === piece.id) : null)
+        ?? piece;
+    }
+    const c = normalizeCharacter(characterFromPiece(p));
     if (!c.name.trim()) return setError('Give the piece a title first — it becomes the character name.');
     upsertCharacter(c.id, c);
   };
@@ -2400,7 +2548,9 @@ function Main({ storage, storageKind, storageFailed }) {
   // (long edge ≤1024), with the chara_card v2 JSON (character + its first
   // linked scenario when one exists — buildCharacterCard tolerates null)
   // embedded as a tEXt chunk (pure core). Importable by SillyTavern-style tools.
-  const onExportCharacterPng = async (character) => {
+  const onExportCharacterPng = async (character0) => {
+    await storage.hydrate('Characters', character0?.id);
+    const character = storage.get('Characters', character0?.id) ?? character0;
     if (!character?.avatar)
       return setError('Set an avatar first — the avatar becomes the card image.');
     try {
@@ -2494,11 +2644,18 @@ function Main({ storage, storageKind, storageFailed }) {
   // ---- full backup (Settings → Connection): everything in one JSON ----
   // serverToken is per-device and NEVER leaves the machine — stripped here on
   // export and ignored on import (same rule as the Meta/app.settings sync).
-  const onExportAll = () => {
+  const onExportAll = async () => {
+    // A full backup must be complete: resolve every lazy imgref sentinel
+    // first, then read the stores fresh (state maps may lag the hydration).
+    await storage.hydrateAll();
     const { serverToken, ...rest } = settingsRaw ?? {};
     downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
       type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
-      data: { scenarios, chats, personas, characters, settings: rest },
+      data: {
+        scenarios: storage.getAll('Scenarios'), chats: storage.getAll('Chats'),
+        personas: storage.getAll('Personas'), characters: storage.getAll('Characters'),
+        settings: rest,
+      },
     });
   };
   // Upserts everything by id (last write wins — entities absent from the file
@@ -2612,6 +2769,10 @@ function Main({ storage, storageKind, storageFailed }) {
       ${overlayPanes && (!sidebarCollapsed || ui.drawer) && html`
         <div class="scrim" onClick=${() => { if (!sidebarCollapsed) toggleSidebar(); closeDrawer(); }} />`}
       ${error && html`<div class="banner err-toast" role="alert">${error}<button class="btn small ghost" title="Dismiss" onClick=${() => setError(null)}>✕</button></div>`}
+      ${syncNotice && html`<div class="banner err-toast ok-toast" role="status">${syncNotice}<button class="btn small ghost" title="Dismiss" onClick=${() => setSyncNotice(null)}>✕</button></div>`}
+      ${conflicts.length > 0 && !conflictOpen && html`
+        <div class="banner err-toast conflict-toast" role="alert">${conflicts.length} ${conflicts.length === 1 ? 'entry was' : 'entries were'} changed on another device and needs review.
+          <button class="btn small" onClick=${() => setConflictOpen(true)}>Review</button></div>`}
       <div class="topbar">
         <div class="topbar-inner">
           <span ref=${leftBtnRef} style=${{ display: 'inline-flex', flex: 'none' }}>
@@ -2656,17 +2817,17 @@ function Main({ storage, storageKind, storageFailed }) {
           // covers the chat — close it so the chat shows.
           ...(overlayPanes ? { sidebarCollapsed: true } : {}) }))}
         onNewScenario=${() => setModal({ kind: 'scenario', scenario: newScenario() })}
-        onEditScenario=${(id) => setModal({ kind: 'scenario', scenario: scenarios[id] })}
+        onEditScenario=${(id) => openScenarioEditor(id)}
         onDeleteScenario=${onDeleteScenario}
         onNewChat=${(scenarioId) => setModal({ kind: 'newChat', scenarioId })}
         onNewCharacter=${() => setModal({ kind: 'character', character: null })}
-        onEditCharacter=${(id) => setModal({ kind: 'character', character: characters[id] ?? null })}
+        onEditCharacter=${(id) => openCharacterEditor(id)}
         onDeleteCharacter=${onDeleteCharacter}
         onNewCharacterChat=${(characterId) => setModal({ kind: 'newChat', characterId })}
         onExportCharacter=${onExportCharacter}
         onExportScenario=${onExportScenario}
         onImport=${onImport}
-        onOpenPersonas=${() => setModal({ kind: 'personas' })}
+        onOpenPersonas=${() => openPersonas()}
         onOpenSettings=${() => setModal({ kind: 'settings' })}
         sideCollapsed=${ui.sideCollapsed ?? {}}
         onToggleSection=${(key) => setUi(u => ({ ...u, sideCollapsed: { ...(u.sideCollapsed ?? {}), [key]: !(u.sideCollapsed ?? {})[key] } }))}
@@ -2677,7 +2838,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onChatContextMenu=${(chatId, x, y) => setCtxMenu({ chatId, x, y })}
         onScenarioContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', scenarioId: id }) },
-          { label: 'Edit', fn: () => setModal({ kind: 'scenario', scenario: scenarios[id] }) },
+          { label: 'Edit', fn: () => openScenarioEditor(id) },
           { label: 'Export JSON', fn: () => onExportScenario(id) },
           { label: 'Duplicate', fn: () => onDuplicateScenario(id) },
           '-',
@@ -2685,7 +2846,7 @@ function Main({ storage, storageKind, storageFailed }) {
         ] })}
         onCharacterContextMenu=${(id, x, y) => setCtxMenu({ x, y, items: [
           { label: 'New chat', fn: () => setModal({ kind: 'newChat', characterId: id }) },
-          { label: 'Edit', fn: () => setModal({ kind: 'character', character: characters[id] ?? null }) },
+          { label: 'Edit', fn: () => openCharacterEditor(id) },
           { label: 'Export JSON', fn: () => onExportCharacter(id) },
           { label: 'Duplicate', fn: () => onDuplicateCharacter(id) },
           { label: 'Export PNG card', fn: () => onExportCharacterPng(characters[id]),
@@ -2847,6 +3008,29 @@ function Main({ storage, storageKind, storageFailed }) {
           generating=${generating?.chatId === modal.chatId}
           onJump=${(id) => { onJump(id, modal.chatId); setModal(null); }} />
       <//><//>`}
+    ${conflictOpen && conflicts.length > 0 && html`
+      <${Modal} title="Changed on another device" onClose=${() => setConflictOpen(false)}>
+        <p class="hint" style=${{ marginTop: 0 }}>These entries were edited on another device since this browser last synced.
+          Local edits here are kept but not syncing until you pick a version per entry.</p>
+        ${conflicts.map(c => html`
+          <div class="conflict-row" key=${`${c.store}/${c.key}`}>
+            <span class="conflict-name">${conflictName(c)}${c.op === 'delete' ? ' (deleted here)' : ''}</span>
+            <span class="conflict-actions">
+              ${c.op === 'delete' ? html`
+                <button class="btn small" title="Undo the local delete and take the other device's newer version"
+                  onClick=${() => onResolveConflict(c, 'theirs')}>Restore server version</button>
+                <button class="btn small danger" title="Delete the other device's newer version too"
+                  onClick=${() => onResolveConflict(c, 'yours')}>Delete anyway</button>`
+              : html`
+                <button class="btn small" title="Discard the local edits and take the other device's version"
+                  onClick=${() => onResolveConflict(c, 'theirs')}>Use server</button>
+                ${c.store === 'Chats' && html`<button class="btn small" title="Your version becomes a new chat copy; the original takes the server version"
+                  onClick=${() => onResolveConflict(c, 'copy')}>Keep both</button>`}
+                <button class="btn small" title="Overwrite the other device's version with yours"
+                  onClick=${() => onResolveConflict(c, 'yours')}>Keep mine</button>`}
+            </span>
+          </div>`)}
+      <//>`}
     ${ctxMenu && html`
       <${ContextMenu} x=${ctxMenu.x} y=${ctxMenu.y} onClose=${() => setCtxMenu(null)}
         items=${ctxMenu.items ?? [

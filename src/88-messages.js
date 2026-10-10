@@ -134,7 +134,11 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
       ${take?.pending ? html`<div class="img-pending"></div>`
         : take?.error || !take?.src
           ? html`<div class="img-error" title=${typeof take?.error === 'string' ? take.error : take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
-          : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
+          : isImgRef(take.src)
+            // Lazy image not yet hydrated (server storage) — the hydration
+            // effect in MessageItem swaps this for the real take shortly.
+            ? html`<div class="swipe-img-loading" title="Loading image…">✦</div>`
+            : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
               onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
         <span class="swipes img-swipes">
@@ -152,7 +156,7 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
     </div>`;
 }
 
-function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches, onOpenCharacter = null }) {
+function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches, onOpenCharacter = null, chatId = null }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [showProbs, setShowProbs] = useState(false);
@@ -194,7 +198,22 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   const canImgRegen = imagesEnabled && !!onImgRegen;
   const imgSlotSwipe = (slot, dir) => onImgSwipe?.(node.id, slot, dir);
   const imgSlotRegen = (slot) => onImgRegen?.(node.id, slot);
-  const zoomImg = (im, slot) => setLightbox({ src: im.src, title: im.caption || im.prompt || '', slot });
+  // Lazy images (server storage): a take src can still be an unresolved
+  // imgref: sentinel when the chat entity wasn't image-hydrated at boot —
+  // ask storage to hydrate this chat; the storechange re-render swaps the
+  // sentinel for the real data URL. Inert in eager mode (sentinels never
+  // appear) and requestHydration dedupes in-flight calls.
+  const hasUnresolvedImg = !!slots && slots.some(sv => isImgRef(sv.take?.src));
+  useEffect(() => {
+    if (hasUnresolvedImg && chatId) requestHydration('Chats', chatId);
+  }, [hasUnresolvedImg, chatId]);
+  // A sentinel src never reaches the lightbox (it would show a broken frame
+  // and Save would write the sentinel text) — hydrate instead; the take
+  // becomes clickable once the real image lands.
+  const zoomImg = (im, slot) => {
+    if (isImgRef(im.src)) { if (chatId) requestHydration('Chats', chatId); return; }
+    setLightbox({ src: im.src, title: im.caption || im.prompt || '', slot });
+  };
   // Slot lightboxes track LIVE take state (not the click-time snapshot), so
   // ←/→ take navigation inside the lightbox updates the view in place.
   const lbSlot = lightbox?.slot != null && slots ? slots.find(s => s.slot === lightbox.slot) ?? null : null;
@@ -509,7 +528,8 @@ ${showNav && html`
           <div key=${si} class="seg-row">
             ${avatarsOn && html`<div class="msg-av">
               ${(segAv?.src || seg.speaker) && html`<${Avatar} name=${segName} src=${segAv?.src ?? ''} size=${40}
-                onClick=${segAv?.src ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
+                hStore="Chats" hKey=${chatId}
+                onClick=${segAv?.src && !isImgRef(segAv.src) ? () => setLightbox({ src: segAv.full, title: segName }) : null} />`}
             </div>`}
             <div class="seg-col">
               <div class="seg-who ${seg.speaker ? 'speaker' : ''} ${canOpenChar(seg.speaker) ? 'click' : ''}"
@@ -591,8 +611,15 @@ ${showNav && html`
           items=${[
             // Right-click landed on a generated image: image actions first.
             ...(ctxMenu.img ? [
-              { label: 'Save image', fn: () => downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src, ctxMenu.img.num)) },
+              { label: 'Save image', fn: () => {
+                  // Sentinel (lazy image not yet hydrated): saving would
+                  // write the sentinel text — hydrate the chat instead; the
+                  // real image can be saved once it lands.
+                  if (isImgRef(ctxMenu.img.src)) { if (chatId) requestHydration('Chats', chatId); return; }
+                  downloadDataURL(ctxMenu.img.src, imageFilename(ctxMenu.img.name, ctxMenu.img.src, ctxMenu.img.num));
+                } },
               { label: 'Expand image', fn: () => {
+                  if (isImgRef(ctxMenu.img.src)) { if (chatId) requestHydration('Chats', chatId); return; }
                   const s = ctxMenu.img.slot != null && slots ? slots.find(v => v.slot === ctxMenu.img.slot) : null;
                   if (s?.take) zoomImg(s.take, s.slot);
                   else setLightbox({ src: ctxMenu.img.src, title: ctxMenu.img.name });
@@ -631,7 +658,8 @@ ${showNav && html`
         <div class="msg-av">
           ${!(multi && !editing && !probsShown) && (av?.src || avTile) && html`
             <${Avatar} name=${avName ?? ''} src=${av?.src ?? ''} size=${40}
-              onClick=${av?.src ? () => setLightbox({ src: av.full, title: avName }) : null} />`}
+              hStore="Chats" hKey=${chatId}
+              onClick=${av?.src && !isImgRef(av.src) ? () => setLightbox({ src: av.full, title: avName }) : null} />`}
         </div>`}
       ${avatarsOn ? html`<div class="msg-body">${body}</div>` : body}
       ${lightbox && lbSrc && html`<${Lightbox} src=${lbSrc}

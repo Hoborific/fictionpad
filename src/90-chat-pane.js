@@ -262,6 +262,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
               <span>last generation saw from here down · ${horizon.dropped} older message${horizon.dropped === 1 ? '' : 's'} out of context</span>
             </div>`}
           <${MessageItemMemo} node=${node} index=${i + 1} isRoot=${!node.parentId} isLeaf=${node.id === leaf?.id}
+            chatId=${chat?.id ?? null}
             selected=${node.id === selId}
             personaName=${personaName} characterNames=${characterNames} characterColors=${characterColors}
             avatars=${avatars} avatarsOn=${avatarsOn}

@@ -113,6 +113,28 @@ async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
   return { ids: ids.sort(), ctxs };
 }
 
+// Error for a non-OK API response. An OpenAI-style JSON error body wins;
+// otherwise a plain-text body is used verbatim (truncated) — the FictionPad
+// /proxy route rejects with text/plain (e.g. the FICTIONPAD_PROXY_ALLOW 403)
+// and that reason must reach the user. A body-less or message-less JSON
+// response keeps "HTTP <status>".
+async function apiHttpError(res) {
+  let msg = `HTTP ${res.status}`;
+  try {
+    const text = (await res.text()).trim();
+    if (text) {
+      let jsonMsg = null;
+      try { const j = JSON.parse(text); jsonMsg = j?.error?.message ?? j?.message ?? null; } catch {}
+      if (jsonMsg) msg = String(jsonMsg);
+      else if (!text.startsWith('{') && !text.startsWith('['))
+        msg = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+    }
+  } catch {}
+  const err = new Error(msg);
+  err.status = res.status; // lets callers special-case e.g. a 400 about stop strings
+  return err;
+}
+
 // Human-readable API failure for banners and the settings test button — a
 // bare "401" tells the user nothing; name the likely cause and where to fix it.
 function describeApiError(e) {
@@ -120,7 +142,7 @@ function describeApiError(e) {
   const msg = String(e?.message ?? e);
   const detail = msg && !/^HTTP \d+$/.test(msg) ? ` — ${msg}` : '';
   if (status === 401) return `401 Unauthorized${detail}. The API key is missing or was rejected — check Settings → Connection.`;
-  if (status === 403) return `403 Forbidden${detail}. The key lacks access, or the server refused the request.`;
+  if (status === 403) return `403 Forbidden${detail}.${detail ? '' : ' The key lacks access, or the server refused the request.'}`;
   if (status === 404) return `404 Not Found${detail}. The endpoint URL looks wrong — expected an OpenAI-compatible server (…/v1).`;
   if (status === 429) return `429 Too Many Requests${detail}. Rate-limited by the backend — wait a moment and retry.`;
   if (status != null) return `HTTP ${status}${detail}`;
@@ -218,16 +240,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     }),
     signal,
   });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      msg = json?.error?.message ?? json?.message ?? msg;
-    } catch {}
-    const err = new Error(msg);
-    err.status = res.status; // lets callers special-case e.g. a 400 about stop strings
-    throw err;
-  }
+  if (!res.ok) throw await apiHttpError(res);
   for await (const json of parseEventStream(res.body)) {
     // The trailing usage-only chunk (stream_options.include_usage) arrives
     // with choices: [] — capture the counts BEFORE the choices gate below.
@@ -523,16 +536,7 @@ async function embed({ endpoint, apiKey, serverToken, model, inputs, signal }) {
     body: JSON.stringify({ model, input: inputs }),
     signal,
   });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      msg = json?.error?.message ?? json?.message ?? msg;
-    } catch {}
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await apiHttpError(res);
   const json = await res.json();
   if (!Array.isArray(json?.data)) throw new Error('Malformed embeddings response');
   return [...json.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map(d => d.embedding);
@@ -579,16 +583,7 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
       ...(samplers ? expandSamplerParams(samplers) : {}),
     }),
   });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      msg = json?.error?.message ?? json?.message ?? msg;
-    } catch {}
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await apiHttpError(res);
   const json = await res.json();
   if (json?.error?.message) throw new Error(json.error.message);
   return String(json.choices?.[0]?.message?.content ?? '').trim();
@@ -616,16 +611,7 @@ async function generateImage({ endpoint, apiKey, serverToken, model, prompt, siz
       response_format: 'b64_json',
     }),
   });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      msg = json?.error?.message ?? json?.message ?? msg;
-    } catch {}
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await apiHttpError(res);
   const json = await res.json();
   if (json?.error?.message) throw new Error(json.error.message);
   const item = json?.data?.[0];
@@ -682,14 +668,7 @@ async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, pro
     method: 'POST', headers, ...(signal ? { signal } : {}),
     body: JSON.stringify({ prompt: payload }),
   });
-  if (!res.ok) {
-    // ComfyUI rejects a bad graph as { error: { type, message }, node_errors }
-    let msg = `HTTP ${res.status}`;
-    try { const json = await res.json(); msg = json?.error?.message ?? json?.message ?? msg; } catch {}
-    const err = new Error(String(msg));
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await apiHttpError(res);
   const queued = await res.json();
   const promptId = queued?.prompt_id;
   if (!promptId) throw new Error('ComfyUI did not return a prompt_id — is this a ComfyUI server?');

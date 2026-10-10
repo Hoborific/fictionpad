@@ -57,6 +57,13 @@
 //   storage and /proxy routes reject any request carrying a foreign Origin —
 //   simple cross-site POSTs bypass ACAO, so a no-auth deployment would
 //   otherwise let any website overwrite a visitor's data via their browser.
+// Wire compression: JSON responses over 1 KB are gzipped when the request's
+//   Accept-Encoding allows it, and storage-route request bodies may carry
+//   Content-Encoding: gzip (the body cap bounds BOTH the compressed bytes on
+//   the wire and the decompressed payload). The ~1 MB app HTML is served
+//   gzipped from a cache keyed on file path + mtime (the per-request re-read
+//   stays). /proxy and /backup traffic is never re-encoded. /version
+//   advertises the capability (gzip: true).
 // Shutdown: SIGINT/SIGTERM close the db — closing the last WAL connection
 //   checkpoints it and removes the -wal/-shm sidecars — then exit 0.
 
@@ -129,6 +136,13 @@ try {
   db.exec('PRAGMA journal_mode=WAL;');
   db.exec('PRAGMA busy_timeout=5000;');
   db.exec('CREATE TABLE IF NOT EXISTS kv (store TEXT, key TEXT, data BLOB, PRIMARY KEY (store, key))');
+  // Optimistic concurrency: every row carries a revision counter, bumped on
+  // each write. Clients send their last-seen rev as baseRev on /save and a
+  // mismatch is refused with 409 instead of silently clobbering a newer
+  // write from another device. Pre-rev databases migrate in place (existing
+  // rows start at rev 0, which any post-upgrade client boot reads back).
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('kv') WHERE name = 'rev'").get())
+    db.exec('ALTER TABLE kv ADD COLUMN rev INTEGER NOT NULL DEFAULT 0');
 } catch (err) {
   console.error(`FictionPad: cannot open or initialize the SQLite database at ${DB_PATH}`);
   console.error(`  (${err?.message || err})`);
@@ -224,15 +238,38 @@ const originOk = (req) => {
   if (o === undefined || o === 'null') return true;
   try { return new URL(o).host === req.headers.host; } catch { return false; }
 };
+// Token-level Accept-Encoding check — a substring test would take "xgzip".
+const acceptsGzip = (req) =>
+  (req.headers['accept-encoding'] ?? '').split(',')
+    .some((t) => t.trim().toLowerCase().split(';')[0] === 'gzip');
 const sendJson = (req, res, status, obj) => {
   const headers = { 'Content-Type': 'application/json', ...acaoFor(req) };
   // Tag OUR auth failures so the app can distinguish them from upstream 401s
   // that pass through the proxy untagged.
   if (status === 401) headers['X-FictionPad-Auth'] = 'required';
+  const body = Buffer.from(JSON.stringify(obj), 'utf8');
+  // Gzip only pays off past a trivial size — /all boot payloads carry whole
+  // entities and compress ~10x, while errors and {ok:true} replies would
+  // gain nothing. /proxy and /backup never go through here: their traffic
+  // (streams, db snapshots) is passed through untouched.
+  if (body.length > 1024 && acceptsGzip(req)) {
+    headers['Content-Encoding'] = 'gzip';
+    res.writeHead(status, headers);
+    return res.end(gzipSync(body));
+  }
   res.writeHead(status, headers);
-  res.end(JSON.stringify(obj));
+  res.end(body);
 };
 const readJsonBody = async (req) => {
+  // Storage bodies may arrive gzipped (the app compresses big chat saves).
+  // An encoding we don't speak is refused outright — silently misreading it
+  // would store garbage.
+  const enc = (req.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
+  if (enc !== 'identity' && enc !== 'gzip') {
+    const err = new Error('unsupported content-encoding');
+    err.status = 415;
+    throw err;
+  }
   const chunks = [];
   let size = 0;
   for await (const c of req) {
@@ -244,7 +281,19 @@ const readJsonBody = async (req) => {
     }
     chunks.push(c);
   }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+  if (!chunks.length) return {};
+  let buf = Buffer.concat(chunks);
+  if (enc === 'gzip') {
+    buf = gunzipSync(buf); // a bad gzip stream throws → caller's 400
+    // The cap above only bounded the compressed bytes on the wire — a highly
+    // compressible payload must clear the same cap inflated (zip-bomb guard).
+    if (buf.length > MAX_BODY) {
+      const err = new Error('body too large');
+      err.status = 413;
+      throw err;
+    }
+  }
+  return JSON.parse(buf.toString('utf8'));
 };
 
 const HOP_BY_HOP = new Set([
@@ -265,11 +314,14 @@ function proxyTargetAllowed(target) {
   if (PROXY_ALLOW.length) {
     return PROXY_ALLOW.includes(host)
       ? { ok: true }
-      : { ok: false, reason: `proxy target host "${host}" is not in FICTIONPAD_PROXY_ALLOW` };
+      : { ok: false, reason: `proxy target host "${host}" refused: it is not in the FICTIONPAD_PROXY_ALLOW ` +
+          `allowlist (currently: ${PROXY_ALLOW.join(', ')}) — add it there, or unset FICTIONPAD_PROXY_ALLOW` +
+          (BASIC_HEADER || TOKEN ? ' (with auth configured and no allowlist, any host is allowed)' : '') };
   }
   if (!BASIC_HEADER && !TOKEN && !LOOPBACK_HOSTS.has(host)) {
-    return { ok: false, reason: `proxy only forwards to loopback targets while the server has no auth ` +
-      `(set FICTIONPAD_AUTH or FICTIONPAD_TOKEN, or allow hosts via FICTIONPAD_PROXY_ALLOW)` };
+    return { ok: false, reason: `proxy target host "${host}" refused: FICTIONPAD_PROXY_ALLOW is not set and the ` +
+      `server has no auth (FICTIONPAD_AUTH/FICTIONPAD_TOKEN), so /proxy only forwards to loopback targets ` +
+      `(open-relay guard) — set FICTIONPAD_PROXY_ALLOW=${host} to allow it, or configure auth` };
   }
   return { ok: true };
 }
@@ -281,6 +333,12 @@ function proxyTargetAllowed(target) {
 const appFile = () => existsSync(join(ROOT, 'fictionpad.compiled.html'))
   ? 'fictionpad.compiled.html'
   : 'fictionpad.html';
+
+// The app HTML is ~1 MB and re-read from disk per request by design (a
+// rebuild is picked up without a restart) — compressing it fresh each time
+// would be the expensive part, so the gzipped buffer is cached keyed on the
+// file path + mtimeMs: a rebuild changes the mtime and invalidates the entry.
+let htmlGzipCache = { key: null, buf: null };
 
 // Fresh clones have no compiled artifact (it's gitignored — the release asset
 // is the real distribution), so without this a first-time `node server.mjs`
@@ -341,8 +399,17 @@ async function handleRequest(req, res) {
   if (url.pathname === '/' || url.pathname === '/fictionpad.html') {
     const file = appFile();
     try {
-      const html = await readFile(join(ROOT, file));
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      const path = join(ROOT, file);
+      const html = await readFile(path);
+      const headers = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' };
+      if (html.length > 1024 && acceptsGzip(req)) {
+        const cacheKey = `${file}:${statSync(path).mtimeMs}`;
+        if (htmlGzipCache.key !== cacheKey) htmlGzipCache = { key: cacheKey, buf: gzipSync(html) };
+        headers['Content-Encoding'] = 'gzip';
+        res.writeHead(200, headers);
+        return res.end(htmlGzipCache.buf);
+      }
+      res.writeHead(200, headers);
       return res.end(html);
     } catch {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -355,7 +422,7 @@ async function handleRequest(req, res) {
   // is set (local dev default — see the startup warning).
   if (url.pathname === '/version' && req.method === 'GET') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
-    return sendJson(req, res, 200, { version: 1, storage: true, images: true, gc: true });
+    return sendJson(req, res, 200, { version: 1, storage: true, images: true, gc: true, rev: true, gzip: true });
   }
 
   // Full-db backup: checkpoint the WAL, then snapshot the .db to a temp copy
@@ -436,6 +503,7 @@ async function handleRequest(req, res) {
     try { body = await readJsonBody(req); }
     catch (err) {
       if (err?.status === 413) return sendJson(req, res, 413, { error: 'body too large' });
+      if (err?.status === 415) return sendJson(req, res, 415, { error: 'unsupported content-encoding' });
       return sendJson(req, res, 400, { error: 'invalid JSON' });
     }
     const { store, key, data } = body ?? {};
@@ -443,10 +511,10 @@ async function handleRequest(req, res) {
       return sendJson(req, res, 400, { error: `unknown store: ${store}` });
     switch (url.pathname) {
       case '/load': {
-        const row = db.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get(store, String(key));
+        const row = db.prepare('SELECT data, rev FROM kv WHERE store = ? AND key = ?').get(store, String(key));
         if (!row) return sendJson(req, res, 404, { error: 'not found' });
         try {
-          return sendJson(req, res, 200, { data: maybeRehydrate(gunzipSync(row.data).toString('utf8'), body.refs) });
+          return sendJson(req, res, 200, { data: maybeRehydrate(gunzipSync(row.data).toString('utf8'), body.refs), rev: row.rev });
         } catch (err) {
           console.warn(`corrupted kv row ${store}/${key}: ${err?.message || err}`);
           return sendJson(req, res, 500, { error: 'corrupted stored data' });
@@ -456,13 +524,56 @@ async function handleRequest(req, res) {
         if (key == null || String(key) === '') return sendJson(req, res, 400, { error: 'missing key' });
         if (data === undefined) return sendJson(req, res, 400, { error: 'missing data' });
         const blob = gzipSync(Buffer.from(JSON.stringify(data), 'utf8'));
-        db.prepare('INSERT OR REPLACE INTO kv (store, key, data) VALUES (?, ?, ?)').run(store, String(key), blob);
-        return sendJson(req, res, 200, { ok: true });
+        // Guarded write: baseRev is the rev the client's copy is based on
+        // (0 = "must not exist yet"). A mismatch means another device wrote
+        // in between — refuse with 409 instead of clobbering. No baseRev
+        // (pre-rev client) = legacy blind upsert, rev still bumped.
+        const baseRev = body.baseRev;
+        if (baseRev == null) {
+          db.prepare('INSERT INTO kv (store, key, data, rev) VALUES (?, ?, ?, 1) ' +
+            'ON CONFLICT(store, key) DO UPDATE SET data = excluded.data, rev = kv.rev + 1')
+            .run(store, String(key), blob);
+          const { rev } = db.prepare('SELECT rev FROM kv WHERE store = ? AND key = ?').get(store, String(key));
+          return sendJson(req, res, 200, { ok: true, rev });
+        }
+        if (!Number.isInteger(baseRev) || baseRev < 0)
+          return sendJson(req, res, 400, { error: 'baseRev must be a non-negative integer' });
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const row = db.prepare('SELECT rev FROM kv WHERE store = ? AND key = ?').get(store, String(key));
+          const current = row?.rev ?? null;
+          if (current === baseRev || (current === null && baseRev === 0)) {
+            db.prepare('INSERT INTO kv (store, key, data, rev) VALUES (?, ?, ?, 1) ' +
+              'ON CONFLICT(store, key) DO UPDATE SET data = excluded.data, rev = kv.rev + 1')
+              .run(store, String(key), blob);
+            db.exec('COMMIT');
+            return sendJson(req, res, 200, { ok: true, rev: (current ?? 0) + 1 });
+          }
+          db.exec('ROLLBACK');
+          // No data payload — the client /loads the winning version; keeps
+          // 409s small even for image-heavy chats.
+          return sendJson(req, res, 409, { error: 'conflict', rev: current });
+        } catch (err) {
+          try { db.exec('ROLLBACK'); } catch {}
+          throw err;
+        }
       }
       case '/all': {
-        const entries = {};
+        // Delta sync (multi-device boot): `known` maps key → the client's
+        // last-seen rev. Only entries whose rev differs (new keys included —
+        // they're absent from `known`) are decoded and sent; `revs` still
+        // covers EVERY key in the store so the client can resync its full
+        // rev map from it, and `deleted` lists the known keys that vanished
+        // server-side since the client's snapshot. No `known` = the legacy
+        // full dump with NO deleted field — its absence is how the client
+        // detects an old server that ignored the hint.
+        const known = (body.known && typeof body.known === 'object' && !Array.isArray(body.known))
+          ? body.known : null;
+        const entries = {}, revs = {};
         const loadImages = imagesLoader();
-        for (const row of db.prepare('SELECT key, data FROM kv WHERE store = ?').all(store)) {
+        for (const row of db.prepare('SELECT key, data, rev FROM kv WHERE store = ?').all(store)) {
+          revs[row.key] = row.rev;
+          if (known && known[row.key] === row.rev) continue; // unchanged since the client's snapshot
           try {
             const text = gunzipSync(row.data).toString('utf8');
             const data = JSON.parse(text);
@@ -473,17 +584,55 @@ async function handleRequest(req, res) {
             console.warn(`skipping corrupted kv row ${store}/${row.key}: ${err?.message || err}`);
           }
         }
-        return sendJson(req, res, 200, { entries });
+        const out = { entries, revs };
+        if (known) out.deleted = Object.keys(known).filter((k) => !(k in revs));
+        return sendJson(req, res, 200, out);
       }
       case '/delete': {
-        db.prepare('DELETE FROM kv WHERE store = ? AND key = ?').run(store, String(key));
-        return sendJson(req, res, 200, { ok: true });
+        // Guarded delete, mirroring the /save contract: baseRev is the rev
+        // the client's copy is based on, and a mismatch means another device
+        // wrote in between — refuse with 409 instead of deleting the newer
+        // write. No baseRev (legacy client) = blind delete. A missing row
+        // succeeds either way: there is nothing to clobber.
+        const baseRev = body.baseRev;
+        if (baseRev == null) {
+          db.prepare('DELETE FROM kv WHERE store = ? AND key = ?').run(store, String(key));
+          return sendJson(req, res, 200, { ok: true });
+        }
+        if (!Number.isInteger(baseRev) || baseRev < 0)
+          return sendJson(req, res, 400, { error: 'baseRev must be a non-negative integer' });
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const row = db.prepare('SELECT rev FROM kv WHERE store = ? AND key = ?').get(store, String(key));
+          if (!row) {
+            db.exec('COMMIT');
+            return sendJson(req, res, 200, { ok: true });
+          }
+          if (row.rev === baseRev) {
+            db.prepare('DELETE FROM kv WHERE store = ? AND key = ?').run(store, String(key));
+            db.exec('COMMIT');
+            return sendJson(req, res, 200, { ok: true });
+          }
+          db.exec('ROLLBACK');
+          return sendJson(req, res, 409, { error: 'conflict', rev: row.rev });
+        } catch (err) {
+          try { db.exec('ROLLBACK'); } catch {}
+          throw err;
+        }
       }
       case '/list': {
         const stores = {};
         for (const row of db.prepare('SELECT store, COUNT(*) AS n FROM kv GROUP BY store').all())
           stores[row.store] = row.n;
-        return sendJson(req, res, 200, { stores });
+        const out = { stores };
+        // revs: true — cheap per-key revision map (the client's focus sync
+        // diffs against this instead of re-pulling every entity).
+        if (body.revs === true) {
+          out.revs = {};
+          for (const row of db.prepare('SELECT store, key, rev FROM kv').all())
+            (out.revs[row.store] ??= {})[row.key] = row.rev;
+        }
+        return sendJson(req, res, 200, out);
       }
     }
   }

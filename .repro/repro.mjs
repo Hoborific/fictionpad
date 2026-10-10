@@ -25,7 +25,7 @@ export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   splitImageCalls, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   substituteComfyWorkflow, comfyHistoryResult, parseImageSize, comfyRandomSeed,
   buildCharacterCard, embedPngCardJson, pngCrc32,
-  extractImages, rehydrateImages, hashImageId, ServerDBAdapter };`);
+  extractImages, rehydrateImages, hashImageId, ServerDBAdapter, IndexedDBAdapter };`);
 writeFileSync(new URL('./fp-module.mjs', import.meta.url), src);
 
 const fp = await import('./fp-module.mjs');
@@ -1388,6 +1388,7 @@ trial('storage: image externalization + GC (mock server)', async () => {
       const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
       if (route === '/version') return ok(info);
       if (route === '/all') { posts.push({ route, body }); return ok({ entries: rows[body.store] ?? {} }); }
+      if (route === '/load') { posts.push({ route, body }); return ok({ data: rows[body.store]?.[body.key] }); }
       if (route === '/save') { posts.push({ route, body }); rows[body.store][body.key] = body.data; return ok({ ok: true }); }
       if (route === '/delete') { posts.push({ route, body }); delete rows[body.store][body.key]; return ok({ ok: true }); }
       return ok({});
@@ -1411,10 +1412,17 @@ trial('storage: image externalization + GC (mock server)', async () => {
     if (st.get('Chats', 'c1').avatar !== A) throw new Error('cache does not hold the rehydrated data URL');
     if (!srv.posts.some(p => p.route === '/all' && p.body.refs === true))
       throw new Error('boot reads must pass refs:true (thin payloads)');
-    // Fresh adapter against the same rows: init rehydrates sentinels.
+    // Fresh adapter against the same rows: LAZY boot keeps the sentinel
+    // (no Images traffic at init), hydrate() resolves it on demand.
     const st2 = new ServerDBAdapter('');
+    const before = srv.posts.length;
     await st2.init();
-    if (st2.get('Chats', 'c1').avatar !== A) throw new Error('init did not rehydrate imgref');
+    if (srv.posts.slice(before).some(p => p.body?.store === 'Images'))
+      throw new Error('lazy boot must not pull the Images store');
+    if (st2.get('Chats', 'c1').avatar !== `imgref:${idA}`)
+      throw new Error('lazy boot must keep the imgref sentinel: ' + st2.get('Chats', 'c1').avatar);
+    await st2.hydrate('Chats', 'c1');
+    if (st2.get('Chats', 'c1').avatar !== A) throw new Error('hydrate did not resolve the imgref');
     // GC: deleting one of two referencing chats keeps the row; deleting the
     // last one collects it.
     st.remove('Chats', 'c1');
@@ -1428,6 +1436,7 @@ trial('storage: image externalization + GC (mock server)', async () => {
     if (!srv.posts.some(p => p.route === '/delete' && p.body.store === 'Images' && p.body.key === idA))
       throw new Error('GC did not POST the Images delete');
     clearTimeout(st.gcTimer); // debounced sweep must not keep the process alive
+    clearTimeout(st2.gcTimer);
 
     // Old server (no capability): inline saves, no Images traffic.
     const old = mkServer({ version: 1, storage: true });
@@ -1439,6 +1448,248 @@ trial('storage: image externalization + GC (mock server)', async () => {
     if (old.rows.Chats.c1.avatar !== A) throw new Error('old-server save not inline: ' + old.rows.Chats.c1.avatar);
     if (old.posts.some(p => p.body.store === 'Images')) throw new Error('Images traffic against an old server');
   } finally { globalThis.fetch = oldFetch; }
+});
+
+// A minimal indexedDB shim — just enough of the API for ServerDBAdapter's
+// local mirror (open + transaction + get/put/delete/getAllKeys/openCursor).
+// One shared in-memory database, so two adapters see the same mirror.
+function idbShim() {
+  const stores = new Map(); // name → Map(key → value)
+  const store = (n) => { if (!stores.has(n)) stores.set(n, new Map()); return stores.get(n); };
+  const api = (n) => ({
+    get: (k) => reqOk(structuredClone(store(n).get(k))),
+    put: (v, k) => { store(n).set(k, structuredClone(v)); return reqOk(undefined); },
+    delete: (k) => { store(n).delete(k); return reqOk(undefined); },
+    getAllKeys: () => reqOk([...store(n).keys()]),
+    openCursor: () => {
+      const entries = [...store(n).entries()];
+      let i = 0;
+      const r = {};
+      const fire = () => {
+        r.result = i < entries.length
+          ? { key: entries[i][0], value: structuredClone(entries[i][1]),
+              continue: () => { i++; queueMicrotask(fire); } }
+          : null;
+        queueMicrotask(() => r.onsuccess?.({ target: r }));
+      };
+      fire();
+      return r;
+    },
+  });
+  function reqOk(result) {
+    const r = { result };
+    queueMicrotask(() => r.onsuccess?.({ target: r }));
+    return r;
+  }
+  const db = {
+    objectStoreNames: { contains: (n) => stores.has(n) },
+    createObjectStore: (n) => { store(n); },
+    transaction: (n) => ({ objectStore: () => api(n) }),
+  };
+  return {
+    open: () => {
+      const r = { result: db };
+      queueMicrotask(() => { r.onupgradeneeded?.({ target: r }); r.onsuccess?.({ target: r }); });
+      return r;
+    },
+  };
+}
+
+// Guarded deletes (op:'delete' conflicts) and the delta boot (IDB mirror +
+// /all known-revs) against a rev-capable mock server.
+trial('storage: guarded delete + delta boot (mock server)', async () => {
+  const { ServerDBAdapter } = fp;
+  const rows = { Chats: {} }; // key → { data, rev }
+  const posts = [];
+  const f = async (route, opts) => {
+    const body = JSON.parse(opts?.body ?? '{}');
+    const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
+    const conflict = (rev) => new Response(JSON.stringify({ error: 'conflict', rev }), { status: 409 });
+    if (route === '/version') return ok({ version: 1, storage: true, images: true, gc: true, rev: true });
+    if (route === '/all') {
+      posts.push({ route, body });
+      const known = body.known && typeof body.known === 'object' ? body.known : null;
+      const entries = {}, revs = {}, deleted = [];
+      for (const [k, r] of Object.entries(rows[body.store] ?? {})) {
+        revs[k] = r.rev;
+        if (!known || known[k] !== r.rev) entries[k] = r.data;
+      }
+      if (known) {
+        for (const k of Object.keys(known)) if (!(k in (rows[body.store] ?? {}))) deleted.push(k);
+        return ok({ entries, revs, deleted });
+      }
+      return ok({ entries, revs });
+    }
+    if (route === '/save') {
+      posts.push({ route, body });
+      const cur = rows[body.store][body.key]?.rev ?? null;
+      if (body.baseRev != null && !(cur === body.baseRev || (cur === null && body.baseRev === 0))) return conflict(cur);
+      const rev = (cur ?? 0) + 1;
+      rows[body.store][body.key] = { data: body.data, rev };
+      return ok({ ok: true, rev });
+    }
+    if (route === '/delete') {
+      posts.push({ route, body });
+      const cur = rows[body.store][body.key]?.rev ?? null;
+      if (body.baseRev != null && cur !== null && cur !== body.baseRev) return conflict(cur);
+      delete rows[body.store][body.key];
+      return ok({ ok: true });
+    }
+    if (route === '/load') {
+      const r = rows[body.store]?.[body.key];
+      return r ? ok({ data: r.data, rev: r.rev }) : new Response('{}', { status: 404 });
+    }
+    if (route === '/list') {
+      const revs = {};
+      for (const [s, m] of Object.entries(rows))
+        for (const [k, r] of Object.entries(m)) (revs[s] ??= {})[k] = r.rev;
+      return ok({ stores: {}, revs });
+    }
+    if (route === '/gc-images') return ok({ deleted: 0 });
+    return ok({});
+  };
+  const oldFetch = globalThis.fetch, oldIdb = globalThis.indexedDB;
+  globalThis.fetch = f;
+  globalThis.indexedDB = idbShim();
+  try {
+    // -- guarded delete --
+    const st = new ServerDBAdapter('');
+    await st.init();
+    st.set('Chats', 'x', { id: 'x', v: 1 });
+    await st.flush();
+    if (rows.Chats.x?.rev !== 1) throw new Error('create did not land at rev 1');
+    rows.Chats.x = { data: { id: 'x', v: 2 }, rev: 2 }; // another device advances it
+    st.remove('Chats', 'x');
+    await st.flush(); // delete with baseRev 1 → 409
+    const c1 = st.conflictList();
+    if (c1.length !== 1 || c1[0].op !== 'delete' || c1[0].rev !== 2)
+      throw new Error('delete conflict not parked with op: ' + JSON.stringify(c1));
+    await st.resolveConflict('Chats', 'x', 'theirs'); // restore the server version
+    if (st.get('Chats', 'x')?.v !== 2) throw new Error('theirs did not restore the server row');
+    if (st.conflictList().length) throw new Error('conflict not cleared after theirs');
+    rows.Chats.x = { data: { id: 'x', v: 3 }, rev: 3 }; // it moves again
+    st.remove('Chats', 'x');
+    await st.flush(); // baseRev 2 vs server 3 → 409 again
+    if (!st.conflictList().length) throw new Error('second delete conflict not parked');
+    await st.resolveConflict('Chats', 'x', 'yours'); // delete anyway, against rev 3
+    if ('x' in rows.Chats) throw new Error('yours did not delete the server row');
+    if (st.get('Chats', 'x') !== undefined) throw new Error('cache still holds the deleted row');
+    clearTimeout(st.gcTimer); clearTimeout(st._revTimer);
+
+    // -- delta boot: st2 shares the IDB mirror with st3 via the shim --
+    const st2 = new ServerDBAdapter('');
+    await st2.init();
+    st2.set('Chats', 'keep', { id: 'keep', v: 1 });
+    st2.set('Chats', 'gone', { id: 'gone', v: 1 });
+    await st2.flush();
+    await new Promise(r => setTimeout(r, 1100)); // let the debounced revs record land
+    clearTimeout(st2.gcTimer);
+    // Behind the client's back: change one row, add one, delete one.
+    rows.Chats.keep = { data: { id: 'keep', v: 2 }, rev: 2 };
+    rows.Chats.fresh = { data: { id: 'fresh', v: 1 }, rev: 1 };
+    delete rows.Chats.gone;
+    posts.length = 0;
+    const st3 = new ServerDBAdapter('');
+    await st3.init();
+    const alls = posts.filter(p => p.route === '/all' && p.body.store === 'Chats');
+    if (!alls.length || !alls[0].body.known) throw new Error('delta boot did not send known revs');
+    if (st3.get('Chats', 'keep')?.v !== 2) throw new Error('delta boot did not pull the changed row');
+    if (st3.get('Chats', 'fresh')?.v !== 1) throw new Error('delta boot did not pull the new row');
+    if (st3.get('Chats', 'gone') !== undefined) throw new Error('delta boot did not drop the deleted row');
+    if (st3.revs.Chats?.keep !== 2) throw new Error('delta boot rev map not resynced');
+    clearTimeout(st3.gcTimer); clearTimeout(st3._revTimer);
+  } finally {
+    globalThis.fetch = oldFetch;
+    globalThis.indexedDB = oldIdb;
+  }
+});
+
+// Mode transitions: a purely local library must survive becoming
+// server-backed, and server↔local flip-flops must keep both worlds — the
+// server authoritative in server mode, the local rows dormant but intact.
+trial('storage: local ↔ server transitions preserve both worlds (mock server)', async () => {
+  const { ServerDBAdapter, IndexedDBAdapter } = fp;
+  const rows = { Chats: { serverChat: { data: { id: 'serverChat', name: 'server', messages: {} }, rev: 1 } } };
+  const f = async (route, opts) => {
+    const body = JSON.parse(opts?.body ?? '{}');
+    const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
+    if (route === '/version') return ok({ version: 1, storage: true, images: true, gc: true, rev: true });
+    if (route === '/all') {
+      const known = body.known && typeof body.known === 'object' ? body.known : null;
+      const entries = {}, revs = {}, deleted = [];
+      for (const [k, r] of Object.entries(rows[body.store] ?? {})) {
+        revs[k] = r.rev;
+        if (!known || known[k] !== r.rev) entries[k] = r.data;
+      }
+      if (known) {
+        for (const k of Object.keys(known)) if (!(k in (rows[body.store] ?? {}))) deleted.push(k);
+        return ok({ entries, revs, deleted });
+      }
+      return ok({ entries, revs });
+    }
+    if (route === '/save') {
+      const cur = rows[body.store][body.key]?.rev ?? null;
+      const rev = (cur ?? 0) + 1;
+      rows[body.store][body.key] = { data: body.data, rev };
+      return ok({ ok: true, rev });
+    }
+    if (route === '/delete') { delete rows[body.store][body.key]; return ok({ ok: true }); }
+    if (route === '/load') {
+      const r = rows[body.store]?.[body.key];
+      return r ? ok({ data: r.data, rev: r.rev }) : new Response('{}', { status: 404 });
+    }
+    if (route === '/gc-images') return ok({ deleted: 0 });
+    return ok({});
+  };
+  const oldFetch = globalThis.fetch, oldIdb = globalThis.indexedDB;
+  globalThis.fetch = f;
+  globalThis.indexedDB = idbShim();
+  const timers = [];
+  const watch = (a) => { timers.push(a); return a; };
+  try {
+    // 1. A purely local library (no revs record anywhere).
+    const local = watch(new IndexedDBAdapter());
+    await local.init();
+    local.set('Chats', 'localChat', { id: 'localChat', name: 'local', messages: {} });
+    await local.flush();
+
+    // 2. First server boot: the server world is authoritative…
+    const st = watch(new ServerDBAdapter(''));
+    await st.init();
+    if (!st.get('Chats', 'serverChat')) throw new Error('server boot did not load the server row');
+    if (st.get('Chats', 'localChat') !== undefined)
+      throw new Error('dormant local row leaked into the server-mode cache');
+    await new Promise(r => setTimeout(r, 1100)); // let the revs record land
+
+    // 3. …and a delta boot must not leak it either.
+    const st2 = watch(new ServerDBAdapter(''));
+    await st2.init();
+    if (st2.get('Chats', 'localChat') !== undefined)
+      throw new Error('dormant local row leaked into the delta-boot cache');
+    if (!st2.get('Chats', 'serverChat')) throw new Error('delta boot lost the server row');
+
+    // 4. Back to browser storage: local row intact, and the mirror makes the
+    // server world visible too (the safety net).
+    const local2 = watch(new IndexedDBAdapter());
+    await local2.init();
+    if (local2.get('Chats', 'localChat')?.name !== 'local')
+      throw new Error('server boot wiped the dormant local row');
+    if (!local2.get('Chats', 'serverChat'))
+      throw new Error('local boot did not see the mirrored server row');
+
+    // 5. The local boot invalidated the revs record, so the next server boot
+    // is a full fetch again — and STILL must not wipe the local row.
+    const st3 = watch(new ServerDBAdapter(''));
+    await st3.init();
+    const local3 = watch(new IndexedDBAdapter(''));
+    await local3.init();
+    if (local3.get('Chats', 'localChat')?.name !== 'local')
+      throw new Error('full-boot reseed wiped the dormant local row');
+  } finally {
+    for (const a of timers) { clearTimeout(a.gcTimer); clearTimeout(a._revTimer); }
+    globalThis.fetch = oldFetch;
+    globalThis.indexedDB = oldIdb;
+  }
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.

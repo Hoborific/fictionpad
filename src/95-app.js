@@ -63,17 +63,30 @@ function App() {
         try { await adapter.init(); }
         catch (e) { console.error(e); if (alive) setStorageFailed(true); }
       }
-      if (alive) { setStorage(adapter); setStorageKind(kind); }
+      if (alive) {
+        // Lazy-image hydration channel for components (no-op on the eager
+        // IndexedDB adapter — see requestHydration in 40-storage.js).
+        registerHydrator(adapter);
+        setStorage(adapter); setStorageKind(kind);
+      }
     })();
   }, [bootNonce]);
   useEffect(() => {
     if (!storage) return;
     const flush = () => storage.flush();
+    // Focus sync: one cheap rev-diff pull when the tab regains attention
+    // (throttled inside the adapter) — entities changed on another device
+    // arrive BEFORE the user writes against a stale copy.
+    const sync = () => { if (document.visibilityState === 'visible') storage.syncFromServer?.(); };
     window.addEventListener('beforeunload', flush);
     document.addEventListener('visibilitychange', flush);
+    document.addEventListener('visibilitychange', sync);
+    window.addEventListener('focus', sync);
     return () => {
       window.removeEventListener('beforeunload', flush);
       document.removeEventListener('visibilitychange', flush);
+      document.removeEventListener('visibilitychange', sync);
+      window.removeEventListener('focus', sync);
     };
   }, [storage]);
   if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;

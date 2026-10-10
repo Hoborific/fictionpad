@@ -113,8 +113,9 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
     const ch = sc?.avatar ? null
       : [...(sc?.characterIds ?? []), ...(c.characterIds ?? [])]
         .map(id => characters?.[id]).find(x => x?.avatar);
-    const a = sc?.avatar ? { name: sc.name, src: sc.avatar } : ch ? { name: ch.name, src: ch.avatar } : null;
-    return a && html`<${Avatar} name=${a.name} src=${a.src} size=${24} />`;
+    const a = sc?.avatar ? { name: sc.name, src: sc.avatar, hStore: 'Scenarios', hKey: sc.id }
+      : ch ? { name: ch.name, src: ch.avatar, hStore: 'Characters', hKey: ch.id } : null;
+    return a && html`<${Avatar} name=${a.name} src=${a.src} size=${24} hStore=${a.hStore} hKey=${a.hKey} />`;
   };
   const sectionTitle = (key, label, onAdd, addTitle) => html`
     <div class="title">
@@ -138,7 +139,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onScenarioContextMenu(s.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, s.id, onScenarioContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
-              ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} />`}
+              ${s.avatar && html`<${Avatar} name=${s.name} src=${s.avatar} size=${24} hStore="Scenarios" hKey=${s.id} />`}
               <span class="name">${s.name}</span>
               <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">
@@ -166,7 +167,7 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
               onContextMenu=${(e) => { e.preventDefault(); onCharacterContextMenu(c.id, e.clientX, e.clientY); }}
               onPointerDown=${(e) => lpStart(e, c.id, onCharacterContextMenu)}
               onPointerMove=${lpCancel} onPointerUp=${lpCancel} onPointerCancel=${lpCancel}>
-              ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} />`}
+              ${c.avatar && html`<${Avatar} name=${c.name} src=${c.avatar} size=${24} hStore="Characters" hKey=${c.id} />`}
               <span class="name">${c.name}</span>
               <span class="tools" onPointerDown=${(e) => e.stopPropagation()}>
                 <span class="tools-full">

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { gunzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import http from 'node:http';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -73,8 +73,8 @@ try {
 
   // /version shape
   const v = await (await fetch(`http://127.0.0.1:${portA}/version`)).json();
-  ok(v.version === 1 && v.storage === true && v.images === true && v.gc === true,
-    '/version → {version:1, storage:true, images:true, gc:true}');
+  ok(v.version === 1 && v.storage === true && v.images === true && v.gc === true && v.rev === true && v.gzip === true,
+    '/version → {version:1, storage:true, images:true, gc:true, rev:true, gzip:true}');
 
   // save → load roundtrip (incl. unicode + nesting)
   const entity = { id: 'abc', name: 'Tést ☃', nested: { arr: [1, 2, 3], flag: true } };
@@ -103,6 +103,129 @@ try {
   await post(portA, '/save', { store: 'Scenarios', key: 'abc', data: { id: 'abc', v: 2 } });
   ok((await (await post(portA, '/load', { store: 'Scenarios', key: 'abc' })).json()).data.v === 2,
     '/save upserts (last write wins)');
+
+  // ---- optimistic concurrency (rev-guarded writes) ----
+  // Multi-device clobber guard: a client sends the rev its copy is based on
+  // (baseRev); a mismatch is refused with 409 instead of overwriting the
+  // newer write from another device. No baseRev = legacy blind upsert.
+  {
+    // Blind save (old client) bumps the rev and reports it.
+    const s1 = await (await post(portA, '/save', { store: 'Chats', key: 'rev1', data: { id: 'rev1', v: 1 } })).json();
+    ok(s1.ok === true && s1.rev === 1, 'blind /save on a new key → rev 1');
+    const s2 = await (await post(portA, '/save', { store: 'Chats', key: 'rev1', data: { id: 'rev1', v: 2 } })).json();
+    ok(s2.rev === 2, 'blind /save bumps the rev');
+    ok((await (await post(portA, '/load', { store: 'Chats', key: 'rev1' })).json()).rev === 2,
+      '/load returns the current rev');
+    // Guarded save: matching baseRev wins, stale baseRev → 409 with the
+    // current rev and NO overwrite.
+    const g1 = await post(portA, '/save', { store: 'Chats', key: 'rev1', data: { id: 'rev1', v: 3 }, baseRev: 2 });
+    ok(g1.ok && (await g1.json()).rev === 3, 'guarded /save with matching baseRev → 200, rev bumped');
+    const stale = await post(portA, '/save', { store: 'Chats', key: 'rev1', data: { id: 'rev1', v: 99 }, baseRev: 2 });
+    ok(stale.status === 409 && (await stale.json()).rev === 3, 'stale baseRev → 409 carrying the current rev');
+    ok((await (await post(portA, '/load', { store: 'Chats', key: 'rev1' })).json()).data.v === 3,
+      'the refused write did not land');
+    ok((await post(portA, '/save', { store: 'Chats', key: 'rev1', data: {}, baseRev: 0 })).status === 409,
+      'baseRev 0 on an existing row → 409');
+    // Guarded create: missing row + baseRev 0 → rev 1.
+    const gc = await post(portA, '/save', { store: 'Chats', key: 'rev2', data: { id: 'rev2' }, baseRev: 0 });
+    ok(gc.ok && (await gc.json()).rev === 1, 'guarded /save on a missing row with baseRev 0 → rev 1');
+    ok((await post(portA, '/save', { store: 'Chats', key: 'rev2', data: {}, baseRev: -1 })).status === 400,
+      'negative baseRev → 400');
+    // /all carries per-key revs alongside the entries.
+    const allRev = await (await post(portA, '/all', { store: 'Chats' })).json();
+    ok(allRev.revs?.rev1 === 3 && allRev.revs?.rev2 === 1, '/all returns per-key revs');
+    // /list { revs: true } returns the cross-store diff map; plain /list doesn't.
+    const listRev = await (await post(portA, '/list', { revs: true })).json();
+    ok(listRev.revs?.Chats?.rev1 === 3 && listRev.revs?.Scenarios?.abc != null, '/list revs:true → per-key rev map');
+    ok((await (await post(portA, '/list', {})).json()).revs === undefined, 'plain /list carries no rev map');
+    // Delete, then a guarded save with the pre-delete rev → 409 (rev null);
+    // baseRev 0 re-creates.
+    await post(portA, '/delete', { store: 'Chats', key: 'rev2' });
+    const ghost = await post(portA, '/save', { store: 'Chats', key: 'rev2', data: {}, baseRev: 1 });
+    ok(ghost.status === 409 && (await ghost.json()).rev === null, 'guarded save on a deleted row → 409 with rev null');
+    ok((await post(portA, '/save', { store: 'Chats', key: 'rev2', data: { id: 'rev2' }, baseRev: 0 })).ok,
+      'baseRev 0 re-creates a deleted row');
+    // Pre-rev databases migrate: rows from before the column existed read as
+    // rev 0 and the first guarded write against them succeeds.
+    const mdb = new DatabaseSync(join(tmp, 'migrate.db'));
+    mdb.exec('CREATE TABLE kv (store TEXT, key TEXT, data BLOB, PRIMARY KEY (store, key))');
+    mdb.prepare('INSERT INTO kv (store, key, data) VALUES (?, ?, ?)').run('Chats', 'old', gzipSync(Buffer.from('{"id":"old"}')));
+    mdb.close();
+    g = startServer({ FICTIONPAD_DB: join(tmp, 'migrate.db') });
+    portG = await g.port;
+    await waitReady(portG);
+    ok((await (await post(portG, '/load', { store: 'Chats', key: 'old' })).json()).rev === 0,
+      'migrated pre-rev row reads as rev 0');
+    ok((await post(portG, '/save', { store: 'Chats', key: 'old', data: { id: 'old', v: 2 }, baseRev: 0 })).ok,
+      'guarded save against a migrated rev-0 row succeeds');
+    await stopServer(g); g = null;
+  }
+
+  // ---- delta /all (multi-device boot sync) ----
+  // `known` maps key → the client's last-seen rev: only changed/new entries
+  // come back, `revs` still covers every stored key, and `deleted` lists
+  // known keys that vanished server-side. Without `known` the response is
+  // the legacy full dump with NO deleted field (its absence is how the
+  // client detects an old server that ignored the hint).
+  {
+    await post(portA, '/save', { store: 'Personas', key: 'p1', data: { id: 'p1', v: 1 } });
+    await post(portA, '/save', { store: 'Personas', key: 'p2', data: { id: 'p2', v: 1 } });
+    await post(portA, '/save', { store: 'Personas', key: 'p3', data: { id: 'p3', v: 1 } });
+    const known = (await (await post(portA, '/all', { store: 'Personas' })).json()).revs;
+    // Since the snapshot: p2 changed, p3 deleted, p4 created.
+    await post(portA, '/save', { store: 'Personas', key: 'p2', data: { id: 'p2', v: 2 } });
+    await post(portA, '/delete', { store: 'Personas', key: 'p3' });
+    await post(portA, '/save', { store: 'Personas', key: 'p4', data: { id: 'p4', v: 1 } });
+    const delta = await (await post(portA, '/all', { store: 'Personas', known })).json();
+    ok(delta.entries?.p2?.v === 2, 'delta /all returns the changed key');
+    ok(!('p1' in (delta.entries ?? {})), 'delta /all omits the unchanged key');
+    ok(delta.entries?.p4?.v === 1, 'delta /all returns keys the client never knew');
+    ok(JSON.stringify(delta.deleted) === JSON.stringify(['p3']),
+      'delta /all lists the server-deleted known key');
+    ok(delta.revs?.p1 === known.p1 && delta.revs?.p2 === known.p2 + 1 &&
+      delta.revs?.p4 != null && !('p3' in delta.revs),
+      'delta /all revs still covers every stored key');
+    // A known key that never existed server-side is reported deleted too.
+    const ghost = await (await post(portA, '/all', { store: 'Personas', known: { nope: 4 } })).json();
+    ok(ghost.deleted?.includes('nope') && Object.keys(ghost.entries ?? {}).length === 3,
+      'delta /all: unknown known keys reported deleted, everything else sent');
+    // Backward compat: no `known` → full entries, NO deleted field at all.
+    const full = await (await post(portA, '/all', { store: 'Personas' })).json();
+    ok(Object.keys(full.entries ?? {}).sort().join(',') === 'p1,p2,p4',
+      '/all without known returns the full store');
+    ok(!('deleted' in full), '/all without known carries no deleted field');
+    for (const k of ['p1', 'p2', 'p4']) await post(portA, '/delete', { store: 'Personas', key: k });
+  }
+
+  // ---- guarded /delete ----
+  // Same optimistic-concurrency contract as /save: baseRev is the rev the
+  // client's copy is based on; a stale baseRev is refused with 409 instead
+  // of deleting a newer write from another device. No baseRev = legacy
+  // blind delete; a missing row succeeds (nothing to clobber).
+  {
+    await post(portA, '/save', { store: 'Chats', key: 'del1', data: { v: 1 } }); // → rev 1
+    ok((await post(portA, '/delete', { store: 'Chats', key: 'del1', baseRev: 1 })).ok,
+      'guarded /delete with matching baseRev → 200');
+    ok((await post(portA, '/load', { store: 'Chats', key: 'del1' })).status === 404,
+      'guarded /delete removed the row');
+    await post(portA, '/save', { store: 'Chats', key: 'del2', data: { v: 1 } });
+    await post(portA, '/save', { store: 'Chats', key: 'del2', data: { v: 2 } }); // → rev 2
+    const staleDel = await post(portA, '/delete', { store: 'Chats', key: 'del2', baseRev: 1 });
+    ok(staleDel.status === 409 && JSON.stringify(await staleDel.json()) === JSON.stringify({ error: 'conflict', rev: 2 }),
+      'stale baseRev → 409 {error:conflict, rev}');
+    const intact = await (await post(portA, '/load', { store: 'Chats', key: 'del2' })).json();
+    ok(intact.data?.v === 2 && intact.rev === 2, 'the refused delete left the row intact');
+    ok((await post(portA, '/delete', { store: 'Chats', key: 'never-there', baseRev: 7 })).ok,
+      'guarded /delete on a missing row → 200 (nothing to clobber)');
+    ok((await post(portA, '/delete', { store: 'Chats', key: 'del2' })).ok,
+      '/delete without baseRev → legacy blind delete');
+    ok((await post(portA, '/load', { store: 'Chats', key: 'del2' })).status === 404,
+      'the blind delete removed the row');
+    ok((await post(portA, '/delete', { store: 'Chats', key: 'del1', baseRev: 1.5 })).status === 400,
+      'non-integer baseRev on /delete → 400');
+    ok((await post(portA, '/delete', { store: 'Chats', key: 'del1', baseRev: -1 })).status === 400,
+      'negative baseRev on /delete → 400');
+  }
 
   // unknown store → 400
   ok((await post(portA, '/save', { store: 'Nope', key: 'x', data: {} })).status === 400, 'unknown store → 400');
@@ -316,6 +439,73 @@ try {
     ok((await post(portG, '/save', { store: 'Meta', key: 'small', data: { blob: 'y'.repeat(1024) } })).ok,
       'body cap: a body under the cap is still accepted');
     ok((await fetch(`http://127.0.0.1:${portG}/health`)).ok, 'server survives an oversized body');
+  }
+
+  // ---- gzip wire compression ----
+  // JSON responses over 1 KB are gzipped when the client accepts it (undici
+  // decompresses automatically and keeps the Content-Encoding header, so the
+  // decoded body AND the on-the-wire encoding are both observable); storage
+  // request bodies may arrive gzipped. /version's gzip:true is asserted above.
+  {
+    const big = { id: 'gz', blob: 'x'.repeat(8 * 1024) };
+    await post(portA, '/save', { store: 'Chats', key: 'gz', data: big });
+    const gzRes = await fetch(`http://127.0.0.1:${portA}/load`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip' },
+      body: JSON.stringify({ store: 'Chats', key: 'gz' }),
+    });
+    ok(gzRes.headers.get('content-encoding') === 'gzip',
+      'large response with Accept-Encoding: gzip → Content-Encoding: gzip');
+    ok(JSON.stringify((await gzRes.json()).data) === JSON.stringify(big),
+      'the gzipped response decodes to the stored entity');
+    // Small replies are not worth compressing.
+    const smallRes = await post(portA, '/save', { store: 'Chats', key: 'gz2', data: { id: 'gz2' } },
+      { 'Accept-Encoding': 'gzip' });
+    ok(smallRes.ok && smallRes.headers.get('content-encoding') === null,
+      'small response is NOT gzipped even when accepted');
+    // No gzip in Accept-Encoding → plain even for a large payload.
+    const plainRes = await post(portA, '/load', { store: 'Chats', key: 'gz' },
+      { 'Accept-Encoding': 'identity' });
+    ok(plainRes.headers.get('content-encoding') === null,
+      'large response without gzip acceptance stays plain');
+    // The app HTML route is served gzipped from its mtime-keyed cache.
+    const htmlRes = await fetch(`http://127.0.0.1:${portA}/`, { headers: { 'Accept-Encoding': 'gzip' } });
+    ok(htmlRes.headers.get('content-encoding') === 'gzip', 'app HTML served gzipped when accepted');
+    ok((await htmlRes.text()).includes('<'), 'the gzipped app HTML decodes to markup');
+    // A gzipped request body round-trips through /save.
+    const gzEntity = { id: 'gzreq', nested: { n: 42 } };
+    const wireRes = await fetch(`http://127.0.0.1:${portA}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: gzipSync(Buffer.from(JSON.stringify({ store: 'Chats', key: 'gzreq', data: gzEntity }))),
+    });
+    ok(wireRes.ok, 'gzipped /save body accepted');
+    ok(JSON.stringify((await (await post(portA, '/load', { store: 'Chats', key: 'gzreq' })).json()).data) === JSON.stringify(gzEntity),
+      'gzipped /save body round-trips');
+    // An encoding the server doesn't speak is refused, not misread.
+    const brRes = await fetch(`http://127.0.0.1:${portA}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'br' },
+      body: JSON.stringify({ store: 'Chats', key: 'x', data: {} }),
+    });
+    ok(brRes.status === 415, 'unsupported Content-Encoding → 415');
+    // The wire cap bounds the compressed bytes; the DECOMPRESSED payload is
+    // capped too (zip-bomb guard). On the 1 MB cap server: 2 MB of highly
+    // compressible JSON is tiny on the wire but over the cap inflated.
+    const bomb = gzipSync(Buffer.from(JSON.stringify(
+      { store: 'Meta', key: 'bomb', data: { blob: 'z'.repeat(2 * 1024 * 1024) } })));
+    ok(bomb.length < 1024 * 1024, 'the compressed bomb body fits under the wire cap');
+    const bombRes = await fetch(`http://127.0.0.1:${portG}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: bomb,
+    });
+    ok(bombRes.status === 413, 'decompressed-over-limit body → 413');
+    ok((await post(portG, '/load', { store: 'Meta', key: 'bomb' })).status === 404,
+      'the over-limit write did not land');
+    await post(portA, '/delete', { store: 'Chats', key: 'gz' });
+    await post(portA, '/delete', { store: 'Chats', key: 'gz2' });
+    await post(portA, '/delete', { store: 'Chats', key: 'gzreq' });
   }
 
   // ---- proxy credential hygiene (mock upstream echoes headers) ----

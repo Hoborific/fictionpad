@@ -589,7 +589,23 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           ${(draft.customSamplers ?? []).map(d => html`
             <${CustomSamplerCard} key=${d.id} def=${d}
               keyClash=${!!SAMPLER_FIELD_MAP[(d.key ?? '').trim()]}
-              onChange=${(next) => set({ customSamplers: draft.customSamplers.map(q => q.id === d.id ? next : q) })}
+              onChange=${(next) => {
+                const prevKey = (d.key ?? '').trim();
+                const nextKey = (next.key ?? '').trim();
+                const patch = { customSamplers: draft.customSamplers.map(q => q.id === d.id ? next : q) };
+                if (nextKey !== prevKey) {
+                  const fields = draft.samplerFields ?? [];
+                  // A sampler defaults to per-chat overridable the moment it
+                  // gains a key; on a rename the membership carries over (a
+                  // deliberately unchecked one stays off), and a cleared key
+                  // drops its stale entry.
+                  if (nextKey && !SAMPLER_FIELD_MAP[nextKey] && (!prevKey || fields.includes(prevKey)))
+                    patch.samplerFields = [...fields.filter(k => k !== prevKey && k !== nextKey), nextKey];
+                  else if (prevKey && fields.includes(prevKey))
+                    patch.samplerFields = fields.filter(k => k !== prevKey);
+                }
+                set(patch);
+              }}
               onRemove=${() => set({
                 customSamplers: draft.customSamplers.filter(q => q.id !== d.id),
                 // Drop the def's key everywhere too — unregistered params are never sent.
