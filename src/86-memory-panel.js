@@ -5,6 +5,20 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
   const [hi, setHi] = useState(null); // card id flashed by a supersede-badge jump
   const [editId, setEditId] = useState(null); // card id being edited inline
   const [draft, setDraft] = useState('');
+  const editRef = useRef(null);
+  // Auto-size the edit textarea to its content (rows=3 would clip long notes).
+  const fitEdit = () => {
+    const t = editRef.current;
+    if (!t) return;
+    t.style.height = 'auto';
+    t.style.height = Math.min(t.scrollHeight, 360) + 'px';
+  };
+  useEffect(() => {
+    if (!editId) return;
+    fitEdit();
+    const t = editRef.current;
+    if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+  }, [editId]);
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } }, { touch: false });
@@ -77,7 +91,7 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
             <button class="btn small danger" title="Delete memory" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
           </div>
           ${editId === m.id ? html`
-            <textarea class="edit" rows=${3} style=${{ width: '100%', marginTop: '4px' }} value=${draft} onInput=${(e) => setDraft(e.target.value)} />
+            <textarea class="edit" ref=${editRef} rows=${3} style=${{ width: '100%', marginTop: '4px', resize: 'vertical' }} value=${draft} onInput=${(e) => { setDraft(e.target.value); fitEdit(); }} />
             <div style=${{ display: 'flex', gap: '6px', marginTop: '4px' }}>
               <button class="btn small primary" disabled=${!draft.trim()} onClick=${() => saveEdit(m)}>Save</button>
               <button class="btn small" onClick=${() => setEditId(null)}>Cancel</button>
