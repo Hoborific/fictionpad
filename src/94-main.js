@@ -75,11 +75,17 @@ function Main({ storage, storageKind, storageFailed }) {
   const [chats, upsertChat, removeChat] = useStoredMap(storage, 'Chats');
   const [characters, upsertCharacter, removeCharacter] = useStoredMap(storage, 'Characters');
   const [settingsRaw, setSettings] = usePersistentState('fictionpad.settings', DEFAULT_SETTINGS);
-  const settings = useMemo(() => ({
-    ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
-    samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
-    layerCaps: { ...DEFAULT_SETTINGS.layerCaps, ...(settingsRaw?.layerCaps ?? {}) },
-  }), [settingsRaw]);
+  const settings = useMemo(() => {
+    const s = {
+      ...DEFAULT_SETTINGS, ...(settingsRaw ?? {}),
+      samplers: { ...DEFAULT_SETTINGS.samplers, ...(settingsRaw?.samplers ?? {}) },
+      layerCaps: { ...DEFAULT_SETTINGS.layerCaps, ...(settingsRaw?.layerCaps ?? {}) },
+    };
+    // Upgraded prompt defaults follow automatically; a user-edited prompt
+    // (anything but the exact old default) is never touched.
+    for (const [k, was, now] of PROMPT_DEFAULT_MIGRATIONS) if (s[k] === was) s[k] = now;
+    return s;
+  }, [settingsRaw]);
   // Settings sync via server storage: Meta/app.settings is the shared source
   // when server storage is active (server wins at boot, last-write-wins after).
   // serverToken is a per-device credential — stripped on upload, preserved

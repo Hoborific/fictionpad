@@ -1697,14 +1697,28 @@ const PROSE_FORMAT_RULES = 'Prose format: wrap spoken dialogue in double quotati
 // substituted with the persona name at call time; the suggestions prompt also
 // takes {{count}} and {{words}}.
 const DEFAULT_SUGGESTIONS_PROMPT = 'You suggest what the user\'s character ({{user}}) might say or do next in this roleplay. Reply with exactly {{count}} options as a numbered list, one per line, at most {{words}} words each, written in first person as {{user}}. In-character; do not narrate other characters\' actions; no commentary.';
-const DEFAULT_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
+const DEFAULT_MEMORY_PROMPT = 'You keep the memory notes of an ongoing roleplay. Summarize the recent conversation into one compact plain-prose note of at most {{chars}} characters: past that, the note stops being memory and starts crowding the story itself out of the context. This note is the only record kept of these messages once they scroll out of the recent history, so write it so a reader who never saw them could continue the story. Cover, in order: who is present and where; every decision, promise, threat, or refusal, and who made it; what is revealed, and to whom; anything given, taken, shown, or hidden; how moods and relationships shift; what is left unresolved. Quote a line verbatim when its exact wording matters. Names, promises, debts, injuries, betrayals, and secrets survive compression; weather and scenery do not. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting. Write the note in the same language the conversation is written in: match the conversation, not these instructions.';
 const DEFAULT_LORE_EXTRACT_PROMPT = `You maintain the memory notes and lorebook of an ongoing roleplay. You are given the current memory notes (each with its id), the current lore (each piece already reflects this chat's latest revisions), and the recent conversation. Reply with a JSON object only:
 {"new": [{"title":"…","content":"…","keys":["…"]}], "updates": [{"title":"…","content":"…","keys":["…"],"note":"…"}], "memories": [{"id":"…","text":"…","note":"…"}]}
 Rules:
 - "new": up to {{max}} NEW lasting facts about the world, places, objects, or factions: long-term reference material, not momentary events, never facts already in the lore.
 - "updates": rewrite an EXISTING lore piece when the story has genuinely changed what it says. title must match an existing piece exactly; content is the piece's FULL updated text with the change folded in, never a fragment or a diff; keys may be omitted to keep the current ones; note is one short sentence stating what changed.
 - "memories": revise a memory note the story has made stale or wrong. id must match an existing note exactly; text is the FULL revised note; note is one short sentence stating what changed. Never revise a note just to rephrase it.
+- Language: write every value (titles, content, trigger keys, note, text) in the same language the conversation is written in: match the conversation, not these instructions. Only the JSON field names stay in English.
 Use [] for any array with nothing to offer.`;
+// Pre-v4.12.2 prompt defaults, kept only so the settings migration can tell an
+// untouched default (upgrade it to the new text) from a user-edited prompt
+// (never touched). See PROMPT_DEFAULT_MIGRATIONS.
+const LEGACY_MEMORY_PROMPT = 'You keep memory notes for an ongoing roleplay. Summarize the key recent events, revealed facts, and relationship changes as compact plain prose of at most {{chars}} characters. When earlier notes are provided, record only new developments; do not repeat what they already cover. Past events only; no speculation; no lists; no formatting.';
+const LEGACY_LORE_EXTRACT_PROMPT = `You maintain the memory notes and lorebook of an ongoing roleplay. You are given the current memory notes (each with its id), the current lore (each piece already reflects this chat's latest revisions), and the recent conversation. Reply with a JSON object only:
+{"new": [{"title":"…","content":"…","keys":["…"]}], "updates": [{"title":"…","content":"…","keys":["…"],"note":"…"}], "memories": [{"id":"…","text":"…","note":"…"}]}
+Rules:
+- "new": up to {{max}} NEW lasting facts about the world, places, objects, or factions: long-term reference material, not momentary events, never facts already in the lore.
+- "updates": rewrite an EXISTING lore piece when the story has genuinely changed what it says. title must match an existing piece exactly; content is the piece's FULL updated text with the change folded in, never a fragment or a diff; keys may be omitted to keep the current ones; note is one short sentence stating what changed.
+- "memories": revise a memory note the story has made stale or wrong. id must match an existing note exactly; text is the FULL revised note; note is one short sentence stating what changed. Never revise a note just to rephrase it.
+Use [] for any array with nothing to offer.`;
+const LEGACY_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
+// The migration table itself lives below DEFAULT_RECAP_PROMPT (const TDZ).
 
 // Tolerant extraction of the lore-maintenance pass reply. Accepts the current
 // object contract and the legacy bare-array one (treated as "new" only —
@@ -1752,7 +1766,14 @@ function parseLorePassOutput(out) {
 }
 const DEFAULT_IMPROVE_PROMPT = 'Rewrite the user\'s draft in first person as {{user}}, matching the roleplay\'s tone. Output only the rewritten text.';
 const DEFAULT_IMPERSONATE_PROMPT = 'You write the next message for the user\'s character ({{user}}) in this roleplay, in their place. Reply with only the message text, in first person as {{user}}, matching the roleplay\'s tone and prose format (actions in *asterisks*, speech in "double quotes"). One to three paragraphs; stay in character; do not narrate other characters\' actions or dialogue; no commentary.';
-const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words. Output only the recap.';
+const DEFAULT_RECAP_PROMPT = 'Summarize the following roleplay excerpt into a cohesive recap in third person, past tense, at most {{words}} words: past that, the recap stops being memory and starts crowding the story out of the context. Compress the oldest events hardest and keep the recent ones specific: names, promises, debts, injuries, betrayals, and secrets survive compression; weather and scenery do not. Write the recap in the same language the excerpt is written in. Output only the recap.';
+// Settings-key migration for the v4.12.2 prompt upgrades (see the LEGACY_*
+// consts above): an untouched old default follows the new text.
+const PROMPT_DEFAULT_MIGRATIONS = [
+  ['memoryPrompt', LEGACY_MEMORY_PROMPT, DEFAULT_MEMORY_PROMPT],
+  ['loreExtractPrompt', LEGACY_LORE_EXTRACT_PROMPT, DEFAULT_LORE_EXTRACT_PROMPT],
+  ['recapPrompt', LEGACY_RECAP_PROMPT, DEFAULT_RECAP_PROMPT],
+];
 // Generator prompts (✦ Generate in the scenario/character editors) take no
 // runtime placeholders — {{user}} stays literal so the generated text keeps
 // the macro. The reply contract is one JSON object; parsing is tolerant
