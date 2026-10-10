@@ -20,7 +20,7 @@ live copy of fictionpad.html served [here](https://hoborific.github.io/fictionp
 
 ### Client only
 
-Download `fictionpad.html` from the [latest release](../../releases/latest) and open it in a browser.
+Download `fictionpad.html` from the [latest release](https://github.com/Hoborific/fictionpad/releases/latest) and open it in a browser.
 
 ### With the server (recommended)
 
