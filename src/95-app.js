@@ -1,3 +1,7 @@
+// Remember that this browser's data lives on the server. Used at boot to
+// distinguish "never used server storage" (silent IndexedDB fallback is fine)
+// from "server temporarily unreachable" (IndexedDB would look like total data
+// loss — block with a gate instead).
 const SERVER_FLAG_KEY = 'fictionpad.serverStorage';
 
 // Blocking boot screen when a browser that previously used server storage

@@ -3490,6 +3490,140 @@ function applyProfile(st, profile) {
   for (const k of PROFILE_FIELDS) if (profile?.fields?.[k] !== undefined) out[k] = profile.fields[k];
   return out;
 }
+
+// ---- logprob tape alignment -------------------------------------------------
+// Global alignment of the raw lp tape against the finished message text.
+// Returns ProbsView spans [{ text, logprob, top }] covering `text` exactly,
+// in order; spans without prob data get logprob: null. Runs once per
+// generation (or abort), when both tapes are complete and alignment is
+// unambiguous for the anchored cases:
+//   exact  — tape tiles the text (healthy per-token streams)
+//   suffix — tape covers the tail (middleware dropped leading entries, or
+//            attached them off-by-one: tape = text minus a leading span)
+//   prefix — tape covers the head only
+//   tape-longer — reasoning-model backends may logprob the RAW output:
+//            the tape then carries think/marker tokens the content never
+//            shows. Text is an in-order subsequence of such a tape, so
+//            unmatched tape entries are DROPPED (never misattributed).
+//   greedy — anything else: match tokens in order, plain text in the gaps
+function alignTokensToSpans(text, lpTape) {
+  const toks = (lpTape ?? []).filter(t => t?.token);
+  if (!text) return [];
+  if (!toks.length) return [{ text, logprob: null, top: [] }];
+  const plain = (text) => ({ text, logprob: null, top: [] });
+  const span = (t) => ({ text: t.token, logprob: t.logprob ?? null, top: t.top ?? [] });
+  const joined = toks.map(t => t.token).join('');
+  if (joined === text) return toks.map(span);
+  if (text.endsWith(joined)) {
+    const pre = text.slice(0, text.length - joined.length);
+    return [...(pre ? [plain(pre)] : []), ...toks.map(span)];
+  }
+  if (text.startsWith(joined)) return [...toks.map(span), plain(text.slice(joined.length))];
+  // Tape longer than the text (think tokens mixed in): fast case first — if
+  // the text is a suffix of the tape on a token boundary, drop the leading
+  // junk wholesale (reasoning always streams before content).
+  if (joined.endsWith(text)) {
+    const dropLen = joined.length - text.length;
+    let accLen = 0, k = 0;
+    while (k < toks.length && accLen < dropLen) accLen += toks[k++].token.length;
+    if (accLen === dropLen) return toks.slice(k).map(span);
+  }
+  const spans = [];
+  let pos = 0, i = 0, gap = '';
+  const flush = () => { if (gap) { spans.push(plain(gap)); gap = ''; } };
+  while (pos < text.length) {
+    if (i < toks.length && text.startsWith(toks[i].token, pos)) {
+      flush();
+      const t = toks[i++];
+      spans.push(span(t));
+      pos += t.token.length;
+    } else {
+      // Resync: find the best next match over a small lookahead, scored by
+      // text gap + a cost per skipped tape entry. Without the skip cost a
+      // dropped lp entry lets a DISTANT token (e.g. an "I" 100 tokens later)
+      // match the current position and misaligns the rest of the message.
+      let bestK = -1, bestJ = -1, bestScore = Infinity;
+      for (let j = i; j < Math.min(toks.length, i + 5); j++) {
+        let k = -1;
+        if (j > i && text.startsWith(toks[j].token, pos)) k = pos; // drop tape entr(ies)
+        else k = text.indexOf(toks[j].token, pos + 1);             // text gap, then match
+        if (k === -1) continue;
+        const score = (k - pos) + 4 * (j - i);
+        if (score < bestScore) { bestScore = score; bestK = k; bestJ = j; }
+      }
+      const end = bestK === -1 ? text.length : bestK;
+      gap += text.slice(pos, end);
+      pos = end;
+      if (bestK === -1) break;
+      i = bestJ;
+    }
+  }
+  flush();
+  // Drop-tolerant fallback for interleaved junk the greedy pass can't resync
+  // around: discard tape entries that don't match at the cursor (first match
+  // wins — content is an in-order subsequence of the tape). Used only when it
+  // covers strictly more of the text with real probs than the greedy pass.
+  const coverage = (sp) => sp.reduce((n, s) => n + (s.logprob != null ? s.text.length : 0), 0);
+  const baseCov = coverage(spans);
+  if (baseCov >= text.length) return spans;
+  const alt = [];
+  {
+    let aPos = 0, aI = 0, aGap = '';
+    const aFlush = () => { if (aGap) { alt.push(plain(aGap)); aGap = ''; } };
+    while (aPos < text.length) {
+      let j = aI;
+      while (j < toks.length && !text.startsWith(toks[j].token, aPos)) j++;
+      if (j >= toks.length) { aGap += text.slice(aPos); break; }
+      aFlush();
+      alt.push(span(toks[j]));
+      aPos += toks[j].token.length;
+      aI = j + 1;
+    }
+    aFlush();
+  }
+  return coverage(alt) > baseCov ? alt : spans;
+}
+
+// Tool replies: align the raw lp tape against the RAW text (which it tiles
+// exactly), then project the spans through stripToolBlocksMapped's char map
+// onto the stripped display text. Protocol-text spans vanish; a token that
+// straddles a strip boundary keeps its prob on the surviving fragment(s)
+// (approximation — fences almost always tokenize separately).
+//   rawText  — the raw streamed text being aligned (may be a slice)
+//   map      — map[strippedIdx] = rawIdx, absolute in the FULL raw reply
+//   rawOffset — absolute raw index of rawText[0] (continuation base length)
+// Returns spans tiling the stripped text, or null when they don't (map
+// mismatch — caller falls back to plain alignment).
+function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
+  const rawSpans = alignTokensToSpans(rawText, lpTape);
+  const inv = new Int32Array(rawOffset + rawText.length).fill(-1); // rawIdx → strippedIdx
+  for (let i = 0; i < map.length; i++) inv[map[i]] = i;
+  const spans = [];
+  const pushPlain = (t) => {
+    if (!t) return;
+    const last = spans[spans.length - 1];
+    if (last && last.logprob == null) last.text += t;
+    else spans.push({ text: t, logprob: null, top: [] });
+  };
+  let pos = 0;
+  for (const s of rawSpans) {
+    const a = pos, b = pos + s.text.length;
+    pos = b;
+    let frag = '';
+    const flushFrag = () => {
+      if (!frag) return;
+      if (s.logprob == null) pushPlain(frag);
+      else spans.push({ text: frag, logprob: s.logprob, top: s.top });
+      frag = '';
+    };
+    for (let i = a; i < b; i++) {
+      if (inv[rawOffset + i] !== -1) frag += rawText[i];
+      else flushFrag();
+    }
+    flushFrag();
+  }
+  return spans.map(s => s.text).join('') === strippedText ? spans : null;
+}
 // === PURE CORE END ===
 // ============================================================================
 // STORAGE — AbstractStorage (EventTarget + 500 ms debounced save queue) with
@@ -4455,11 +4589,6 @@ function normalizeEndpoint(url) {
 }
 const chatCompletionsURL = (ep) => `${normalizeEndpoint(ep)}/v1/chat/completions`;
 const modelsURL = (ep) => `${normalizeEndpoint(ep)}/v1/models`;
-const imagesURL = (ep) => `${normalizeEndpoint(ep)}/v1/images/generations`;
-// ComfyUI REST (backend 'comfyui'): queue → poll → download.
-const comfyPromptURL = (ep) => `${normalizeEndpoint(ep)}/prompt`;
-const comfyHistoryURL = (ep, id) => `${normalizeEndpoint(ep)}/history/${encodeURIComponent(id)}`;
-const comfyViewURL = (ep, img) => `${normalizeEndpoint(ep)}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder ?? '')}&type=${encodeURIComponent(img.type ?? 'output')}`;
 // True when the endpoint goes through OUR server's /proxy/ (same-origin).
 // Relative '/proxy/…' is same-origin by construction; absolute URLs must match.
 function isServerProxy(endpoint) {
@@ -4779,139 +4908,6 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
   }
 }
 
-// Global alignment of the raw lp tape against the finished message text.
-// Returns ProbsView spans [{ text, logprob, top }] covering `text` exactly,
-// in order; spans without prob data get logprob: null. Runs once per
-// generation (or abort), when both tapes are complete and alignment is
-// unambiguous for the anchored cases:
-//   exact  — tape tiles the text (healthy per-token streams)
-//   suffix — tape covers the tail (middleware dropped leading entries, or
-//            attached them off-by-one: tape = text minus a leading span)
-//   prefix — tape covers the head only
-//   tape-longer — reasoning-model backends may logprob the RAW output:
-//            the tape then carries think/marker tokens the content never
-//            shows. Text is an in-order subsequence of such a tape, so
-//            unmatched tape entries are DROPPED (never misattributed).
-//   greedy — anything else: match tokens in order, plain text in the gaps
-function alignTokensToSpans(text, lpTape) {
-  const toks = (lpTape ?? []).filter(t => t?.token);
-  if (!text) return [];
-  if (!toks.length) return [{ text, logprob: null, top: [] }];
-  const plain = (text) => ({ text, logprob: null, top: [] });
-  const span = (t) => ({ text: t.token, logprob: t.logprob ?? null, top: t.top ?? [] });
-  const joined = toks.map(t => t.token).join('');
-  if (joined === text) return toks.map(span);
-  if (text.endsWith(joined)) {
-    const pre = text.slice(0, text.length - joined.length);
-    return [...(pre ? [plain(pre)] : []), ...toks.map(span)];
-  }
-  if (text.startsWith(joined)) return [...toks.map(span), plain(text.slice(joined.length))];
-  // Tape longer than the text (think tokens mixed in): fast case first — if
-  // the text is a suffix of the tape on a token boundary, drop the leading
-  // junk wholesale (reasoning always streams before content).
-  if (joined.endsWith(text)) {
-    const dropLen = joined.length - text.length;
-    let accLen = 0, k = 0;
-    while (k < toks.length && accLen < dropLen) accLen += toks[k++].token.length;
-    if (accLen === dropLen) return toks.slice(k).map(span);
-  }
-  const spans = [];
-  let pos = 0, i = 0, gap = '';
-  const flush = () => { if (gap) { spans.push(plain(gap)); gap = ''; } };
-  while (pos < text.length) {
-    if (i < toks.length && text.startsWith(toks[i].token, pos)) {
-      flush();
-      const t = toks[i++];
-      spans.push(span(t));
-      pos += t.token.length;
-    } else {
-      // Resync: find the best next match over a small lookahead, scored by
-      // text gap + a cost per skipped tape entry. Without the skip cost a
-      // dropped lp entry lets a DISTANT token (e.g. an "I" 100 tokens later)
-      // match the current position and misaligns the rest of the message.
-      let bestK = -1, bestJ = -1, bestScore = Infinity;
-      for (let j = i; j < Math.min(toks.length, i + 5); j++) {
-        let k = -1;
-        if (j > i && text.startsWith(toks[j].token, pos)) k = pos; // drop tape entr(ies)
-        else k = text.indexOf(toks[j].token, pos + 1);             // text gap, then match
-        if (k === -1) continue;
-        const score = (k - pos) + 4 * (j - i);
-        if (score < bestScore) { bestScore = score; bestK = k; bestJ = j; }
-      }
-      const end = bestK === -1 ? text.length : bestK;
-      gap += text.slice(pos, end);
-      pos = end;
-      if (bestK === -1) break;
-      i = bestJ;
-    }
-  }
-  flush();
-  // Drop-tolerant fallback for interleaved junk the greedy pass can't resync
-  // around: discard tape entries that don't match at the cursor (first match
-  // wins — content is an in-order subsequence of the tape). Used only when it
-  // covers strictly more of the text with real probs than the greedy pass.
-  const coverage = (sp) => sp.reduce((n, s) => n + (s.logprob != null ? s.text.length : 0), 0);
-  const baseCov = coverage(spans);
-  if (baseCov >= text.length) return spans;
-  const alt = [];
-  {
-    let aPos = 0, aI = 0, aGap = '';
-    const aFlush = () => { if (aGap) { alt.push(plain(aGap)); aGap = ''; } };
-    while (aPos < text.length) {
-      let j = aI;
-      while (j < toks.length && !text.startsWith(toks[j].token, aPos)) j++;
-      if (j >= toks.length) { aGap += text.slice(aPos); break; }
-      aFlush();
-      alt.push(span(toks[j]));
-      aPos += toks[j].token.length;
-      aI = j + 1;
-    }
-    aFlush();
-  }
-  return coverage(alt) > baseCov ? alt : spans;
-}
-
-// Tool replies: align the raw lp tape against the RAW text (which it tiles
-// exactly), then project the spans through stripToolBlocksMapped's char map
-// onto the stripped display text. Protocol-text spans vanish; a token that
-// straddles a strip boundary keeps its prob on the surviving fragment(s)
-// (approximation — fences almost always tokenize separately).
-//   rawText  — the raw streamed text being aligned (may be a slice)
-//   map      — map[strippedIdx] = rawIdx, absolute in the FULL raw reply
-//   rawOffset — absolute raw index of rawText[0] (continuation base length)
-// Returns spans tiling the stripped text, or null when they don't (map
-// mismatch — caller falls back to plain alignment).
-function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
-  const rawSpans = alignTokensToSpans(rawText, lpTape);
-  const inv = new Int32Array(rawOffset + rawText.length).fill(-1); // rawIdx → strippedIdx
-  for (let i = 0; i < map.length; i++) inv[map[i]] = i;
-  const spans = [];
-  const pushPlain = (t) => {
-    if (!t) return;
-    const last = spans[spans.length - 1];
-    if (last && last.logprob == null) last.text += t;
-    else spans.push({ text: t, logprob: null, top: [] });
-  };
-  let pos = 0;
-  for (const s of rawSpans) {
-    const a = pos, b = pos + s.text.length;
-    pos = b;
-    let frag = '';
-    const flushFrag = () => {
-      if (!frag) return;
-      if (s.logprob == null) pushPlain(frag);
-      else spans.push({ text: frag, logprob: s.logprob, top: s.top });
-      frag = '';
-    };
-    for (let i = a; i < b; i++) {
-      if (inv[rawOffset + i] !== -1) frag += rawText[i];
-      else flushFrag();
-    }
-    flushFrag();
-  }
-  return spans.map(s => s.text).join('') === strippedText ? spans : null;
-}
-
 // ---- /tokenize (vLLM; degrade to null when unavailable) ----
 // Defensive about response shapes: {tokens:[ids]}, {tokens:["str"]},
 // count-only {count}, or OpenAI-ish {data:{tokens}}. Cached per endpoint+model+text
@@ -5033,6 +5029,17 @@ async function auxCall({ endpoint, apiKey, serverToken, model, system, user, max
   return String(json.choices?.[0]?.message?.content ?? '').trim();
 }
 
+// ============================================================================
+// IMAGE BACKENDS — OpenAI-compatible /v1/images/generations and the ComfyUI
+// queue → poll → download REST flow (split out of 50-api.js; shares its
+// fetchAPI/authHeaders/apiHttpError helpers via the concatenated scope).
+// ============================================================================
+const imagesURL = (ep) => `${normalizeEndpoint(ep)}/v1/images/generations`;
+// ComfyUI REST (backend 'comfyui'): queue → poll → download.
+const comfyPromptURL = (ep) => `${normalizeEndpoint(ep)}/prompt`;
+const comfyHistoryURL = (ep, id) => `${normalizeEndpoint(ep)}/history/${encodeURIComponent(id)}`;
+const comfyViewURL = (ep, img) => `${normalizeEndpoint(ep)}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder ?? '')}&type=${encodeURIComponent(img.type ?? 'output')}`;
+
 // ---- /images/generations (OpenAI-compatible; /image command) ----
 // One image per call, returned as a data URL at the backend's native
 // resolution and format — no downscale, no re-encode: imageSize is the
@@ -5147,7 +5154,6 @@ async function generateComfyImage({ endpoint, apiKey, serverToken, workflow, pro
     await sleep(1500);
   }
 }
-
 // ============================================================================
 // HOOKS — localStorage UI prefs + per-collection state over the storage layer.
 // ============================================================================
@@ -8215,7 +8221,6 @@ const MessageItemMemo = React.memo(MessageItem, (a, b) => {
   }
   return true;
 });
-
 
 // ============================================================================
 // COMPONENTS: BRANCH PANEL — the message graph condensed to its branch
