@@ -17,10 +17,14 @@ function isImgRef(s) { return typeof s === 'string' && s.startsWith(IMGREF_PREFI
 // (button semantics + pointer) only when onClick is passed. A sentinel src
 // renders the same no-image fallback while hStore/hKey (hydration hints:
 // the owning entity's store + id) let us ask storage to pull the real image;
-// the storechange re-render then swaps in the data URL.
+// the storechange re-render then swaps in the data URL. A hydration that
+// already FAILED (parked on the adapter, never re-fired) dims the tile and
+// tags it with a title hint — a missing image row must not re-pull on every
+// mount, and a dead avatar still needs its letter tile for column alignment.
 function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null, hKey = null }) {
+  const failed = isImgRef(src) && hStore && hKey && hydrationFailed(hStore, hKey);
   useEffect(() => {
-    if (hStore && hKey && isImgRef(src)) requestHydration(hStore, hKey);
+    if (hStore && hKey && isImgRef(src) && !hydrationFailed(hStore, hKey)) requestHydration(hStore, hKey);
   }, [src, hStore, hKey]);
   const px = `${size}px`;
   const interactive = onClick ? {
@@ -30,7 +34,8 @@ function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null,
   if (src && !isImgRef(src)) return html`<img class="avatar ${onClick ? 'click' : ''}" src=${src} alt=${name}
     style=${{ width: px, height: px }} ...${interactive} />`;
   const letter = (String(name).trim()[0] ?? '?').toUpperCase();
-  return html`<span class="avatar avatar-tile ${onClick ? 'click' : ''}"
+  return html`<span class="avatar avatar-tile ${failed ? 'avatar-dead' : ''} ${onClick ? 'click' : ''}"
+    title=${failed ? 'Avatar image could not be loaded' : null}
     style=${{ width: px, height: px, fontSize: `${Math.max(10, Math.round(size * 0.45))}px`, '--speaker-h': hueForName(String(name)) }}
     ...${interactive}>${letter}</span>`;
 }
@@ -48,7 +53,7 @@ function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null,
 // 1-based take number, so multi-take saves get a filename suffix. `takes`
 // (optional, the slot's take URLs) preloads the other takes so ←/→ flipping
 // doesn't show the previous image while the next one decodes.
-function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null }) {
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null, hStore = null, hKey = null }) {
   useEffect(() => {
     for (const u of takes ?? []) if (u && u !== src && !isImgRef(u)) { const im = new Image(); im.src = u; }
   }, [takes, src]);
@@ -65,14 +70,20 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
   }, [onPrev, onNext]);
   // Sentinel src (lazy image not yet hydrated): keep the overlay chrome and
   // take navigation, but show a muted loading note and no Save button —
-  // saving a sentinel would write a useless text file.
+  // saving a sentinel would write a useless text file. hStore/hKey (the
+  // owning entity) tell a FAILED hydration apart from a loading one: the
+  // note then matches the job-failure styling and offers a retry.
   const loading = isImgRef(src);
+  const failed = loading && hStore && hKey && hydrationFailed(hStore, hKey);
   return html`
     <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
       footer=${loading ? null : html`<button class="btn" title="Save this image as a file"
         onClick=${() => downloadDataURL(src, imageFilename(title, src, num))}>⬇${'\uFE0E'} Save image</button>`}>
       ${loading
-        ? html`<div class="lb-loading">✦ Loading…</div>`
+        ? (failed
+          ? html`<div class="lb-error">✕${'\uFE0E'} image unavailable
+              <button class="btn small ghost" onClick=${() => retryHydration(hStore, hKey)}>Retry</button></div>`
+          : html`<div class="lb-loading">✦ Loading…</div>`)
         : html`<img class="lb-img" src=${src} alt=${title} />`}
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`

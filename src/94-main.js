@@ -600,7 +600,7 @@ function Main({ storage, storageKind, storageFailed }) {
     await storage.hydrate('Chats', chatId); // avatars/images resolve before the panel seeds drafts
     setModal({ kind: 'chatPanel', chatId, tab });
   };
-  const chatAction = (chatId, action) => {
+  const chatAction = async (chatId, action) => {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
@@ -609,7 +609,7 @@ function Main({ storage, storageKind, storageFailed }) {
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
-        const name = prompt('Rename chat', c.name);
+        const name = await uiPrompt('Rename chat', c.name);
         if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
         return;
       }
@@ -620,7 +620,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setUi(u => ({ ...u, chatId: b.id }));
         return;
       }
-      case 'delete': if (confirm(`Delete chat "${c.name}"?`)) onDeleteChat(chatId);
+      case 'delete': if (await uiConfirm(`Delete chat "${c.name}"?`, { danger: true, okLabel: 'Delete' })) onDeleteChat(chatId);
     }
   };
 
@@ -722,6 +722,16 @@ function Main({ storage, storageKind, storageFailed }) {
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
       getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
+  // A failed summary/lore pass still skips its window (no re-banner loop),
+  // but the failure rides the memory store as lastError — the Memory tab
+  // shows it as a dismissible warning row. Cleared on the next success of
+  // that kind. lastError is plain state on the store: it travels with the
+  // chat and rides every spread-based derivation (no stamps needed).
+  const clearStoreError = (store, kind) => {
+    if (store?.lastError?.kind !== kind) return store;
+    const { lastError, ...rest } = store;
+    return rest;
+  };
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -734,7 +744,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // touch:false — a background pass must not re-sort the sidebar.
         const cur = ref.current.chats[chatObj.id];
         if (cur)
-          saveChat({ ...cur, memoryStore: { ...pushMemory(cur, r.text),
+          saveChat({ ...cur, memoryStore: { ...clearStoreError(pushMemory(cur, r.text), 'summary'),
             cursor: r.advance
               ? Math.min(r.to, getActivePath(cur.messages, cur.activeLeafId).length)
               : (cur.memoryStore?.cursor ?? 0) } }, { touch: false });
@@ -742,7 +752,9 @@ function Main({ storage, storageKind, storageFailed }) {
     } catch (e) {
       // Degrade like lore extraction: warn and skip the failed window (advance
       // by one chunk, never to pathLen) — a failing aux endpoint must not
-      // re-banner after every generation.
+      // re-banner after every generation. Not silently, though: the failure
+      // is recorded on the store (lastError) and shown in the Memory tab
+      // until dismissed or the next successful summary.
       console.warn('Memory summarization failed:', e);
       const cur = ref.current.chats[chatObj.id];
       if (cur) {
@@ -751,7 +763,8 @@ function Main({ storage, storageKind, storageFailed }) {
         const pathLen = getActivePath(cur.messages, cur.activeLeafId).length;
         saveChat({ ...cur, memoryStore: { ...store,
           cursor: pathLen - (store.cursor ?? 0) > 0
-            ? Math.min((store.cursor ?? 0) + every, pathLen) : (store.cursor ?? 0) } }, { touch: false });
+            ? Math.min((store.cursor ?? 0) + every, pathLen) : (store.cursor ?? 0),
+          lastError: { kind: 'summary', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }, { touch: false });
       }
     } finally {
       setSummarizing(false);
@@ -781,7 +794,11 @@ function Main({ storage, storageKind, storageFailed }) {
   // 'queue' mode (default): everything waits for review in Chat options.
   // 'auto': applied straight away — except updates to pieces the digest could
   // only show truncated, which drop to the queue for human review. 'off': nothing.
-  // Failures degrade silently (console.warn) and the cursor still advances.
+  // Failures skip the window (the cursor still advances, so a failing aux
+  // endpoint can't re-banner after every generation) but are no longer
+  // silent: the error is recorded on the memory store (lastError, kind
+  // 'lore') and shown as a dismissible warning in the Memory tab until the
+  // next successful pass clears it.
   // Prompt budgets for the maintenance pass: per-piece content truncation and
   // the total lore digest cap (chat-local pieces are kept over scenario ones).
   const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
@@ -796,14 +813,26 @@ function Main({ storage, storageKind, storageFailed }) {
     // derived from the live re-read chat (summarizeNow's rule), not the
     // pre-call snapshot. touch:false — a background pass must not re-sort
     // the sidebar.
-    const advance = (fn) => {
+    // ok=true marks a successful pass: clear a recorded lore failure.
+    const advance = (fn, ok = false) => {
       const cur = ref.current.chats[chatObj.id];
+      if (!cur) return;
       // Advance by exactly the covered chunk (never a blind jump to pathLen —
       // a backlog is worked off in chunks, nothing gets skipped), clamped to
       // the live path; a forced re-run on a covered chat leaves the cursor.
-      if (cur) saveChat({ ...fn(cur), emergentCursor: spanTo != null
+      let work = fn(cur);
+      if (ok && work.memoryStore)
+        work = { ...work, memoryStore: clearStoreError(work.memoryStore, 'lore') };
+      saveChat({ ...work, emergentCursor: spanTo != null
         ? Math.min(spanTo, getActivePath(cur.messages, cur.activeLeafId).length)
         : (cur.emergentCursor ?? 0) }, { touch: false });
+    };
+    // A failed pass still advances (same window-skip rule as the summary
+    // pass) and records the error on the memory store for the Memory tab.
+    const failAdvance = (e) => {
+      console.warn('Emergent lore extraction failed:', e);
+      advance((c) => ({ ...c, memoryStore: { ...(c.memoryStore ?? { memories: [], cursor: 0 }),
+        lastError: { kind: 'lore', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }));
     };
     // Fire-and-forget at the call site: guard the WHOLE body (the digest
     // build runs aux-free but touches plenty of derivations) so nothing can
@@ -931,7 +960,7 @@ function Main({ storage, storageKind, storageFailed }) {
             return q && (differs(u.text, q.content) || differs(u.target.text, q.oldContent));
           });
         if (!freshOk.length && !updatesOk.length && !memsOk.length
-          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c); return; }
+          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c, true); return; }
         const now = Date.now();
         const stamps = () => {
           const cur = ref.current.chats[chatObj.id];
@@ -1004,15 +1033,13 @@ function Main({ storage, storageKind, storageFailed }) {
                 oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
           }
           return work;
-        });
+        }, true);
       } catch (e) {
-        console.warn('Emergent lore extraction failed:', e);
-        advance((c) => c);
+        failAdvance(e);
       }
     } catch (e) {
       // Pre-aux failure (digest build, path derivation): same degrade rule.
-      console.warn('Emergent lore extraction failed:', e);
-      advance((c) => c);
+      failAdvance(e);
     }
   }
 
@@ -2174,7 +2201,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[c.id];
       if (!cur) { setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() }); return; }
       const store = pushMemory(cur, r.text);
-      saveChat({ ...cur, memoryStore: { ...store, cursor: cur.memoryStore?.cursor ?? 0 } });
+      saveChat({ ...cur, memoryStore: { ...clearStoreError(store, 'summary'), cursor: cur.memoryStore?.cursor ?? 0 } });
       setComposerInject({ chatId: c.id, hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
     } catch (e) {
       setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
@@ -2188,7 +2215,12 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n) return;
     const swipes = n.swipes.slice();
-    swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text };
+    // An edit rewrites the text, so the old logprob tape is stale — drop it
+    // (ProbsView spans and regen-from-token align against the pre-edit text
+    // otherwise; the ▦/↻ affordances hide via the hasProbs check). usage,
+    // genMs and think stay: metadata of the original generation.
+    const { tokens, ...sw } = swipes[n.activeSwipe];
+    swipes[n.activeSwipe] = { ...sw, text };
     saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, edited: true } } });
   };
   const onRegenerate = (nodeId) => {
@@ -2400,10 +2432,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // Deleting a scenario/character/persona leaves dangling links in chats that
   // reference it — the confirm names the affected-chat count so it's an
   // informed choice. (Sidebar/PersonaManager call these handlers directly.)
-  const onDeleteScenario = (id) => {
+  const onDeleteScenario = async (id) => {
     const refs = Object.values(ref.current.chats).filter(c => c.scenarioId === id).length;
     const name = ref.current.scenarios[id]?.name ?? id;
-    if (!confirm(`Delete scenario "${name}"?${refs ? `\n${refs} chat(s) use it — they keep working but lose its lore/prompt.` : ''}`)) return;
+    if (!await uiConfirm(`Delete scenario "${name}"?${refs ? `\n${refs} chat(s) use it — they keep working but lose its lore/prompt.` : ''}`, { danger: true, okLabel: 'Delete' })) return;
     removeScenario(id);
     if (ui.scenarioId === id) setUi(u => ({ ...u, scenarioId: null }));
   };
@@ -2428,10 +2460,10 @@ function Main({ storage, storageKind, storageFailed }) {
       : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(overlayPanes ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
-  const onDeleteCharacter = (id) => {
+  const onDeleteCharacter = async (id) => {
     const refs = Object.values(ref.current.chats).filter(c => c.characterIds?.includes(id)).length;
     const name = ref.current.characters[id]?.name ?? id;
-    if (!confirm(`Delete character "${name}"?${refs ? `\n${refs} chat(s) link to it — the link becomes inert.` : ''}`)) return;
+    if (!await uiConfirm(`Delete character "${name}"?${refs ? `\n${refs} chat(s) link to it — the link becomes inert.` : ''}`, { danger: true, okLabel: 'Delete' })) return;
     removeCharacter(id); // links dangle in scenarios/chats — resolveCharacters skips them
     if (ui.characterId === id) setUi(u => ({ ...u, characterId: null }));
   };
@@ -2905,7 +2937,7 @@ function Main({ storage, storageKind, storageFailed }) {
         personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
         settings=${settings} onUpdateSettings=${updateSettings}
         onExport=${() => chat && onExportChat(chat)}
-        onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
+        onDelete=${async () => { if (chat && await uiConfirm(`Delete chat "${chat.name}"?`, { danger: true, okLabel: 'Delete' })) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
@@ -2940,10 +2972,10 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         defaultPersonaId=${settings.defaultPersonaId ?? ''}
         onSetDefault=${(id) => updateSettings({ defaultPersonaId: id })}
-        onRemove=${(id) => {
+        onRemove=${async (id) => {
           const refs = Object.values(ref.current.chats).filter(c => c.personaId === id).length;
           const name = ref.current.personas[id]?.name ?? id;
-          if (confirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`)) {
+          if (await uiConfirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`, { danger: true, okLabel: 'Delete' })) {
             if ((settings.defaultPersonaId ?? '') === id) updateSettings({ defaultPersonaId: '' });
             removePersona(id);
           }
@@ -2999,7 +3031,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onExport=${() => onExportChat(chats[modal.chatId])}
-        onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
+        onDelete=${async () => { if (await uiConfirm(`Delete chat "${chats[modal.chatId].name}"?`, { danger: true, okLabel: 'Delete' })) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'branches' && chats[modal.chatId] && html`
       <${ErrorBoundary} name="branches"><${Modal} title="Chat branches" wide onClose=${() => setModal(null)}>

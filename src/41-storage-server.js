@@ -28,6 +28,13 @@ class ServerDBAdapter extends AbstractStorage {
     this.mdb = null;
     this._imgInflight = new Map();      // image id → in-flight load promise
     this._hydrateInflight = new Map();  // store/key → in-flight hydrate promise
+    // Hydration failures remembered per store/key for the session: an entity
+    // whose referenced image rows can't be pulled (missing Images row, pull
+    // error) is parked here so surfaces render a failed placeholder instead
+    // of re-firing the doomed fetch on every mount. Cleared by a successful
+    // hydrate of the key, by a fresh server pull (#applyRemote — the new
+    // copy may reference rows that exist now), or by an explicit retry.
+    this._hydrateFailed = new Set();
   }
   #headers() {
     return {
@@ -324,6 +331,7 @@ class ServerDBAdapter extends AbstractStorage {
   // demand), in the mirror in raw form, and in the rev map.
   async #applyRemote(store, key, raw, rev) {
     this.cache[store][key] = rehydrateImages(raw, this.images);
+    this._hydrateFailed.delete(`${store}/${key}`); // fresh copy — let hydration retry
     if (this.revEnabled && Number.isInteger(rev)) {
       (this.revs[store] ??= {})[key] = rev;
       this.#saveMirrorRevs();
@@ -357,26 +365,47 @@ class ServerDBAdapter extends AbstractStorage {
   // loaded yet, then rehydrate the CURRENT cache value (it may have been
   // rewritten while fetches were in flight) and notify. In-flight deduped
   // per entity; no-op for eager adapters (base class) and inline mode.
+  // A key whose referenced rows can't be pulled parks in _hydrateFailed and
+  // later requests return early — surfaces query hydrationFailed() to render
+  // a failed placeholder instead of re-firing the doomed fetch on every
+  // mount; the storechange on failure flips them from loading to failed.
   async hydrate(store, key) {
     if (!this.lazyImages) return;
     const id = `${store}/${key}`;
+    if (this._hydrateFailed.has(id)) return;
     if (this._hydrateInflight.has(id)) return this._hydrateInflight.get(id);
     const p = (async () => {
       const entity = this.cache[store]?.[key];
       if (!entity) return;
       const missing = collectImgrefIds(entity);
       for (const loaded of this.images.keys()) missing.delete(loaded);
-      if (!missing.size) return;
+      if (!missing.size) { this._hydrateFailed.delete(id); return; }
       let any = false;
       for (const imgId of missing) if (await this.#loadImage(imgId)) any = true;
-      if (!any) return;
-      const cur = this.cache[store]?.[key];
-      if (!cur) return;
-      this.cache[store][key] = rehydrateImages(cur, this.images);
-      this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+      let failed = false;
+      for (const imgId of missing) if (!this.images.has(imgId)) failed = true;
+      if (failed) this._hydrateFailed.add(id); else this._hydrateFailed.delete(id);
+      if (any) {
+        const cur = this.cache[store]?.[key];
+        if (cur) this.cache[store][key] = rehydrateImages(cur, this.images);
+      }
+      // Notify on either outcome: loaded images swap into the cache value, a
+      // failure leaves the sentinels but flips surfaces to the failed state.
+      if (any || failed)
+        this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
     })();
     this._hydrateInflight.set(id, p);
     try { return await p; } finally { this._hydrateInflight.delete(id); }
+  }
+  // Surfaces ask this to tell a loading sentinel (hydration in flight or not
+  // yet requested) from a failed one (the pull already came back empty).
+  hydrationFailed(store, key) { return this._hydrateFailed.has(`${store}/${key}`); }
+  // Explicit retry (click on a failed placeholder): unpark, notify so the
+  // surface flips back to loading, and re-run the fetch.
+  retryHydration(store, key) {
+    this._hydrateFailed.delete(`${store}/${key}`);
+    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+    return this.hydrate(store, key);
   }
   // Full hydration for whole-library exports — resolves every sentinel in
   // every store. Genuinely fetches the world; call only when the user asked

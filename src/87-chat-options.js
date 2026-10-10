@@ -21,8 +21,8 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   // re-reads the live chat (saveChat syncs the ref), so Accept all is the
   // queue folded through sequential accepts.
   const acceptAll = () => (chat.loreQueue ?? []).forEach(q => onAcceptQueue(q));
-  const dismissAll = () => {
-    if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
+  const dismissAll = async () => {
+    if (await uiConfirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`, { okLabel: 'Dismiss all' }))
       update({ ...chat, loreQueue: [] });
   };
   // "stale" pill: the target moved since the proposal was written (tool

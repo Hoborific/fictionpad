@@ -1,4 +1,68 @@
 // ============================================================================
+// UI DIALOG SERVICE — themed replacements for native confirm()/prompt().
+// Callers await uiConfirm(message, opts?) → boolean (Cancel/Escape/overlay =
+// false) or uiPrompt(message, initial?) → string|null (null = cancelled).
+// DialogHost (mounted once at the app root) registers a listener and renders
+// pending entries through the shared Modal — the app's topmost-overlay Escape
+// rule then applies to stacked confirms for free. Same registry idiom as the
+// requestHydration channel in 40-storage.js; entries fired before the host
+// mounts queue up and drain on registration.
+// ============================================================================
+let _uiDialogListener = null;
+let _uiDialogId = 0;
+const _uiDialogQueue = [];
+function _uiDialogPush(d) {
+  return new Promise((resolve) => {
+    const entry = { id: ++_uiDialogId, resolve, ...d };
+    if (_uiDialogListener) _uiDialogListener(entry);
+    else _uiDialogQueue.push(entry);
+  });
+}
+function uiConfirm(message, opts = {}) { return _uiDialogPush({ kind: 'confirm', message, opts }); }
+function uiPrompt(message, initial = '') { return _uiDialogPush({ kind: 'prompt', message, initial }); }
+
+function DialogHost() {
+  const [stack, setStack] = useState([]);
+  useEffect(() => {
+    const pending = _uiDialogQueue.splice(0);
+    _uiDialogListener = (entry) => setStack(s => [...s, entry]);
+    if (pending.length) setStack(s => [...s, ...pending]);
+    return () => { _uiDialogListener = null; };
+  }, []);
+  const settle = (entry, value) => {
+    setStack(s => s.filter(x => x.id !== entry.id));
+    entry.resolve(value);
+  };
+  return stack.map(entry => entry.kind === 'prompt'
+    ? html`<${PromptDialog} key=${entry.id} entry=${entry} settle=${settle} />`
+    : html`<${ConfirmDialog} key=${entry.id} entry=${entry} settle=${settle} />`);
+}
+
+function ConfirmDialog({ entry, settle }) {
+  const opts = entry.opts ?? {};
+  const okCls = opts.danger ? 'danger' : 'primary';
+  return html`
+    <${Modal} title=${opts.title ?? 'Confirm'} onClose=${() => settle(entry, false)}
+      footer=${html`
+        <button class="btn" onClick=${() => settle(entry, false)}>${opts.cancelLabel ?? 'Cancel'}</button>
+        <button class="btn ${okCls}" onClick=${() => settle(entry, true)}>${opts.okLabel ?? 'OK'}</button>`}>
+      <div style=${{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>${entry.message}</div>
+    <//>`;
+}
+
+function PromptDialog({ entry, settle }) {
+  const [value, setValue] = useState(entry.initial ?? '');
+  return html`
+    <${Modal} title=${entry.message} onClose=${() => settle(entry, null)}
+      footer=${html`
+        <button class="btn" onClick=${() => settle(entry, null)}>Cancel</button>
+        <button class="btn primary" onClick=${() => settle(entry, value)}>OK</button>`}>
+      <input type="text" value=${value} onInput=${(e) => setValue(e.target.value)}
+        onKeyDown=${(e) => { if (e.key === 'Enter') settle(entry, value); }} />
+    <//>`;
+}
+
+// ============================================================================
 // COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
 function NewChatModal({ scenario, character, personas, initialPersonaId, onCreate, onClose }) {

@@ -22,7 +22,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = n
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const edit = (next) => { setDirty(true); setEditing(next); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {

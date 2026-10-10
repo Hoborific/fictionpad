@@ -84,10 +84,10 @@ function ToolCallRow({ t }) {
 // the reply bubble (head or end) or embedded between markdown blocks when
 // genuinely mid-text — free-standing only for a scene break between speaker
 // bubbles or an image-only swipe (nothing to attach to).
-function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen }) {
+function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen, chatId = null }) {
   return html`${(slots ?? []).map((sv) => html`
     <${SwipeImage} key=${sv.slot} sv=${sv} onZoom=${onZoom} generating=${generating}
-      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} />`)}`;
+      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} chatId=${chatId} />`)}`;
 }
 
 // One image slot: the active take plus its take navigator. Owns its touch
@@ -96,7 +96,7 @@ function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onIm
 // stopPropagation keeps image-born gestures from arming the MESSAGE swipe
 // handlers on an ancestor bubble. A consumed gesture swallows the trailing
 // click (a >70px drag must not open the lightbox).
-function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }) {
+function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen, chatId = null }) {
   const { take, activeIdx, count, hasPending } = sv;
   const gestureRef = useRef(null);
   const consumedRef = useRef(false);
@@ -136,8 +136,14 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
           ? html`<div class="img-error" title=${typeof take?.error === 'string' ? take.error : take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
           : isImgRef(take.src)
             // Lazy image not yet hydrated (server storage) — the hydration
-            // effect in MessageItem swaps this for the real take shortly.
-            ? html`<div class="swipe-img-loading" title="Loading image…">✦</div>`
+            // effect in MessageItem swaps this for the real take shortly. A
+            // hydration that already failed parks the chat key: show the same
+            // "image unavailable" note a failed job gets (click retries)
+            // instead of loading forever.
+            ? (chatId && hydrationFailed('Chats', chatId)
+              ? html`<div class="img-error retry" title="Image could not be loaded — click to retry"
+                  onClick=${() => retryHydration('Chats', chatId)}>✕␣image unavailable</div>`
+              : html`<div class="swipe-img-loading" title="Loading image…">✦</div>`)
             : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
               onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
@@ -369,7 +375,7 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // gesture (a horizontal swipe here flips image takes, not message swipes).
   const swipeImgs = (list, key = null) => html`
     <${SwipeImages} key=${key} slots=${list} onZoom=${zoomImg} generating=${generating}
-      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} />`;
+      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} chatId=${chatId} />`;
   const freeImg = (list, key) => html`
     <div key=${key} class="msg-img-free">${swipeImgs(list)}</div>`;
   // Multi-speaker: an image hangs immediately AFTER the bubble of the last
@@ -490,9 +496,9 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
           <button class="btn small ghost" title="Fork to a new chat (copies everything up to this message)" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
           ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
-            onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮\uFE0E</button>`}
+            onClick=${async () => { if (await uiConfirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.', { okLabel: 'Rewind' })) onRewind(node.id); }}>⏮\uFE0E</button>`}
           ${!isRoot && html`<button class="btn small ghost" title="Delete message (and its branch)" disabled=${generating}
-            onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
+            onClick=${async () => { if (await uiConfirm('Delete this message and everything after it in its branch?', { danger: true, okLabel: 'Delete' })) onDelete(node.id); }}>✕</button>`}
         </span>
         <button class="btn small ghost actions-toggle" title="Message actions"
           onClick=${() => setActionsOpen(!actionsOpen)}>${actionsOpen ? '‹' : '›'}</button>
@@ -634,8 +640,8 @@ ${showNav && html`
             { label: 'Fork to new chat', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
-              { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
-              { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true, disabled: generating },
+              { label: 'Rewind to here', fn: async () => { if (await uiConfirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.', { okLabel: 'Rewind' })) onRewind(node.id); }, disabled: generating },
+              { label: 'Delete message (and its branch)', fn: async () => { if (await uiConfirm('Delete this message and everything after it in its branch?', { danger: true, okLabel: 'Delete' })) onDelete(node.id); }, danger: true, disabled: generating },
             ] : []),
           ]} />`}<//>`;
   return html`
@@ -666,6 +672,7 @@ ${showNav && html`
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
         num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
         takes=${lbSlot ? lbSlot.takeUrls : null}
+        hStore="Chats" hKey=${chatId}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,

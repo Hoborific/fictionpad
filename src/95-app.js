@@ -93,7 +93,7 @@ function App() {
       window.removeEventListener('focus', sync);
     };
   }, [storage]);
-  if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;
+  if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><${DialogHost} /><//>`;
   if (gate) return html`<${ServerGate} error=${gate.error}
     onRetry=${(token) => {
       if (token != null) try {

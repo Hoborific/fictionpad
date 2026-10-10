@@ -219,14 +219,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   // Logit-bias edits land in LIVE settings during the detour (the stashed
   // draft's map is pre-detour), so the count reads the live map first.
   const lbCount = Object.keys(settings?.logitBias ?? draft.logitBias ?? {}).length;
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
-    if (!confirm(`${label}? Rows with the same keys are overwritten (last write wins, no merging).`)) return;
+    if (!await uiConfirm(`${label}? Rows with the same keys are overwritten (last write wins, no merging).`, { okLabel: dir === 'up' ? 'Upload' : 'Download' })) return;
     setMigBusy(dir); setMigNote(null);
     try {
       const n = await (dir === 'up' ? onUpload() : onDownload());
@@ -292,30 +292,30 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   // profile takes effect when the user saves the settings form.
   const [profileSel, setProfileSel] = useState('');
   const profiles = draft.profiles ?? [];
-  const saveProfile = () => {
+  const saveProfile = async () => {
     const cur = profiles.find(x => x.id === profileSel);
-    const name = (prompt('Profile name:', cur?.name ?? '') ?? '').trim();
+    const name = ((await uiPrompt('Profile name:', cur?.name ?? '')) ?? '').trim();
     if (!name) return;
     const existing = profiles.find(x => x.name.toLowerCase() === name.toLowerCase());
-    if (existing && !confirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`)) return;
+    if (existing && !await uiConfirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`, { okLabel: 'Overwrite' })) return;
     const entry = { id: existing?.id ?? uid(), name, fields: profileFromSettings(draft) };
     set({ profiles: [...profiles.filter(x => x.id !== entry.id), entry] });
     setProfileSel(entry.id);
   };
-  const applySelectedProfile = () => {
+  const applySelectedProfile = async () => {
     const p = profiles.find(x => x.id === profileSel);
     if (!p) return;
     // Say up front which PROFILE_FIELDS groups actually move.
     const changed = PROFILE_GROUPS.filter(([, keys]) =>
       keys.some(k => JSON.stringify(draft[k]) !== JSON.stringify(p.fields?.[k]))).map(([g]) => g);
-    if (!confirm(changed.length
+    if (!await uiConfirm(changed.length
       ? `Apply profile "${p.name}"? This changes: ${changed.join(', ')}.`
-      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`)) return;
+      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`, { okLabel: 'Apply' })) return;
     set(applyProfile({}, p));
   };
-  const deleteSelectedProfile = () => {
+  const deleteSelectedProfile = async () => {
     const p = profiles.find(x => x.id === profileSel);
-    if (!p || !confirm(`Delete profile "${p.name}"?`)) return;
+    if (!p || !await uiConfirm(`Delete profile "${p.name}"?`, { danger: true, okLabel: 'Delete' })) return;
     set({ profiles: profiles.filter(x => x.id !== p.id) });
     setProfileSel('');
   };

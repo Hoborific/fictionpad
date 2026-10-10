@@ -353,6 +353,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   background: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l));
 }
 .avatar.click { cursor: pointer; }
+/* Sentinel avatar whose hydration already failed (missing Images row): the
+   letter tile stays (column alignment) but reads as unavailable. */
+.avatar.avatar-dead { opacity: 0.45; filter: grayscale(0.6); }
 .msg.with-av { display: flex; gap: 10px; }
 .msg .msg-av { flex: none; width: 40px; padding-top: 1px; } /* fixed width: an empty slot (imageless user/Narrator) still spaces the column; optically level with the meta row */
 .msg .msg-body { flex: 1; min-width: 0; } /* min-width: bubbles shrink instead of overflowing */
@@ -366,6 +369,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .modal.lightbox .lb-img { max-width: 100%; max-height: 72vh; object-fit: contain; border-radius: 6px; }
 /* Sentinel src (lazy image not yet hydrated): muted stand-in for the image. */
 .modal.lightbox .lb-loading { color: var(--c-dim); font-size: 14px; padding: 40px 60px; }
+/* Hydration failed (missing Images row): the job-failure note + retry. */
+.modal.lightbox .lb-error { color: var(--c-dim); font-size: 14px; padding: 40px 60px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .modal.lightbox .lb-cap { color: var(--c-dim); font-size: 13px; text-align: center; }
 .modal.lightbox .lb-takes { display: flex; align-items: center; gap: 10px; }
 
@@ -452,6 +458,8 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 }
 @keyframes shimmer { 50% { opacity: 0.45; } }
 .msg .img-error { color: var(--c-dim); font-size: 12px; }
+.msg .img-error.retry { cursor: pointer; }
+.msg .img-error.retry:hover { color: var(--c-text); }
 .msg .swipe-img-wrap {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   max-width: 100%; margin-top: 6px;
@@ -999,7 +1007,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.0';
+const APP_VERSION = '4.12.1';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -3654,10 +3662,15 @@ function collectImgrefIds(value, into = new Set()) {
 // UI → storage hydration channel. Components that render an entity's images
 // call requestHydration(store, key) when they meet an unresolved sentinel;
 // App registers the active adapter at boot. No-op unless the adapter lazily
-// loads images (server storage with the images capability).
+// loads images (server storage with the images capability). hydrationFailed
+// tells a failed pull (parked for the session) apart from a loading one, and
+// retryHydration is the explicit user retry (click on a failed placeholder) —
+// both are inert no-ops on eager adapters.
 let _hydrator = null;
 function registerHydrator(storage) { _hydrator = storage?.lazyImages ? storage : null; }
 function requestHydration(store, key) { if (store && key) _hydrator?.hydrate(store, key); }
+function hydrationFailed(store, key) { return !!(store && key && _hydrator?.hydrationFailed(store, key)); }
+function retryHydration(store, key) { if (store && key) _hydrator?.retryHydration(store, key); }
 
 // gzip a string via CompressionStream (feature-detected by the caller).
 async function gzipString(s) {
@@ -3811,9 +3824,11 @@ class AbstractStorage extends EventTarget {
     this.flush();
   }
   // Lazy-image hydration — base adapters are eager (boot rehydrates
-  // everything), so both are no-ops here. ServerDBAdapter overrides.
+  // everything), so all of these are no-ops here. ServerDBAdapter overrides.
   async hydrate() {}
   async hydrateAll() {}
+  hydrationFailed() { return false; }
+  retryHydration() {}
   // Distinct image ids referenced anywhere in the live cache right now, in
   // EITHER form: unresolved imgref sentinels (lazy mode) count directly,
   // data URLs count via the in-memory id → url map.
@@ -4024,6 +4039,13 @@ class ServerDBAdapter extends AbstractStorage {
     this.mdb = null;
     this._imgInflight = new Map();      // image id → in-flight load promise
     this._hydrateInflight = new Map();  // store/key → in-flight hydrate promise
+    // Hydration failures remembered per store/key for the session: an entity
+    // whose referenced image rows can't be pulled (missing Images row, pull
+    // error) is parked here so surfaces render a failed placeholder instead
+    // of re-firing the doomed fetch on every mount. Cleared by a successful
+    // hydrate of the key, by a fresh server pull (#applyRemote — the new
+    // copy may reference rows that exist now), or by an explicit retry.
+    this._hydrateFailed = new Set();
   }
   #headers() {
     return {
@@ -4320,6 +4342,7 @@ class ServerDBAdapter extends AbstractStorage {
   // demand), in the mirror in raw form, and in the rev map.
   async #applyRemote(store, key, raw, rev) {
     this.cache[store][key] = rehydrateImages(raw, this.images);
+    this._hydrateFailed.delete(`${store}/${key}`); // fresh copy — let hydration retry
     if (this.revEnabled && Number.isInteger(rev)) {
       (this.revs[store] ??= {})[key] = rev;
       this.#saveMirrorRevs();
@@ -4353,26 +4376,47 @@ class ServerDBAdapter extends AbstractStorage {
   // loaded yet, then rehydrate the CURRENT cache value (it may have been
   // rewritten while fetches were in flight) and notify. In-flight deduped
   // per entity; no-op for eager adapters (base class) and inline mode.
+  // A key whose referenced rows can't be pulled parks in _hydrateFailed and
+  // later requests return early — surfaces query hydrationFailed() to render
+  // a failed placeholder instead of re-firing the doomed fetch on every
+  // mount; the storechange on failure flips them from loading to failed.
   async hydrate(store, key) {
     if (!this.lazyImages) return;
     const id = `${store}/${key}`;
+    if (this._hydrateFailed.has(id)) return;
     if (this._hydrateInflight.has(id)) return this._hydrateInflight.get(id);
     const p = (async () => {
       const entity = this.cache[store]?.[key];
       if (!entity) return;
       const missing = collectImgrefIds(entity);
       for (const loaded of this.images.keys()) missing.delete(loaded);
-      if (!missing.size) return;
+      if (!missing.size) { this._hydrateFailed.delete(id); return; }
       let any = false;
       for (const imgId of missing) if (await this.#loadImage(imgId)) any = true;
-      if (!any) return;
-      const cur = this.cache[store]?.[key];
-      if (!cur) return;
-      this.cache[store][key] = rehydrateImages(cur, this.images);
-      this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+      let failed = false;
+      for (const imgId of missing) if (!this.images.has(imgId)) failed = true;
+      if (failed) this._hydrateFailed.add(id); else this._hydrateFailed.delete(id);
+      if (any) {
+        const cur = this.cache[store]?.[key];
+        if (cur) this.cache[store][key] = rehydrateImages(cur, this.images);
+      }
+      // Notify on either outcome: loaded images swap into the cache value, a
+      // failure leaves the sentinels but flips surfaces to the failed state.
+      if (any || failed)
+        this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
     })();
     this._hydrateInflight.set(id, p);
     try { return await p; } finally { this._hydrateInflight.delete(id); }
+  }
+  // Surfaces ask this to tell a loading sentinel (hydration in flight or not
+  // yet requested) from a failed one (the pull already came back empty).
+  hydrationFailed(store, key) { return this._hydrateFailed.has(`${store}/${key}`); }
+  // Explicit retry (click on a failed placeholder): unpark, notify so the
+  // surface flips back to loading, and re-run the fetch.
+  retryHydration(store, key) {
+    this._hydrateFailed.delete(`${store}/${key}`);
+    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+    return this.hydrate(store, key);
   }
   // Full hydration for whole-library exports — resolves every sentinel in
   // every store. Genuinely fetches the world; call only when the user asked
@@ -5788,7 +5832,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
@@ -5902,7 +5946,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
@@ -5994,9 +6038,9 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
   const startEdit = (p) => { setEditing(p); setDirty(false); };
   const edit = (next) => { setDirty(true); setEditing(next); };
-  const cancelEdit = () => { if (!dirty || confirm('Discard unsaved changes?')) setEditing(null); };
-  const guardClose = () => {
-    if (editing && dirty && !confirm('Discard unsaved changes?')) return;
+  const cancelEdit = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) setEditing(null); };
+  const guardClose = async () => {
+    if (editing && dirty && !await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) return;
     onClose();
   };
   return html`
@@ -6251,14 +6295,14 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
     ...d, layerCaps: { ...LAYER_CAPS, ...(d.layerCaps ?? {}), [k]: Math.max(0, Math.min(90, pct || 0)) / 100 },
   })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   // Logit-bias edits land in LIVE settings during the detour (the stashed
   // draft's map is pre-detour), so the count reads the live map first.
   const lbCount = Object.keys(settings?.logitBias ?? draft.logitBias ?? {}).length;
 
   const migrate = async (dir) => {
     const label = dir === 'up' ? 'Upload local data to the server' : 'Download server data to this browser';
-    if (!confirm(`${label}? Rows with the same keys are overwritten (last write wins, no merging).`)) return;
+    if (!await uiConfirm(`${label}? Rows with the same keys are overwritten (last write wins, no merging).`, { okLabel: dir === 'up' ? 'Upload' : 'Download' })) return;
     setMigBusy(dir); setMigNote(null);
     try {
       const n = await (dir === 'up' ? onUpload() : onDownload());
@@ -6324,30 +6368,30 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   // profile takes effect when the user saves the settings form.
   const [profileSel, setProfileSel] = useState('');
   const profiles = draft.profiles ?? [];
-  const saveProfile = () => {
+  const saveProfile = async () => {
     const cur = profiles.find(x => x.id === profileSel);
-    const name = (prompt('Profile name:', cur?.name ?? '') ?? '').trim();
+    const name = ((await uiPrompt('Profile name:', cur?.name ?? '')) ?? '').trim();
     if (!name) return;
     const existing = profiles.find(x => x.name.toLowerCase() === name.toLowerCase());
-    if (existing && !confirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`)) return;
+    if (existing && !await uiConfirm(`Overwrite the "${name}" profile with the current connection, models and samplers?`, { okLabel: 'Overwrite' })) return;
     const entry = { id: existing?.id ?? uid(), name, fields: profileFromSettings(draft) };
     set({ profiles: [...profiles.filter(x => x.id !== entry.id), entry] });
     setProfileSel(entry.id);
   };
-  const applySelectedProfile = () => {
+  const applySelectedProfile = async () => {
     const p = profiles.find(x => x.id === profileSel);
     if (!p) return;
     // Say up front which PROFILE_FIELDS groups actually move.
     const changed = PROFILE_GROUPS.filter(([, keys]) =>
       keys.some(k => JSON.stringify(draft[k]) !== JSON.stringify(p.fields?.[k]))).map(([g]) => g);
-    if (!confirm(changed.length
+    if (!await uiConfirm(changed.length
       ? `Apply profile "${p.name}"? This changes: ${changed.join(', ')}.`
-      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`)) return;
+      : `Apply profile "${p.name}"? It matches the current form — nothing will change.`, { okLabel: 'Apply' })) return;
     set(applyProfile({}, p));
   };
-  const deleteSelectedProfile = () => {
+  const deleteSelectedProfile = async () => {
     const p = profiles.find(x => x.id === profileSel);
-    if (!p || !confirm(`Delete profile "${p.name}"?`)) return;
+    if (!p || !await uiConfirm(`Delete profile "${p.name}"?`, { danger: true, okLabel: 'Delete' })) return;
     set({ profiles: profiles.filter(x => x.id !== p.id) });
     setProfileSel('');
   };
@@ -7193,13 +7237,23 @@ function ContextInspector({ manifest, onPreview, hasChat, realCounts, auxLog = [
 }
 
 // ============================================================================
-// COMPONENTS: MEMORY PANEL — view / pin / delete memories, manual summarize.
+// COMPONENTS: MEMORY PANEL — view / pin / edit / delete memories, manual summarize.
 // ============================================================================
 function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat, memoryEvery, cap }) {
   const [hi, setHi] = useState(null); // card id flashed by a supersede-badge jump
+  const [editId, setEditId] = useState(null); // card id being edited inline
+  const [draft, setDraft] = useState('');
   if (!chat) return html`<div class="hint">Select a chat to see its memories.</div>`;
   const memories = [...(chat.memoryStore?.memories ?? [])].sort((a, b) => b.createdAt - a.createdAt);
   const setStore = (mems) => onUpdateChat({ ...chat, memoryStore: { ...chat.memoryStore, memories: mems } }, { touch: false });
+  // Last summary/lore-pass failure: the pass skipped its window on purpose
+  // (no re-banner loop) but recorded the error here so it isn't invisible.
+  // Dismiss just drops the record; a successful pass clears its own kind.
+  const lastError = chat.memoryStore?.lastError;
+  const dismissError = () => {
+    const { lastError: _drop, ...rest } = chat.memoryStore ?? { memories: [], cursor: 0 };
+    onUpdateChat({ ...chat, memoryStore: rest }, { touch: false });
+  };
   // Superseded badge → scroll to the replacement card and flash its border.
   const jumpTo = (id) => {
     setHi(id);
@@ -7214,6 +7268,16 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
     const { supBy, supAtMsgs, supAtMsg, ...rest } = x;
     return rest;
   }));
+  // Direct USER edit — deliberately rewind-exempt (a present-tense action,
+  // per the rollback rules), so the text is rewritten in place: no stamps,
+  // no revision log, pin/supersede state untouched. Editing a superseded
+  // note is allowed; it stays hidden by derivation.
+  const startEdit = (m) => { setEditId(m.id); setDraft(m.text); };
+  const saveEdit = (m) => {
+    const text = draft.trim();
+    if (text) setStore(chat.memoryStore.memories.map(x => x.id === m.id ? { ...x, text } : x));
+    setEditId(null);
+  };
   return html`
     <div>
       <div style=${{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '8px' }}>
@@ -7223,6 +7287,16 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
         <button class="btn small" disabled=${summarizing} onClick=${() => onSummarize()}>
           ${summarizing ? 'Summarizing…' : 'Summarize now'}</button>
       </div>
+      ${lastError && html`
+        <div class="mem-item" style=${{ borderColor: 'var(--c-warning)' }}>
+          <div class="row">
+            <span class="warn" style=${{ flex: 1 }}>
+              ⚠\uFE0E ${lastError.kind === 'lore' ? 'Lore maintenance' : 'Auto-summary'} failed — that window was skipped.${lastError.at ? ` ${fmtDate(lastError.at, dateFormat)}` : ''}
+            </span>
+            <button class="btn small" title="Dismiss — the next successful pass clears this too" onClick=${dismissError}>✕</button>
+          </div>
+          ${lastError.error ? html`<div class="text">${lastError.error}</div>` : null}
+        </div>`}
       ${memories.length === 0 && html`<div class="hint">No memories yet. They are created automatically as the chat grows, and are versioned with the chat (branches fork them, rewinds roll them back).</div>`}
       ${memories.map(m => html`
         <div class="mem-item ${hi === m.id ? 'hi' : ''}" key=${m.id} id=${`mem-${m.id}`}>
@@ -7236,9 +7310,17 @@ function MemoryPanel({ chat, onUpdateChat, onSummarize, summarizing, dateFormat,
               ${m.pinned ? 'unpin' : 'pin'}</button>`}
             ${m.supBy && html`<button class="btn small" title="Clear the supersede marks — this note shows again where the revision had hidden it"
               onClick=${() => restore(m)}>restore</button>`}
+            ${editId !== m.id && html`<button class="btn small" title="Edit memory text — rewritten in place (a deliberate edit, so rewinds do not roll it back)"
+              onClick=${() => startEdit(m)}>✎\uFE0E</button>`}
             <button class="btn small danger" title="Delete memory" onClick=${() => setStore(chat.memoryStore.memories.filter(x => x.id !== m.id))}>✕</button>
           </div>
-          <div class="text">${m.text}</div>
+          ${editId === m.id ? html`
+            <textarea class="edit" rows=${3} style=${{ width: '100%', marginTop: '4px' }} value=${draft} onInput=${(e) => setDraft(e.target.value)} />
+            <div style=${{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+              <button class="btn small primary" disabled=${!draft.trim()} onClick=${() => saveEdit(m)}>Save</button>
+              <button class="btn small" onClick=${() => setEditId(null)}>Cancel</button>
+            </div>` : html`
+            <div class="text">${m.text}</div>`}
           ${m.revNote && html`<div class="hint" style=${{ marginTop: '4px' }}
             title="Change summary recorded by the maintenance pass">change: ${m.revNote}</div>`}
         </div>`)}
@@ -7267,8 +7349,8 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
   // re-reads the live chat (saveChat syncs the ref), so Accept all is the
   // queue folded through sequential accepts.
   const acceptAll = () => (chat.loreQueue ?? []).forEach(q => onAcceptQueue(q));
-  const dismissAll = () => {
-    if (confirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`))
+  const dismissAll = async () => {
+    if (await uiConfirm(`Dismiss all ${chat.loreQueue.length} pending proposals?`, { okLabel: 'Dismiss all' }))
       update({ ...chat, loreQueue: [] });
   };
   // "stale" pill: the target moved since the proposal was written (tool
@@ -7599,10 +7681,10 @@ function ToolCallRow({ t }) {
 // the reply bubble (head or end) or embedded between markdown blocks when
 // genuinely mid-text — free-standing only for a scene break between speaker
 // bubbles or an image-only swipe (nothing to attach to).
-function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen }) {
+function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onImgSwipe, onImgRegen, chatId = null }) {
   return html`${(slots ?? []).map((sv) => html`
     <${SwipeImage} key=${sv.slot} sv=${sv} onZoom=${onZoom} generating=${generating}
-      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} />`)}`;
+      canRegen=${canRegen} onImgSwipe=${onImgSwipe} onImgRegen=${onImgRegen} chatId=${chatId} />`)}`;
 }
 
 // One image slot: the active take plus its take navigator. Owns its touch
@@ -7611,7 +7693,7 @@ function SwipeImages({ slots, onZoom, generating = false, canRegen = false, onIm
 // stopPropagation keeps image-born gestures from arming the MESSAGE swipe
 // handlers on an ancestor bubble. A consumed gesture swallows the trailing
 // click (a >70px drag must not open the lightbox).
-function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }) {
+function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen, chatId = null }) {
   const { take, activeIdx, count, hasPending } = sv;
   const gestureRef = useRef(null);
   const consumedRef = useRef(false);
@@ -7651,8 +7733,14 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen }
           ? html`<div class="img-error" title=${typeof take?.error === 'string' ? take.error : take?.prompt ?? ''}>✕\uFE0E image unavailable</div>`
           : isImgRef(take.src)
             // Lazy image not yet hydrated (server storage) — the hydration
-            // effect in MessageItem swaps this for the real take shortly.
-            ? html`<div class="swipe-img-loading" title="Loading image…">✦</div>`
+            // effect in MessageItem swaps this for the real take shortly. A
+            // hydration that already failed parks the chat key: show the same
+            // "image unavailable" note a failed job gets (click retries)
+            // instead of loading forever.
+            ? (chatId && hydrationFailed('Chats', chatId)
+              ? html`<div class="img-error retry" title="Image could not be loaded — click to retry"
+                  onClick=${() => retryHydration('Chats', chatId)}>✕␣image unavailable</div>`
+              : html`<div class="swipe-img-loading" title="Loading image…">✦</div>`)
             : html`<img class="swipe-img" src=${take.src} alt=${take.caption || take.prompt || ''}
               onClick=${() => { if (consumedRef.current) { consumedRef.current = false; return; } onZoom?.(take, sv.slot); }} />`}
       ${(count > 1 || canRegen) && html`
@@ -7884,7 +7972,7 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // gesture (a horizontal swipe here flips image takes, not message swipes).
   const swipeImgs = (list, key = null) => html`
     <${SwipeImages} key=${key} slots=${list} onZoom=${zoomImg} generating=${generating}
-      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} />`;
+      canRegen=${canImgRegen} onImgSwipe=${imgSlotSwipe} onImgRegen=${imgSlotRegen} chatId=${chatId} />`;
   const freeImg = (list, key) => html`
     <div key=${key} class="msg-img-free">${swipeImgs(list)}</div>`;
   // Multi-speaker: an image hangs immediately AFTER the bubble of the last
@@ -8005,9 +8093,9 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
           <button class="btn small ghost" title="Fork to a new chat (copies everything up to this message)" disabled=${generating}
             onClick=${() => onBranch(node.id)}>⑂</button>
           ${!isRoot && html`<button class="btn small ghost" title="Rewind to here" disabled=${generating}
-            onClick=${() => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id)}>⏮\uFE0E</button>`}
+            onClick=${async () => { if (await uiConfirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.', { okLabel: 'Rewind' })) onRewind(node.id); }}>⏮\uFE0E</button>`}
           ${!isRoot && html`<button class="btn small ghost" title="Delete message (and its branch)" disabled=${generating}
-            onClick=${() => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id)}>✕</button>`}
+            onClick=${async () => { if (await uiConfirm('Delete this message and everything after it in its branch?', { danger: true, okLabel: 'Delete' })) onDelete(node.id); }}>✕</button>`}
         </span>
         <button class="btn small ghost actions-toggle" title="Message actions"
           onClick=${() => setActionsOpen(!actionsOpen)}>${actionsOpen ? '‹' : '›'}</button>
@@ -8149,8 +8237,8 @@ ${showNav && html`
             { label: 'Fork to new chat', fn: () => onBranch(node.id) },
             ...(!isRoot ? [
               '-',
-              { label: 'Rewind to here', fn: () => confirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.') && onRewind(node.id), disabled: generating },
-              { label: 'Delete message (and its branch)', fn: () => confirm('Delete this message and everything after it in its branch?') && onDelete(node.id), danger: true, disabled: generating },
+              { label: 'Rewind to here', fn: async () => { if (await uiConfirm('Rewind the chat to this message? Later messages stay in the tree but leave the active branch; memories are rolled back.', { okLabel: 'Rewind' })) onRewind(node.id); }, disabled: generating },
+              { label: 'Delete message (and its branch)', fn: async () => { if (await uiConfirm('Delete this message and everything after it in its branch?', { danger: true, okLabel: 'Delete' })) onDelete(node.id); }, danger: true, disabled: generating },
             ] : []),
           ]} />`}<//>`;
   return html`
@@ -8181,6 +8269,7 @@ ${showNav && html`
         title=${lbSlot ? (lbSlot.take?.caption || lbSlot.take?.prompt || '') : lightbox.title}
         num=${lbSlot ? lbSlot.activeIdx + 1 : 0}
         takes=${lbSlot ? lbSlot.takeUrls : null}
+        hStore="Chats" hKey=${chatId}
         onClose=${() => setLightbox(null)}
         ...${lbSlot && lbSlot.count > 1 ? {
           onPrev: lbSlot.activeIdx > 0 ? () => imgSlotSwipe(lbSlot.slot, -1) : null,
@@ -9086,6 +9175,70 @@ function Sidebar({ scenarios, chats, characters, selectedScenarioId, selectedCha
     </div>`;
 }
 // ============================================================================
+// UI DIALOG SERVICE — themed replacements for native confirm()/prompt().
+// Callers await uiConfirm(message, opts?) → boolean (Cancel/Escape/overlay =
+// false) or uiPrompt(message, initial?) → string|null (null = cancelled).
+// DialogHost (mounted once at the app root) registers a listener and renders
+// pending entries through the shared Modal — the app's topmost-overlay Escape
+// rule then applies to stacked confirms for free. Same registry idiom as the
+// requestHydration channel in 40-storage.js; entries fired before the host
+// mounts queue up and drain on registration.
+// ============================================================================
+let _uiDialogListener = null;
+let _uiDialogId = 0;
+const _uiDialogQueue = [];
+function _uiDialogPush(d) {
+  return new Promise((resolve) => {
+    const entry = { id: ++_uiDialogId, resolve, ...d };
+    if (_uiDialogListener) _uiDialogListener(entry);
+    else _uiDialogQueue.push(entry);
+  });
+}
+function uiConfirm(message, opts = {}) { return _uiDialogPush({ kind: 'confirm', message, opts }); }
+function uiPrompt(message, initial = '') { return _uiDialogPush({ kind: 'prompt', message, initial }); }
+
+function DialogHost() {
+  const [stack, setStack] = useState([]);
+  useEffect(() => {
+    const pending = _uiDialogQueue.splice(0);
+    _uiDialogListener = (entry) => setStack(s => [...s, entry]);
+    if (pending.length) setStack(s => [...s, ...pending]);
+    return () => { _uiDialogListener = null; };
+  }, []);
+  const settle = (entry, value) => {
+    setStack(s => s.filter(x => x.id !== entry.id));
+    entry.resolve(value);
+  };
+  return stack.map(entry => entry.kind === 'prompt'
+    ? html`<${PromptDialog} key=${entry.id} entry=${entry} settle=${settle} />`
+    : html`<${ConfirmDialog} key=${entry.id} entry=${entry} settle=${settle} />`);
+}
+
+function ConfirmDialog({ entry, settle }) {
+  const opts = entry.opts ?? {};
+  const okCls = opts.danger ? 'danger' : 'primary';
+  return html`
+    <${Modal} title=${opts.title ?? 'Confirm'} onClose=${() => settle(entry, false)}
+      footer=${html`
+        <button class="btn" onClick=${() => settle(entry, false)}>${opts.cancelLabel ?? 'Cancel'}</button>
+        <button class="btn ${okCls}" onClick=${() => settle(entry, true)}>${opts.okLabel ?? 'OK'}</button>`}>
+      <div style=${{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>${entry.message}</div>
+    <//>`;
+}
+
+function PromptDialog({ entry, settle }) {
+  const [value, setValue] = useState(entry.initial ?? '');
+  return html`
+    <${Modal} title=${entry.message} onClose=${() => settle(entry, null)}
+      footer=${html`
+        <button class="btn" onClick=${() => settle(entry, null)}>Cancel</button>
+        <button class="btn primary" onClick=${() => settle(entry, value)}>OK</button>`}>
+      <input type="text" value=${value} onInput=${(e) => setValue(e.target.value)}
+        onKeyDown=${(e) => { if (e.key === 'Enter') settle(entry, value); }} />
+    <//>`;
+}
+
+// ============================================================================
 // COMPONENTS: NEW CHAT MODAL (scenario or global character → pick persona)
 // ============================================================================
 function NewChatModal({ scenario, character, personas, initialPersonaId, onCreate, onClose }) {
@@ -9314,7 +9467,7 @@ function CharacterEditor({ character, scenarios, chatLinkCount = 0, settings = n
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const edit = (next) => { setDirty(true); setEditing(next); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
@@ -9528,10 +9681,14 @@ function isImgRef(s) { return typeof s === 'string' && s.startsWith(IMGREF_PREFI
 // (button semantics + pointer) only when onClick is passed. A sentinel src
 // renders the same no-image fallback while hStore/hKey (hydration hints:
 // the owning entity's store + id) let us ask storage to pull the real image;
-// the storechange re-render then swaps in the data URL.
+// the storechange re-render then swaps in the data URL. A hydration that
+// already FAILED (parked on the adapter, never re-fired) dims the tile and
+// tags it with a title hint — a missing image row must not re-pull on every
+// mount, and a dead avatar still needs its letter tile for column alignment.
 function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null, hKey = null }) {
+  const failed = isImgRef(src) && hStore && hKey && hydrationFailed(hStore, hKey);
   useEffect(() => {
-    if (hStore && hKey && isImgRef(src)) requestHydration(hStore, hKey);
+    if (hStore && hKey && isImgRef(src) && !hydrationFailed(hStore, hKey)) requestHydration(hStore, hKey);
   }, [src, hStore, hKey]);
   const px = `${size}px`;
   const interactive = onClick ? {
@@ -9541,7 +9698,8 @@ function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null,
   if (src && !isImgRef(src)) return html`<img class="avatar ${onClick ? 'click' : ''}" src=${src} alt=${name}
     style=${{ width: px, height: px }} ...${interactive} />`;
   const letter = (String(name).trim()[0] ?? '?').toUpperCase();
-  return html`<span class="avatar avatar-tile ${onClick ? 'click' : ''}"
+  return html`<span class="avatar avatar-tile ${failed ? 'avatar-dead' : ''} ${onClick ? 'click' : ''}"
+    title=${failed ? 'Avatar image could not be loaded' : null}
     style=${{ width: px, height: px, fontSize: `${Math.max(10, Math.round(size * 0.45))}px`, '--speaker-h': hueForName(String(name)) }}
     ...${interactive}>${letter}</span>`;
 }
@@ -9559,7 +9717,7 @@ function Avatar({ name = '', src = '', size = 40, onClick = null, hStore = null,
 // 1-based take number, so multi-take saves get a filename suffix. `takes`
 // (optional, the slot's take URLs) preloads the other takes so ←/→ flipping
 // doesn't show the previous image while the next one decodes.
-function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null }) {
+function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos = '', num = 0, takes = null, hStore = null, hKey = null }) {
   useEffect(() => {
     for (const u of takes ?? []) if (u && u !== src && !isImgRef(u)) { const im = new Image(); im.src = u; }
   }, [takes, src]);
@@ -9576,14 +9734,20 @@ function Lightbox({ src, title = '', onClose, onPrev = null, onNext = null, pos 
   }, [onPrev, onNext]);
   // Sentinel src (lazy image not yet hydrated): keep the overlay chrome and
   // take navigation, but show a muted loading note and no Save button —
-  // saving a sentinel would write a useless text file.
+  // saving a sentinel would write a useless text file. hStore/hKey (the
+  // owning entity) tell a FAILED hydration apart from a loading one: the
+  // note then matches the job-failure styling and offers a retry.
   const loading = isImgRef(src);
+  const failed = loading && hStore && hKey && hydrationFailed(hStore, hKey);
   return html`
     <${Modal} title=${title || 'Image'} cls="lightbox" onClose=${onClose}
       footer=${loading ? null : html`<button class="btn" title="Save this image as a file"
         onClick=${() => downloadDataURL(src, imageFilename(title, src, num))}>⬇${'\uFE0E'} Save image</button>`}>
       ${loading
-        ? html`<div class="lb-loading">✦ Loading…</div>`
+        ? (failed
+          ? html`<div class="lb-error">✕${'\uFE0E'} image unavailable
+              <button class="btn small ghost" onClick=${() => retryHydration(hStore, hKey)}>Retry</button></div>`
+          : html`<div class="lb-loading">✦ Loading…</div>`)
         : html`<img class="lb-img" src=${src} alt=${title} />`}
       ${title && html`<div class="lb-cap">${title}</div>`}
       ${(onPrev || onNext || pos) && html`
@@ -10366,7 +10530,7 @@ function Main({ storage, storageKind, storageFailed }) {
     await storage.hydrate('Chats', chatId); // avatars/images resolve before the panel seeds drafts
     setModal({ kind: 'chatPanel', chatId, tab });
   };
-  const chatAction = (chatId, action) => {
+  const chatAction = async (chatId, action) => {
     const c = ref.current.chats[chatId];
     if (!c) return;
     switch (action) {
@@ -10375,7 +10539,7 @@ function Main({ storage, storageKind, storageFailed }) {
       case 'memory': return openChatPanel(chatId, 'memory');
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
-        const name = prompt('Rename chat', c.name);
+        const name = await uiPrompt('Rename chat', c.name);
         if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
         return;
       }
@@ -10386,7 +10550,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setUi(u => ({ ...u, chatId: b.id }));
         return;
       }
-      case 'delete': if (confirm(`Delete chat "${c.name}"?`)) onDeleteChat(chatId);
+      case 'delete': if (await uiConfirm(`Delete chat "${c.name}"?`, { danger: true, okLabel: 'Delete' })) onDeleteChat(chatId);
     }
   };
 
@@ -10488,6 +10652,16 @@ function Main({ storage, storageKind, storageFailed }) {
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
       getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
+  // A failed summary/lore pass still skips its window (no re-banner loop),
+  // but the failure rides the memory store as lastError — the Memory tab
+  // shows it as a dismissible warning row. Cleared on the next success of
+  // that kind. lastError is plain state on the store: it travels with the
+  // chat and rides every spread-based derivation (no stamps needed).
+  const clearStoreError = (store, kind) => {
+    if (store?.lastError?.kind !== kind) return store;
+    const { lastError, ...rest } = store;
+    return rest;
+  };
   async function summarizeNow(chatObj) {
     setSummarizing(true);
     try {
@@ -10500,7 +10674,7 @@ function Main({ storage, storageKind, storageFailed }) {
         // touch:false — a background pass must not re-sort the sidebar.
         const cur = ref.current.chats[chatObj.id];
         if (cur)
-          saveChat({ ...cur, memoryStore: { ...pushMemory(cur, r.text),
+          saveChat({ ...cur, memoryStore: { ...clearStoreError(pushMemory(cur, r.text), 'summary'),
             cursor: r.advance
               ? Math.min(r.to, getActivePath(cur.messages, cur.activeLeafId).length)
               : (cur.memoryStore?.cursor ?? 0) } }, { touch: false });
@@ -10508,7 +10682,9 @@ function Main({ storage, storageKind, storageFailed }) {
     } catch (e) {
       // Degrade like lore extraction: warn and skip the failed window (advance
       // by one chunk, never to pathLen) — a failing aux endpoint must not
-      // re-banner after every generation.
+      // re-banner after every generation. Not silently, though: the failure
+      // is recorded on the store (lastError) and shown in the Memory tab
+      // until dismissed or the next successful summary.
       console.warn('Memory summarization failed:', e);
       const cur = ref.current.chats[chatObj.id];
       if (cur) {
@@ -10517,7 +10693,8 @@ function Main({ storage, storageKind, storageFailed }) {
         const pathLen = getActivePath(cur.messages, cur.activeLeafId).length;
         saveChat({ ...cur, memoryStore: { ...store,
           cursor: pathLen - (store.cursor ?? 0) > 0
-            ? Math.min((store.cursor ?? 0) + every, pathLen) : (store.cursor ?? 0) } }, { touch: false });
+            ? Math.min((store.cursor ?? 0) + every, pathLen) : (store.cursor ?? 0),
+          lastError: { kind: 'summary', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }, { touch: false });
       }
     } finally {
       setSummarizing(false);
@@ -10547,7 +10724,11 @@ function Main({ storage, storageKind, storageFailed }) {
   // 'queue' mode (default): everything waits for review in Chat options.
   // 'auto': applied straight away — except updates to pieces the digest could
   // only show truncated, which drop to the queue for human review. 'off': nothing.
-  // Failures degrade silently (console.warn) and the cursor still advances.
+  // Failures skip the window (the cursor still advances, so a failing aux
+  // endpoint can't re-banner after every generation) but are no longer
+  // silent: the error is recorded on the memory store (lastError, kind
+  // 'lore') and shown as a dismissible warning in the Memory tab until the
+  // next successful pass clears it.
   // Prompt budgets for the maintenance pass: per-piece content truncation and
   // the total lore digest cap (chat-local pieces are kept over scenario ones).
   const PASS_PIECE_CHARS = 800, PASS_LORE_CHARS = 8000, PASS_MEM_CAP = 3;
@@ -10562,14 +10743,26 @@ function Main({ storage, storageKind, storageFailed }) {
     // derived from the live re-read chat (summarizeNow's rule), not the
     // pre-call snapshot. touch:false — a background pass must not re-sort
     // the sidebar.
-    const advance = (fn) => {
+    // ok=true marks a successful pass: clear a recorded lore failure.
+    const advance = (fn, ok = false) => {
       const cur = ref.current.chats[chatObj.id];
+      if (!cur) return;
       // Advance by exactly the covered chunk (never a blind jump to pathLen —
       // a backlog is worked off in chunks, nothing gets skipped), clamped to
       // the live path; a forced re-run on a covered chat leaves the cursor.
-      if (cur) saveChat({ ...fn(cur), emergentCursor: spanTo != null
+      let work = fn(cur);
+      if (ok && work.memoryStore)
+        work = { ...work, memoryStore: clearStoreError(work.memoryStore, 'lore') };
+      saveChat({ ...work, emergentCursor: spanTo != null
         ? Math.min(spanTo, getActivePath(cur.messages, cur.activeLeafId).length)
         : (cur.emergentCursor ?? 0) }, { touch: false });
+    };
+    // A failed pass still advances (same window-skip rule as the summary
+    // pass) and records the error on the memory store for the Memory tab.
+    const failAdvance = (e) => {
+      console.warn('Emergent lore extraction failed:', e);
+      advance((c) => ({ ...c, memoryStore: { ...(c.memoryStore ?? { memories: [], cursor: 0 }),
+        lastError: { kind: 'lore', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }));
     };
     // Fire-and-forget at the call site: guard the WHOLE body (the digest
     // build runs aux-free but touches plenty of derivations) so nothing can
@@ -10697,7 +10890,7 @@ function Main({ storage, storageKind, storageFailed }) {
             return q && (differs(u.text, q.content) || differs(u.target.text, q.oldContent));
           });
         if (!freshOk.length && !updatesOk.length && !memsOk.length
-          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c); return; }
+          && !freshRefresh.length && !updatesRefresh.length && !memsRefresh.length) { advance((c) => c, true); return; }
         const now = Date.now();
         const stamps = () => {
           const cur = ref.current.chats[chatObj.id];
@@ -10770,15 +10963,13 @@ function Main({ storage, storageKind, storageFailed }) {
                 oldContent: String(u.target.text ?? ''), source: 'extract', atLen: pathLen });
           }
           return work;
-        });
+        }, true);
       } catch (e) {
-        console.warn('Emergent lore extraction failed:', e);
-        advance((c) => c);
+        failAdvance(e);
       }
     } catch (e) {
       // Pre-aux failure (digest build, path derivation): same degrade rule.
-      console.warn('Emergent lore extraction failed:', e);
-      advance((c) => c);
+      failAdvance(e);
     }
   }
 
@@ -11940,7 +12131,7 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[c.id];
       if (!cur) { setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() }); return; }
       const store = pushMemory(cur, r.text);
-      saveChat({ ...cur, memoryStore: { ...store, cursor: cur.memoryStore?.cursor ?? 0 } });
+      saveChat({ ...cur, memoryStore: { ...clearStoreError(store, 'summary'), cursor: cur.memoryStore?.cursor ?? 0 } });
       setComposerInject({ chatId: c.id, hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
     } catch (e) {
       setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
@@ -11954,7 +12145,12 @@ function Main({ storage, storageKind, storageFailed }) {
     const c = ref.current.chats[ui.chatId]; const n = c?.messages[nodeId];
     if (!n) return;
     const swipes = n.swipes.slice();
-    swipes[n.activeSwipe] = { ...swipes[n.activeSwipe], text };
+    // An edit rewrites the text, so the old logprob tape is stale — drop it
+    // (ProbsView spans and regen-from-token align against the pre-edit text
+    // otherwise; the ▦/↻ affordances hide via the hasProbs check). usage,
+    // genMs and think stay: metadata of the original generation.
+    const { tokens, ...sw } = swipes[n.activeSwipe];
+    swipes[n.activeSwipe] = { ...sw, text };
     saveChat({ ...c, messages: { ...c.messages, [nodeId]: { ...n, swipes, edited: true } } });
   };
   const onRegenerate = (nodeId) => {
@@ -12166,10 +12362,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // Deleting a scenario/character/persona leaves dangling links in chats that
   // reference it — the confirm names the affected-chat count so it's an
   // informed choice. (Sidebar/PersonaManager call these handlers directly.)
-  const onDeleteScenario = (id) => {
+  const onDeleteScenario = async (id) => {
     const refs = Object.values(ref.current.chats).filter(c => c.scenarioId === id).length;
     const name = ref.current.scenarios[id]?.name ?? id;
-    if (!confirm(`Delete scenario "${name}"?${refs ? `\n${refs} chat(s) use it — they keep working but lose its lore/prompt.` : ''}`)) return;
+    if (!await uiConfirm(`Delete scenario "${name}"?${refs ? `\n${refs} chat(s) use it — they keep working but lose its lore/prompt.` : ''}`, { danger: true, okLabel: 'Delete' })) return;
     removeScenario(id);
     if (ui.scenarioId === id) setUi(u => ({ ...u, scenarioId: null }));
   };
@@ -12194,10 +12390,10 @@ function Main({ storage, storageKind, storageFailed }) {
       : { chatId: c.id, scenarioId: null, characterId: char.id }), ...(overlayPanes ? { sidebarCollapsed: true } : {}) }));
     setModal(null);
   };
-  const onDeleteCharacter = (id) => {
+  const onDeleteCharacter = async (id) => {
     const refs = Object.values(ref.current.chats).filter(c => c.characterIds?.includes(id)).length;
     const name = ref.current.characters[id]?.name ?? id;
-    if (!confirm(`Delete character "${name}"?${refs ? `\n${refs} chat(s) link to it — the link becomes inert.` : ''}`)) return;
+    if (!await uiConfirm(`Delete character "${name}"?${refs ? `\n${refs} chat(s) link to it — the link becomes inert.` : ''}`, { danger: true, okLabel: 'Delete' })) return;
     removeCharacter(id); // links dangle in scenarios/chats — resolveCharacters skips them
     if (ui.characterId === id) setUi(u => ({ ...u, characterId: null }));
   };
@@ -12671,7 +12867,7 @@ function Main({ storage, storageKind, storageFailed }) {
         personas=${personas} scenario=${chat ? scenarios[chat.scenarioId] : null} characters=${characters}
         settings=${settings} onUpdateSettings=${updateSettings}
         onExport=${() => chat && onExportChat(chat)}
-        onDelete=${() => { if (chat && confirm(`Delete chat "${chat.name}"?`)) onDeleteChat(chat.id); }}
+        onDelete=${async () => { if (chat && await uiConfirm(`Delete chat "${chat.name}"?`, { danger: true, okLabel: 'Delete' })) onDeleteChat(chat.id); }}
         dateFormat=${settings.dateFormat} memoryEvery=${settings.memoryEvery}
         onUpdateChat=${saveChat}
         onSummarize=${() => chat && summarizeNow(chat)} summarizing=${summarizing}
@@ -12706,10 +12902,10 @@ function Main({ storage, storageKind, storageFailed }) {
         onGenerateAvatar=${settings.imagesEnabled ? generateAvatar : null}
         defaultPersonaId=${settings.defaultPersonaId ?? ''}
         onSetDefault=${(id) => updateSettings({ defaultPersonaId: id })}
-        onRemove=${(id) => {
+        onRemove=${async (id) => {
           const refs = Object.values(ref.current.chats).filter(c => c.personaId === id).length;
           const name = ref.current.personas[id]?.name ?? id;
-          if (confirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`)) {
+          if (await uiConfirm(`Delete persona "${name}"?${refs ? `\n${refs} chat(s) use it — they fall back to the default {{user}} name.` : ''}`, { danger: true, okLabel: 'Delete' })) {
             if ((settings.defaultPersonaId ?? '') === id) updateSettings({ defaultPersonaId: '' });
             removePersona(id);
           }
@@ -12765,7 +12961,7 @@ function Main({ storage, storageKind, storageFailed }) {
         onOpenBranches=${() => onOpenBranches(modal.chatId)}
         onAcceptQueue=${onAcceptQueue} onDismissQueue=${onDismissQueue}
         onExport=${() => onExportChat(chats[modal.chatId])}
-        onDelete=${() => { if (confirm(`Delete chat "${chats[modal.chatId].name}"?`)) { onDeleteChat(modal.chatId); setModal(null); } }}
+        onDelete=${async () => { if (await uiConfirm(`Delete chat "${chats[modal.chatId].name}"?`, { danger: true, okLabel: 'Delete' })) { onDeleteChat(modal.chatId); setModal(null); } }}
         onClose=${() => setModal(null)} /><//>`}
     ${modal?.kind === 'branches' && chats[modal.chatId] && html`
       <${ErrorBoundary} name="branches"><${Modal} title="Chat branches" wide onClose=${() => setModal(null)}>
@@ -12908,7 +13104,7 @@ function App() {
       window.removeEventListener('focus', sync);
     };
   }, [storage]);
-  if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><//>`;
+  if (storage) return html`<${ErrorBoundary} name="app"><${Main} storage=${storage} storageKind=${storageKind} storageFailed=${storageFailed} /><${DialogHost} /><//>`;
   if (gate) return html`<${ServerGate} error=${gate.error}
     onRetry=${(token) => {
       if (token != null) try {

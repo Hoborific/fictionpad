@@ -201,7 +201,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {
@@ -315,7 +315,7 @@ function ScenarioEditor({ scenario, characters = {}, settings = null, onSave, on
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
-  const guardClose = () => { if (!dirty || confirm('Discard unsaved changes?')) onClose(); };
+  const guardClose = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) onClose(); };
   const runGenerate = async (promptText) => {
     setGenBusy(true); setGenError(null);
     try {

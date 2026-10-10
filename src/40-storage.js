@@ -27,10 +27,15 @@ function collectImgrefIds(value, into = new Set()) {
 // UI → storage hydration channel. Components that render an entity's images
 // call requestHydration(store, key) when they meet an unresolved sentinel;
 // App registers the active adapter at boot. No-op unless the adapter lazily
-// loads images (server storage with the images capability).
+// loads images (server storage with the images capability). hydrationFailed
+// tells a failed pull (parked for the session) apart from a loading one, and
+// retryHydration is the explicit user retry (click on a failed placeholder) —
+// both are inert no-ops on eager adapters.
 let _hydrator = null;
 function registerHydrator(storage) { _hydrator = storage?.lazyImages ? storage : null; }
 function requestHydration(store, key) { if (store && key) _hydrator?.hydrate(store, key); }
+function hydrationFailed(store, key) { return !!(store && key && _hydrator?.hydrationFailed(store, key)); }
+function retryHydration(store, key) { if (store && key) _hydrator?.retryHydration(store, key); }
 
 // gzip a string via CompressionStream (feature-detected by the caller).
 async function gzipString(s) {
@@ -184,9 +189,11 @@ class AbstractStorage extends EventTarget {
     this.flush();
   }
   // Lazy-image hydration — base adapters are eager (boot rehydrates
-  // everything), so both are no-ops here. ServerDBAdapter overrides.
+  // everything), so all of these are no-ops here. ServerDBAdapter overrides.
   async hydrate() {}
   async hydrateAll() {}
+  hydrationFailed() { return false; }
+  retryHydration() {}
   // Distinct image ids referenced anywhere in the live cache right now, in
   // EITHER form: unresolved imgref sentinels (lazy mode) count directly,
   // data URLs count via the in-memory id → url map.

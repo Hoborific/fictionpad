@@ -1430,3 +1430,21 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 - Newly registered custom samplers (Settings → Generation) now default to being offered as per-chat overrides in the chat panel's Samplers tab — previously a fresh sampler had to be ticked in the "Per-chat overrides" list by hand. Renaming a sampler's request key carries its override membership over, and clearing/removing the key drops the stale entry.
 - The `/proxy` 403 rejection now says exactly why the target was refused: a non-allowlisted host names the active `FICTIONPAD_PROXY_ALLOW` list, and the no-auth open-relay guard states plainly that `FICTIONPAD_PROXY_ALLOW` is not set and which host to add. API error paths also read plain-text error bodies now (the proxy rejects with `text/plain`, so its reason previously never reached the UI — a bare "403 Forbidden" was all the user saw).
 - Streaming writes are coalesced: while a generation streams, the chat's save debounce stretches from 500 ms to 3 s (the final flush fires the moment the stream ends), so a long reply no longer re-uploads the whole chat row twice a second. Cache and UI updates stay per-token; only the network cadence changes.
+
+
+### v4.12.1
+
+**Fixed**
+
+- Editing a message no longer leaves a stale logprob tape behind: the edit drops the tape with the old text, so the ▦ probs view and "↻ from here" (which hide automatically) can't act on token spans aligned to the pre-edit text. Generation metadata (usage, timing, thinking) is kept.
+- A failed auto-summary or lore maintenance pass no longer fails invisibly: the pass still skips its window on purpose (a failing endpoint must not re-banner after every generation), but the error is now recorded on the chat and shown as a dismissible warning row in the Memory tab, naming the pass and that its window was skipped. The record clears on the next successful pass of that kind.
+- Lazy image hydration (server storage) no longer loads forever when an image row is genuinely missing: a failed pull is remembered for the session, so surfaces stop re-firing the doomed fetch on every render and show a small "✕ image unavailable" note instead of the endless "Loading…" placeholder — clicking the note retries, and a chat whose image arrives later (focus sync, another device) recovers on its own. Avatars with an unresolvable image keep their letter tile, dimmed, instead of re-pulling on every mount. No error toast: a missing mirror row is a local placeholder matter, not an alarm.
+- The `/proxy` no longer forwards the browser's `Accept-Encoding` header upstream. The relay streams the upstream body verbatim and never decompresses, so an upstream that honored the header (a compressing gateway in front of the backend) would have handed the browser gzipped bytes mislabeled as plain — upstreams now always answer identity, which is what SSE streaming needs anyway.
+
+**Added**
+
+- Memory notes can be edited inline in the Memory tab (✎ on a card): the note body becomes a textarea with Save/Cancel, and saving rewrites the text in place — a deliberate present-tense edit, so it is rewind-exempt like other user edits and leaves pin/supersede state untouched (editing a superseded note is allowed; it stays hidden by derivation).
+
+**Changed**
+
+- Every native `confirm()`/`prompt()` dialog is now a themed app modal instead: deletes and discards get danger styling with a named action button (Delete, Discard, Overwrite…), text prompts (rename chat, profile name) are a prefilled input with Enter to submit and Escape to cancel, and a confirm opened from inside another modal (settings, an editor) stacks on top — one Escape closes just the confirm. No more unthemed, browser-blocking popups.

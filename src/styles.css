@@ -334,6 +334,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
   background: hsl(var(--speaker-h, 0) var(--c-speaker-s) var(--c-speaker-l));
 }
 .avatar.click { cursor: pointer; }
+/* Sentinel avatar whose hydration already failed (missing Images row): the
+   letter tile stays (column alignment) but reads as unavailable. */
+.avatar.avatar-dead { opacity: 0.45; filter: grayscale(0.6); }
 .msg.with-av { display: flex; gap: 10px; }
 .msg .msg-av { flex: none; width: 40px; padding-top: 1px; } /* fixed width: an empty slot (imageless user/Narrator) still spaces the column; optically level with the meta row */
 .msg .msg-body { flex: 1; min-width: 0; } /* min-width: bubbles shrink instead of overflowing */
@@ -347,6 +350,9 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .modal.lightbox .lb-img { max-width: 100%; max-height: 72vh; object-fit: contain; border-radius: 6px; }
 /* Sentinel src (lazy image not yet hydrated): muted stand-in for the image. */
 .modal.lightbox .lb-loading { color: var(--c-dim); font-size: 14px; padding: 40px 60px; }
+/* Hydration failed (missing Images row): the job-failure note + retry. */
+.modal.lightbox .lb-error { color: var(--c-dim); font-size: 14px; padding: 40px 60px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .modal.lightbox .lb-cap { color: var(--c-dim); font-size: 13px; text-align: center; }
 .modal.lightbox .lb-takes { display: flex; align-items: center; gap: 10px; }
 
@@ -433,6 +439,8 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 }
 @keyframes shimmer { 50% { opacity: 0.45; } }
 .msg .img-error { color: var(--c-dim); font-size: 12px; }
+.msg .img-error.retry { cursor: pointer; }
+.msg .img-error.retry:hover { color: var(--c-text); }
 .msg .swipe-img-wrap {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   max-width: 100%; margin-top: 6px;

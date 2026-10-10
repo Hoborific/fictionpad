@@ -7,9 +7,9 @@ function PersonaManager({ personas, onUpsert, onRemove, onClose, defaultPersonaI
   const list = Object.values(personas).sort((a, b) => a.name.localeCompare(b.name));
   const startEdit = (p) => { setEditing(p); setDirty(false); };
   const edit = (next) => { setDirty(true); setEditing(next); };
-  const cancelEdit = () => { if (!dirty || confirm('Discard unsaved changes?')) setEditing(null); };
-  const guardClose = () => {
-    if (editing && dirty && !confirm('Discard unsaved changes?')) return;
+  const cancelEdit = async () => { if (!dirty || await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) setEditing(null); };
+  const guardClose = async () => {
+    if (editing && dirty && !await uiConfirm('Discard unsaved changes?', { danger: true, okLabel: 'Discard' })) return;
     onClose();
   };
   return html`

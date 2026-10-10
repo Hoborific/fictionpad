@@ -551,6 +551,15 @@ try {
   ok(echoed2.authorization === 'Bearer llm-key-123', 'proxy: X-Real-Authorization mapped to upstream Authorization');
   ok(!('x-real-authorization' in echoed2), 'proxy: X-Real-Authorization itself NOT forwarded upstream');
 
+  // The relay streams the upstream body verbatim and does not decompress, so
+  // the client's Accept-Encoding must never reach the upstream — otherwise a
+  // compressing gateway would answer gzipped bytes labeled identity. The
+  // proxy pins identity instead (undici's own "gzip, deflate" default would
+  // be just as wrong).
+  const echoed3 = await (await viaProxy({ ...basic, 'Accept-Encoding': 'gzip' })).json();
+  ok(echoed3['accept-encoding'] === 'identity',
+    'proxy: Accept-Encoding pinned to identity upstream (client header not forwarded)');
+
   // Token-only deployment (server B, no X-Real-Authorization): the server
   // Bearer token must not leak upstream either.
   const echoedB = await (await fetch(`http://127.0.0.1:${portB}/proxy/http://127.0.0.1:${portU}/echo`, { headers: auth })).json();

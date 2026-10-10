@@ -63,7 +63,9 @@
 //   the wire and the decompressed payload). The ~1 MB app HTML is served
 //   gzipped from a cache keyed on file path + mtime (the per-request re-read
 //   stays). /proxy and /backup traffic is never re-encoded. /version
-//   advertises the capability (gzip: true).
+//   advertises the capability (gzip: true). For the same reason the proxy
+//   pins Accept-Encoding: identity on upstream requests (the client's header
+//   is never forwarded) — the relay does not decompress.
 // Shutdown: SIGINT/SIGTERM close the db — closing the last WAL connection
 //   checkpoints it and removes the -wal/-shm sidecars — then exit 0.
 
@@ -678,8 +680,15 @@ async function handleRequest(req, res) {
       if (HOP_BY_HOP.has(lk) || lk === 'cookie' || lk === 'x-real-authorization') continue;
       if (lk === 'authorization' && BASIC_HEADER && safeEqual(v, BASIC_HEADER)) continue; // never leak our own Basic creds upstream
       if (lk === 'authorization' && TOKEN && safeEqual(v, `Bearer ${TOKEN}`)) continue;   // ...nor our own Bearer token
+      // Never forward the client's Accept-Encoding: an upstream that takes it
+      // would answer gzipped, and the streaming relay below does NOT
+      // decompress — the browser would get compressed bytes labeled identity.
+      // (Left unset, undici would add its own "gzip, deflate" default, so pin
+      // identity explicitly — also what SSE needs anyway.)
+      if (lk === 'accept-encoding') continue;
       if (typeof v === 'string') headers[k] = v;
     }
+    headers['accept-encoding'] = 'identity';
     // The app sends the LLM key as X-Real-Authorization when routing through
     // this proxy; map it to the upstream Authorization header.
     const realAuth = req.headers['x-real-authorization'];
