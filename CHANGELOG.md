@@ -1448,3 +1448,14 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 **Changed**
 
 - Every native `confirm()`/`prompt()` dialog is now a themed app modal instead: deletes and discards get danger styling with a named action button (Delete, Discard, Overwrite…), text prompts (rename chat, profile name) are a prefilled input with Enter to submit and Escape to cancel, and a confirm opened from inside another modal (settings, an editor) stacks on top — one Escape closes just the confirm. No more unthemed, browser-blocking popups.
+
+### v4.12.2
+
+**Changed**
+
+- The default memory-summary, lore-extraction, and /recap prompts were rewritten for noticeably better notes: the summary pass now works from a coverage contract (decisions, promises, revelations, relationship shifts, loose ends, with a verbatim quote when exact wording matters) and is told WHY its length bound exists; all three passes pin their output to the conversation's own language instead of drifting to English; and compression guidance now says what survives (names, promises, debts, injuries, betrayals, secrets) and what doesn't (weather and scenery). If you never edited these prompts, yours upgrade automatically; custom prompts are untouched.
+
+**Fixed**
+
+- The memory-note edit field now sizes to its content instead of opening as a fixed 3-row box: the textarea grows with the note (capped, then scrolls), refits on every keystroke, and opens focused with the cursor at the end.
+- Sending a message clears the composer again (server-storage mode): the v4.12 freshness guard made sends asynchronous, and the composer's old setTimeout-based acceptance check fired mid-check, misread the send as rejected, and restored the draft you just sent. Acceptance is now reported by the send path itself — the composer awaits it and clears (or, on a genuine rejection, keeps) the draft on that signal.
