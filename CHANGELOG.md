@@ -1459,3 +1459,18 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 
 - The memory-note edit field now sizes to its content instead of opening as a fixed 3-row box: the textarea grows with the note (capped, then scrolls), refits on every keystroke, and opens focused with the cursor at the end.
 - Sending a message clears the composer again (server-storage mode): the v4.12 freshness guard made sends asynchronous, and the composer's old setTimeout-based acceptance check fired mid-check, misread the send as rejected, and restored the draft you just sent. Acceptance is now reported by the send path itself — the composer awaits it and clears (or, on a genuine rejection, keeps) the draft on that signal.
+
+### v4.12.3
+
+**Fixed**
+
+- Async/await audit follow-up to v4.12.2 — thirteen races and state bugs found by reviewing every promise boundary, all in the generation-guard window, the storage sync, or stale-snapshot writes:
+- Two rapid generation entries (Send, Regenerate, ▶⁺, /pov…) within the freshness-check round trip could both pass the one-generation-at-a-time guard and run two concurrent streams on the same chat — Stop only aborted the newer one. The guard now claims a pending slot synchronously, so a second entry waits out like any busy state.
+- A send/regenerate whose freshness check came back "fresh" still worked from the pre-check chat snapshot, silently reverting anything that landed during the check — a completed image's patch (bubble stuck on the pending shimmer), an enrichment write, a queue accept, an edit. The entry now re-reads the live chat after the check. Deleting a chat during its own send's freshness check no longer resurrects the chat.
+- Suggestion-chip and /improve text no longer reappears in the composer: the inject was never cleared, so switching chats and back re-applied it over your edited draft (or restored an already-sent message). The composer now acknowledges consumption.
+- Saving the lore-piece popout no longer wipes tool/enrichment writes that landed while it was open: the revision log (update_character history) and an enrichment-generated avatar now survive Save unless you actually changed the avatar fields, and the save merges over the live chat/scenario instead of a render-time snapshot.
+- Server-storage sync hardening (silent data-loss windows, all narrow timing): the freshness check now flushes pending writes before comparing revisions and re-checks dirtiness after its fetch (a mid-flight save could be overwritten by a pull, then "Keep mine" would push the pulled copy); focus sync treats the actively streaming chat as dirty (the 3 s coalesced flush left it unqueued) and re-checks dirtiness after each pull; image garbage collection skips its sweep while any write is queued or conflicted instead of reclaiming rows a failed save still references.
+- The freshness check's fetches carry a 10 s timeout — a black-holed server connection no longer leaves the composer's Send latched with no Stop button.
+- A manual "Summarize now" clicked mid-generation no longer double-records the same window when the generation-end cadence pass fires too; one summary pass runs at a time.
+- Renaming a chat no longer clobbers background writes (focus sync, memory passes) that landed while the rename prompt was open.
+- A stream that ends early on a malformed chunk or in-stream error now cancels the response body — the backend stops generating instead of burning tokens into a dead connection.

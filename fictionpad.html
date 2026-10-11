@@ -1007,7 +1007,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.2';
+const APP_VERSION = '4.12.3';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -3801,6 +3801,12 @@ class AbstractStorage extends EventTarget {
     clearTimeout(this.gcTimer);
     this.gcTimer = setTimeout(async () => {
       try { await this.flush(); } catch {}
+      // A write that failed to land (still queued) or parked as a conflict can
+      // reference image rows the server never saw the entity for — the flush
+      // above resolves rather than rejects on failure, so a server-side sweep
+      // would reclaim those rows from under the retry/resolution. Skip this
+      // pass; the next delete/overwrite/boot sweep retries.
+      if (this.saveQueue.size || this.conflicts.size) return;
       await this.collectImages();
     }, 2000);
   }
@@ -4086,7 +4092,7 @@ class ServerDBAdapter extends AbstractStorage {
     }
     return res;
   }
-  async #post(route, body) {
+  async #post(route, body, { timeoutMs = 0 } = {}) {
     const json = JSON.stringify(body ?? {});
     let payload = json, extra = {};
     // Wire compression for fat payloads (big chats, data-URL image rows) —
@@ -4095,7 +4101,12 @@ class ServerDBAdapter extends AbstractStorage {
       try { payload = await gzipString(json); extra = { 'Content-Encoding': 'gzip' }; }
       catch { payload = json; }
     }
-    const res = await this.#fetch(route, { method: 'POST', body: payload }, extra);
+    const opts = { method: 'POST', body: payload };
+    // Bounded waits for UI-blocking checks (genGuard's freshness round trip) —
+    // a black-holed connection must not latch the composer's send forever.
+    if (timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      opts.signal = AbortSignal.timeout(timeoutMs);
+    const res = await this.#fetch(route, opts, extra);
     if (!res.ok) {
       let msg = `HTTP ${res.status}`, json2 = null;
       try { json2 = await res.json(); msg = json2?.error ?? msg; } catch {}
@@ -4557,8 +4568,12 @@ class ServerDBAdapter extends AbstractStorage {
     try {
       await this.flush(); // local writes land first so the diff can't undo them
       const remote = (await this.#post('/list', { revs: true }))?.revs ?? {};
+      // Streaming counts as dirty: the 3 s coalesced flush leaves windows
+      // where the streaming chat's key isn't queued, and a mid-stream pull
+      // would be silently re-clobbered by the generation's overlay writes.
       const dirty = (store, key) =>
-        this.saveQueue.has(`${store}/${key}`) || this.conflicts.has(`${store}/${key}`);
+        this.saveQueue.has(`${store}/${key}`) || this.conflicts.has(`${store}/${key}`)
+        || this._streamKey === `${store}/${key}`;
       let updated = 0, removed = 0;
       for (const store of STORES) {
         if (store === 'Meta') continue;
@@ -4568,6 +4583,10 @@ class ServerDBAdapter extends AbstractStorage {
           if (localRevs[key] === rev || dirty(store, key)) continue;
           try {
             const res = await this.#post('/load', { store, key, refs: true });
+            // Re-check after the round trip: a set() landing meanwhile is
+            // newer than the pull — leave it to the rev guard instead of
+            // overwriting the cache (and the rev map) under it.
+            if (dirty(store, key)) continue;
             await this.#applyRemote(store, key, res.data, Number.isInteger(res?.rev) ? res.rev : rev);
             updated++;
           } catch (e) { if (e?.status !== 404) console.warn('FictionPad: sync pull failed', e); }
@@ -4608,7 +4627,11 @@ class ServerDBAdapter extends AbstractStorage {
     this._lastFresh ??= {};
     if (this._lastFresh[id] && now - this._lastFresh[id] < 5000) return 'fresh';
     this._lastFresh[id] = now;
-    const remote = (await this.#post('/list', { revs: true }))?.revs ?? {};
+    // Local writes land first (flush chains behind an in-flight one): a rev
+    // comparison or pull against a half-flushed queue would read the key as
+    // clean and clobber edits the put is still carrying.
+    await this.flush();
+    const remote = (await this.#post('/list', { revs: true }, { timeoutMs: 10000 }))?.revs ?? {};
     this._lastSync = now; // covers the focus sync's next throttle window too
     const serverRev = (remote[store] ?? {})[key];
     const localRev = this.revs[store]?.[key];
@@ -4631,7 +4654,13 @@ class ServerDBAdapter extends AbstractStorage {
       return this.conflicts.has(id) ? 'conflict' : 'fresh';
     }
     try {
-      const res = await this.#post('/load', { store, key, refs: true });
+      const res = await this.#post('/load', { store, key, refs: true }, { timeoutMs: 10000 });
+      // A local set() landing during the round trip must win over the pull —
+      // flush it into the 409 path instead of overwriting the cache.
+      if (this.saveQueue.has(id) || this.conflicts.has(id)) {
+        await this.flush();
+        return this.conflicts.has(id) ? 'conflict' : 'fresh';
+      }
       await this.#applyRemote(store, key, res.data, Number.isInteger(res?.rev) ? res.rev : serverRev);
       return 'pulled';
     } catch (e) {
@@ -4815,6 +4844,11 @@ async function* parseEventStream(body) {
     buf += decoder.decode();
     if (buf) yield* take(buf);
   } finally {
+    // Early exit (malformed data line, in-stream error chunk, a throw in the
+    // consumer loop): cancel the body so the backend stops generating and the
+    // connection closes — releaseLock alone leaves the stream draining into
+    // the void. No-op on an already-closed or errored stream.
+    try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }
 }
@@ -5848,6 +5882,10 @@ function RevisionRow({ rev, n, onRestore = null }) {
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
 function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
+  // Mount-time piece: the `piece` prop re-resolves live on every Main render,
+  // so Save compares the draft's avatar against THIS to tell a user edit from
+  // an enrichment write that landed while the popout was open.
+  const mountRef = useRef(piece);
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -5867,7 +5905,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
     <${Modal} title=${isNew ? 'New lore piece' : `Lore — ${piece.title || '(untitled)'}`} wide
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
+        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft, mountRef.current)}>Save</button>`}>
       <${LorePieceFields} piece=${draft} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">
@@ -7498,20 +7536,24 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       </div>
       ${editing && html`
         <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
-          onSave=${(draft) => {
+          onSave=${(draft, mountPiece) => {
             if (editing.isNew) { setPieces([...pieces, draft]); setEditing(null); return; }
             // Merge-on-save: re-read the LIVE piece — a generation completing
             // while the popout was open may have appended stamped revisions
             // (tool update, lore pass, enrichment), and wholesale replacement
             // would wipe a log that is never trimmed. The draft wins the
             // editable fields; the live piece's revision log and provenance
-            // stamps survive. A piece deleted meanwhile drops the save.
+            // stamps survive, and an enrichment avatar written mid-edit
+            // survives unless the draft's avatar fields actually changed.
+            // A piece deleted meanwhile drops the save.
             const live = pieces.find(q => q.id === draft.id);
             if (!live) { setEditing(null); return; }
             const merged = { ...draft,
               ...(live.revisions ? { revisions: live.revisions } : {}),
               ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
-                .filter(k => live[k] !== undefined).map(k => [k, live[k]])) };
+                .filter(k => live[k] !== undefined).map(k => [k, live[k]])),
+              ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+                ? { avatar: live.avatar ?? '', avatarFull: live.avatarFull ?? '' } : {}) };
             setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}
@@ -8526,7 +8568,7 @@ const COMPOSER_COMMANDS = [
   ['/theme [NAME]', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, cmdArgs = null }) {
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, onConsumeInject = null, cmdArgs = null }) {
   // Draft text seeds from ChatPane's per-chat drafts store (this component
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
@@ -8547,6 +8589,9 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     if (inject.chatId && chatId && inject.chatId !== chatId) return;
     if ('text' in inject) setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
+    // Consumed: Main clears the inject, or a remount on chat-switch-back
+    // would re-apply it over the edited draft (the effect runs per mount).
+    onConsumeInject?.();
   }, [inject]);
   // onSubmit resolves to null once the send was actually accepted (clear the
   // draft), a hint string (draft kept, hint shown), or false when Main
@@ -8664,7 +8709,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
+                  onSubmitInput, onStop, composerInject, onConsumeInject = null, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -8945,7 +8990,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
-        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${composerInject} />
+        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${composerInject} onConsumeInject=${onConsumeInject} />
     </div>`;
 }
 
@@ -10083,12 +10128,14 @@ function Main({ storage, storageKind, storageFailed }) {
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
   const [queueChipOff, setQueueChipOff] = useState({}); // chatId → pending count the notice was dismissed at (session-only)
-  const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
+  const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce } — cleared when the Composer consumes it (onConsumeInject), or a remount would re-apply it over the draft
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort, chatId } — chatId lets background writers (image jobs) defer instead of being clobbered
+  const guardPendingRef = useRef(false); // a genGuard freshness check is in flight — blocks a second generation entry until genRef can be claimed
+  const summarizeGuardRef = useRef(false); // one summarizeNow pass at a time (manual click + generation-end cadence must not double-record a window)
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
 
   // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
@@ -10565,7 +10612,11 @@ function Main({ storage, storageKind, storageFailed }) {
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
         const name = await uiPrompt('Rename chat', c.name);
-        if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
+        if (!name?.trim()) return;
+        // Re-read after the prompt — a focus-sync pull or background pass may
+        // have written the chat while it sat open.
+        const cur = ref.current.chats[chatId];
+        if (cur) saveChat({ ...cur, name: name.trim() }, { touch: false });
         return;
       }
       case 'export': return onExportChat(c);
@@ -10688,6 +10739,8 @@ function Main({ storage, storageKind, storageFailed }) {
     return rest;
   };
   async function summarizeNow(chatObj) {
+    if (summarizeGuardRef.current) return; // a second pass over the same window would double-record it
+    summarizeGuardRef.current = true;
     setSummarizing(true);
     try {
       const r = await generateMemory(chatObj);
@@ -10722,6 +10775,7 @@ function Main({ storage, storageKind, storageFailed }) {
           lastError: { kind: 'summary', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }, { touch: false });
       }
     } finally {
+      summarizeGuardRef.current = false;
       setSummarizing(false);
     }
   }
@@ -11916,18 +11970,32 @@ function Main({ storage, storageKind, storageFailed }) {
   // blocked (reason already surfaced: error toast / conflict modal) — the
   // freshness await makes acceptance asynchronous, so the composer must clear
   // its draft on THIS signal, never on a timer.
+  // guardPending closes the await window: genRef is only claimed inside
+  // runGeneration (after the check), so without it a second entry mid-check
+  // double-fires a generation. The base is re-read from the storage cache
+  // AFTER the await on every path — the pre-await snapshot would clobber
+  // writes landing mid-check (image patch, enrichment, edit), and a chat
+  // deleted locally during the check must stay deleted.
   const genGuard = (c, go) => {
     if (!generationReady(c)) return Promise.resolve(false);
+    if (guardPendingRef.current) return Promise.resolve(false);
+    guardPendingRef.current = true;
     return (async () => {
-      let base = c;
       try {
-        const state = await storage.checkFresh?.('Chats', c.id);
-        if (state === 'conflict') { setConflictOpen(true); return false; }
-        if (state === 'pulled' || state === 'removed') base = storage.get('Chats', c.id);
-        if (!base) { setError('This chat was deleted on another device.'); return false; }
-      } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
-      go(base);
-      return null;
+        let remoteGone = false;
+        try {
+          const state = await storage.checkFresh?.('Chats', c.id);
+          if (state === 'conflict') { setConflictOpen(true); return false; }
+          remoteGone = state === 'removed';
+        } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
+        const base = storage.get('Chats', c.id) ?? null;
+        if (!base) {
+          if (remoteGone) setError('This chat was deleted on another device.');
+          return false; // otherwise: deleted locally while the check was in flight
+        }
+        go(base);
+        return null;
+      } finally { guardPendingRef.current = false; }
     })();
   };
   function sendUserMessage(c, content) {
@@ -12870,7 +12938,7 @@ function Main({ storage, storageKind, storageFailed }) {
                 const c = ref.current.chats[ui.chatId];
                 if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
-              composerInject=${composerInject} auxBusy=${auxBusy}
+              composerInject=${composerInject} onConsumeInject=${() => setComposerInject(null)} auxBusy=${auxBusy}
               scrollTargetRef=${scrollTargetRef} kbdSel=${kbdSel}
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
@@ -12916,9 +12984,26 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modalPiece && html`
       <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
         allPieces=${mergedLorePieces(chatScenario, chat, characters)}
-        onSave=${(draft) => {
-          if (modal.source === 'chat') saveChat({ ...chat, lorePieces: (chat.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
-          else upsertScenario(chatScenario.id, { ...chatScenario, lorePieces: (chatScenario.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+        onSave=${(draft, mountPiece) => {
+          // Merge the draft over the LIVE piece list (re-read — a generation
+          // may have streamed mid-edit): the revision log and an
+          // enrichment-written avatar pair always survive Save; the draft owns
+          // the avatar only when the user actually changed those fields.
+          const merge = (list) => (list ?? []).map(q => q.id !== draft.id ? q : {
+            ...draft,
+            ...(q.revisions ? { revisions: q.revisions } : {}),
+            ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+              .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
+            ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+              ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}),
+          });
+          if (modal.source === 'chat') {
+            const live = ref.current.chats[chat.id];
+            if (live) saveChat({ ...live, lorePieces: merge(live.lorePieces) });
+          } else {
+            const live = ref.current.scenarios[chatScenario.id];
+            if (live) upsertScenario(live.id, { ...live, lorePieces: merge(live.lorePieces) });
+          }
           setModal(null);
         }}
         onClose=${() => setModal(null)} onGenerate=${runGen}
