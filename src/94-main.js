@@ -1963,21 +1963,26 @@ function Main({ storage, storageKind, storageFailed }) {
   // moved chat is pulled and `go` runs against the FRESH copy (read from the
   // storage cache — ref.current only catches up at the next React render);
   // an already-conflicted chat blocks on the resolution modal instead.
+  // Returns a promise resolving to null once `go` ran (accepted) or false when
+  // blocked (reason already surfaced: error toast / conflict modal) — the
+  // freshness await makes acceptance asynchronous, so the composer must clear
+  // its draft on THIS signal, never on a timer.
   const genGuard = (c, go) => {
-    if (!generationReady(c)) return;
-    (async () => {
+    if (!generationReady(c)) return Promise.resolve(false);
+    return (async () => {
       let base = c;
       try {
         const state = await storage.checkFresh?.('Chats', c.id);
-        if (state === 'conflict') { setConflictOpen(true); return; }
+        if (state === 'conflict') { setConflictOpen(true); return false; }
         if (state === 'pulled' || state === 'removed') base = storage.get('Chats', c.id);
-        if (!base) { setError('This chat was deleted on another device.'); return; }
+        if (!base) { setError('This chat was deleted on another device.'); return false; }
       } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
       go(base);
+      return null;
     })();
   };
   function sendUserMessage(c, content) {
-    genGuard(c, (base) => {
+    return genGuard(c, (base) => {
       const { chat: c1, id: userId } = appendMessage(base, base.activeLeafId, 'user', content);
       const { chat: c2, id: asstId } = appendMessage(c1, userId, 'assistant', '');
       // saveChat, not bare upsertChat: the append must reach ref.current
@@ -1990,7 +1995,7 @@ function Main({ storage, storageKind, storageFailed }) {
     });
   }
   function handleContinue(c) {
-    genGuard(c, (base) => {
+    return genGuard(c, (base) => {
       const path = getActivePath(base.messages, base.activeLeafId);
       const last = path[path.length - 1];
       if (last?.role === 'assistant' && activeText(last)) {
@@ -2002,6 +2007,10 @@ function Main({ storage, storageKind, storageFailed }) {
       }
     });
   }
+  // Return contract for the composer: a hint string (draft kept, hint shown),
+  // null (consumed — clear the draft), or genGuard's promise resolving to
+  // null/false once the freshness check settles (false = rejected, draft kept;
+  // the reason was already surfaced via toast or the conflict modal).
   function handleInput(raw) {
     const c = ref.current.chats[ui.chatId];
     if (!c) return 'Select or create a chat first.';
@@ -2013,13 +2022,12 @@ function Main({ storage, storageKind, storageFailed }) {
       const arg = sp === -1 ? '' : raw.slice(sp + 1).trim();
       if (cmd === '/ooc') {
         if (!arg) return 'Usage: /ooc <text>';
-        sendUserMessage(c, `[OOC: ${arg}]`);
-        return null;
+        return sendUserMessage(c, `[OOC: ${arg}]`);
       }
-      if (cmd === '/continue') { handleContinue(c); return null; }
+      if (cmd === '/continue') return handleContinue(c);
       if (cmd === '/pov') {
         if (!arg) return 'Usage: /pov <character> [steering text]';
-        genGuard(c, (base) => {
+        return genGuard(c, (base) => {
           // Reframe one generation around another character. The name is the
           // longest leading run of words exactly matching a known character's
           // title (so multi-word names work); any remainder is optional steering
@@ -2049,7 +2057,6 @@ function Main({ storage, storageKind, storageFailed }) {
           saveChat(c1);
           fireGeneration(c1, id, { fresh: true, pov: { name, pieceId: piece?.id ?? null, text } });
         });
-        return null;
       }
       if (cmd === '/improve') {
         if (!arg) return 'Usage: /improve <draft text>';
@@ -2060,7 +2067,7 @@ function Main({ storage, storageKind, storageFailed }) {
         const st = ref.current.settings;
         if (!st.imagesEnabled) return 'Image generation is off — enable it in Settings → Features.';
         if (!arg) return 'Usage: /image [PROMPT]';
-        genGuard(c, (base) => {
+        return genGuard(c, (base) => {
           // The pending bubble is the feedback: no text generation fires — the
           // image job patches this swipe's entry when the backend answers (or
           // marks it failed). An image-only swipe survives pruneInterrupted.
@@ -2074,7 +2081,6 @@ function Main({ storage, storageKind, storageFailed }) {
           saveChat(c2);
           runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
         });
-        return null;
       }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
       if (cmd === '/recap') {
@@ -2106,8 +2112,7 @@ function Main({ storage, storageKind, storageFailed }) {
       }
       return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME`;
     }
-    sendUserMessage(c, raw);
-    return null;
+    return sendUserMessage(c, raw);
   }
 
   // ---- aux slash commands ----

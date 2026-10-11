@@ -200,39 +200,12 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     if (text) draftsRef.current.set(chatId, text);
     else draftsRef.current.delete(chatId);
   };
-  // Send acceptance: onSubmitInput returns a hint string (draft kept) or null
-  // ("consumed"), but Main's pre-flight guard (no endpoint/model configured)
-  // drops a plain send silently while still returning null, and the Composer
-  // clears its text optimistically. Verify acceptance once Main's state has
-  // settled and restore the draft if the message never went anywhere.
-  const [draftRestore, setDraftRestore] = useState(null);
-  useEffect(() => { setDraftRestore(null); }, [composerInject]); // a fresh Main inject takes precedence
-  const latestRef = useRef(null);
-  latestRef.current = { chat, generating, auxBusy };
-  const onComposerSubmit = (text) => {
-    const chatId = chat?.id;
-    const sentAt = Date.now();
-    const res = onSubmitInput(text);
-    if (res || !chatId) return res; // hint shown, draft kept by the Composer
-    setTimeout(() => {
-      const cur = latestRef.current;
-      const p = cur.chat ? getActivePath(cur.chat.messages, cur.chat.activeLeafId) : [];
-      // Accepted = a generation/aux pass started, or the user message landed
-      // in the tree (runGeneration can still bail after the append).
-      const leafNow = p[p.length - 1];
-      const appended = leafNow?.role === 'assistant'
-        && p[p.length - 2]?.role === 'user' && activeText(p[p.length - 2]) === text;
-      // /image appends only an assistant node whose swipe carries a pending
-      // image entry — no generation, no aux, no user text — accept that too.
-      const imgJob = leafNow?.role === 'assistant'
-        && (leafNow.swipes?.[leafNow.activeSwipe ?? 0]?.images ?? [])
-          .some(e => e && (e.pending || (e.at ?? 0) >= sentAt));
-      if (cur.generating || cur.auxBusy.length || appended || imgJob) return;
-      draftsRef.current.set(chatId, text); // rejected — restore the draft
-      if (cur.chat?.id === chatId) setDraftRestore({ chatId, text, nonce: Date.now() });
-    }, 0);
-    return null;
-  };
+  // Send acceptance is Main's own report: onSubmitInput returns a hint string
+  // (draft kept), null (consumed), or genGuard's promise resolving null/false
+  // once the freshness check settles — the Composer awaits it and keeps or
+  // clears its draft on that signal. No timer-based verification here: the
+  // v4.12 freshness await made a setTimeout guess race and false-restore.
+  const onComposerSubmit = (text) => onSubmitInput(text);
   if (!chat) return html`
     <div class="main"><div class="chatlog"><div class="empty">
       <div style=${{ fontSize: '22px' }}>FictionPad</div>
@@ -309,7 +282,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
-        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${draftRestore ?? composerInject} />
+        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${composerInject} />
     </div>`;
 }
 

@@ -33,12 +33,23 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     if ('text' in inject) setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
   }, [inject]);
-  const send = () => {
+  // onSubmit resolves to null once the send was actually accepted (clear the
+  // draft), a hint string (draft kept, hint shown), or false when Main
+  // rejected it silently (endpoint guard, freshness conflict — already
+  // surfaced via toast/modal, draft kept). Acceptance is asynchronous: the
+  // freshness guard awaits a server round trip before appending, so the
+  // clear must wait for the real outcome, never a timer. `sending` blocks a
+  // double-Enter while that await is in flight (the text is still in the box).
+  const [sending, setSending] = useState(false);
+  const send = async () => {
     const t = text.trim();
-    if (!t) return;
-    const res = onSubmit(t); // returns an error hint string, or null when consumed
-    if (res) setHint(res);
-    else { setText(''); setHint(null); }
+    if (!t || sending) return;
+    setSending(true);
+    try {
+      const res = await onSubmit(t);
+      if (typeof res === 'string') setHint(res);
+      else if (res !== false) { setText(''); setHint(null); }
+    } finally { setSending(false); }
   };
   // Touch devices (coarse pointer) have no Shift on the soft keyboard, so
   // Enter is always a newline there — sending is the Send button's job.
