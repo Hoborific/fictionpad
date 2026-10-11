@@ -54,7 +54,7 @@ class ServerDBAdapter extends AbstractStorage {
     }
     return res;
   }
-  async #post(route, body) {
+  async #post(route, body, { timeoutMs = 0 } = {}) {
     const json = JSON.stringify(body ?? {});
     let payload = json, extra = {};
     // Wire compression for fat payloads (big chats, data-URL image rows) —
@@ -63,7 +63,12 @@ class ServerDBAdapter extends AbstractStorage {
       try { payload = await gzipString(json); extra = { 'Content-Encoding': 'gzip' }; }
       catch { payload = json; }
     }
-    const res = await this.#fetch(route, { method: 'POST', body: payload }, extra);
+    const opts = { method: 'POST', body: payload };
+    // Bounded waits for UI-blocking checks (genGuard's freshness round trip) —
+    // a black-holed connection must not latch the composer's send forever.
+    if (timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      opts.signal = AbortSignal.timeout(timeoutMs);
+    const res = await this.#fetch(route, opts, extra);
     if (!res.ok) {
       let msg = `HTTP ${res.status}`, json2 = null;
       try { json2 = await res.json(); msg = json2?.error ?? msg; } catch {}
@@ -525,8 +530,12 @@ class ServerDBAdapter extends AbstractStorage {
     try {
       await this.flush(); // local writes land first so the diff can't undo them
       const remote = (await this.#post('/list', { revs: true }))?.revs ?? {};
+      // Streaming counts as dirty: the 3 s coalesced flush leaves windows
+      // where the streaming chat's key isn't queued, and a mid-stream pull
+      // would be silently re-clobbered by the generation's overlay writes.
       const dirty = (store, key) =>
-        this.saveQueue.has(`${store}/${key}`) || this.conflicts.has(`${store}/${key}`);
+        this.saveQueue.has(`${store}/${key}`) || this.conflicts.has(`${store}/${key}`)
+        || this._streamKey === `${store}/${key}`;
       let updated = 0, removed = 0;
       for (const store of STORES) {
         if (store === 'Meta') continue;
@@ -536,6 +545,10 @@ class ServerDBAdapter extends AbstractStorage {
           if (localRevs[key] === rev || dirty(store, key)) continue;
           try {
             const res = await this.#post('/load', { store, key, refs: true });
+            // Re-check after the round trip: a set() landing meanwhile is
+            // newer than the pull — leave it to the rev guard instead of
+            // overwriting the cache (and the rev map) under it.
+            if (dirty(store, key)) continue;
             await this.#applyRemote(store, key, res.data, Number.isInteger(res?.rev) ? res.rev : rev);
             updated++;
           } catch (e) { if (e?.status !== 404) console.warn('FictionPad: sync pull failed', e); }
@@ -576,7 +589,11 @@ class ServerDBAdapter extends AbstractStorage {
     this._lastFresh ??= {};
     if (this._lastFresh[id] && now - this._lastFresh[id] < 5000) return 'fresh';
     this._lastFresh[id] = now;
-    const remote = (await this.#post('/list', { revs: true }))?.revs ?? {};
+    // Local writes land first (flush chains behind an in-flight one): a rev
+    // comparison or pull against a half-flushed queue would read the key as
+    // clean and clobber edits the put is still carrying.
+    await this.flush();
+    const remote = (await this.#post('/list', { revs: true }, { timeoutMs: 10000 }))?.revs ?? {};
     this._lastSync = now; // covers the focus sync's next throttle window too
     const serverRev = (remote[store] ?? {})[key];
     const localRev = this.revs[store]?.[key];
@@ -599,7 +616,13 @@ class ServerDBAdapter extends AbstractStorage {
       return this.conflicts.has(id) ? 'conflict' : 'fresh';
     }
     try {
-      const res = await this.#post('/load', { store, key, refs: true });
+      const res = await this.#post('/load', { store, key, refs: true }, { timeoutMs: 10000 });
+      // A local set() landing during the round trip must win over the pull —
+      // flush it into the 409 path instead of overwriting the cache.
+      if (this.saveQueue.has(id) || this.conflicts.has(id)) {
+        await this.flush();
+        return this.conflicts.has(id) ? 'conflict' : 'fresh';
+      }
       await this.#applyRemote(store, key, res.data, Number.isInteger(res?.rev) ? res.rev : serverRev);
       return 'pulled';
     } catch (e) {

@@ -145,6 +145,12 @@ class AbstractStorage extends EventTarget {
     clearTimeout(this.gcTimer);
     this.gcTimer = setTimeout(async () => {
       try { await this.flush(); } catch {}
+      // A write that failed to land (still queued) or parked as a conflict can
+      // reference image rows the server never saw the entity for — the flush
+      // above resolves rather than rejects on failure, so a server-side sweep
+      // would reclaim those rows from under the retry/resolution. Skip this
+      // pass; the next delete/overwrite/boot sweep retries.
+      if (this.saveQueue.size || this.conflicts.size) return;
       await this.collectImages();
     }, 2000);
   }

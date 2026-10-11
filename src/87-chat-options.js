@@ -135,20 +135,24 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
       </div>
       ${editing && html`
         <${LorePieceEditor} piece=${editing.piece} isNew=${editing.isNew} allPieces=${allPieces}
-          onSave=${(draft) => {
+          onSave=${(draft, mountPiece) => {
             if (editing.isNew) { setPieces([...pieces, draft]); setEditing(null); return; }
             // Merge-on-save: re-read the LIVE piece — a generation completing
             // while the popout was open may have appended stamped revisions
             // (tool update, lore pass, enrichment), and wholesale replacement
             // would wipe a log that is never trimmed. The draft wins the
             // editable fields; the live piece's revision log and provenance
-            // stamps survive. A piece deleted meanwhile drops the save.
+            // stamps survive, and an enrichment avatar written mid-edit
+            // survives unless the draft's avatar fields actually changed.
+            // A piece deleted meanwhile drops the save.
             const live = pieces.find(q => q.id === draft.id);
             if (!live) { setEditing(null); return; }
             const merged = { ...draft,
               ...(live.revisions ? { revisions: live.revisions } : {}),
               ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
-                .filter(k => live[k] !== undefined).map(k => [k, live[k]])) };
+                .filter(k => live[k] !== undefined).map(k => [k, live[k]])),
+              ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+                ? { avatar: live.avatar ?? '', avatarFull: live.avatarFull ?? '' } : {}) };
             setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}

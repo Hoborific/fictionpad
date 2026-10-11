@@ -134,12 +134,14 @@ function Main({ storage, storageKind, storageFailed }) {
   const [summarizing, setSummarizing] = useState(false);
   const [suggestions, setSuggestions] = useState(null); // { chatId, nodeId, swipe, loading, items } | null
   const [queueChipOff, setQueueChipOff] = useState({}); // chatId → pending count the notice was dismissed at (session-only)
-  const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce }
+  const [composerInject, setComposerInject] = useState(null); // { text?, hint?, nonce } — cleared when the Composer consumes it (onConsumeInject), or a remount would re-apply it over the draft
   const [auxBusy, setAuxBusy] = useState([]); // kinds of in-flight aux calls ('improve', 'generate', …)
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
   const genRef = useRef(null); // { abort, chatId } — chatId lets background writers (image jobs) defer instead of being clobbered
+  const guardPendingRef = useRef(false); // a genGuard freshness check is in flight — blocks a second generation entry until genRef can be claimed
+  const summarizeGuardRef = useRef(false); // one summarizeNow pass at a time (manual click + generation-end cadence must not double-record a window)
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
 
   // Aux-call observability: memory/lore-extract/suggestions//improve//recap are
@@ -616,7 +618,11 @@ function Main({ storage, storageKind, storageFailed }) {
       case 'settings': return openChatPanel(chatId, 'chat'); // per-chat settings live on the Chat tab
       case 'rename': {
         const name = await uiPrompt('Rename chat', c.name);
-        if (name?.trim()) saveChat({ ...c, name: name.trim() }, { touch: false });
+        if (!name?.trim()) return;
+        // Re-read after the prompt — a focus-sync pull or background pass may
+        // have written the chat while it sat open.
+        const cur = ref.current.chats[chatId];
+        if (cur) saveChat({ ...cur, name: name.trim() }, { touch: false });
         return;
       }
       case 'export': return onExportChat(c);
@@ -739,6 +745,8 @@ function Main({ storage, storageKind, storageFailed }) {
     return rest;
   };
   async function summarizeNow(chatObj) {
+    if (summarizeGuardRef.current) return; // a second pass over the same window would double-record it
+    summarizeGuardRef.current = true;
     setSummarizing(true);
     try {
       const r = await generateMemory(chatObj);
@@ -773,6 +781,7 @@ function Main({ storage, storageKind, storageFailed }) {
           lastError: { kind: 'summary', at: Date.now(), error: String(e?.message ?? e).slice(0, 300) } } }, { touch: false });
       }
     } finally {
+      summarizeGuardRef.current = false;
       setSummarizing(false);
     }
   }
@@ -1967,18 +1976,32 @@ function Main({ storage, storageKind, storageFailed }) {
   // blocked (reason already surfaced: error toast / conflict modal) — the
   // freshness await makes acceptance asynchronous, so the composer must clear
   // its draft on THIS signal, never on a timer.
+  // guardPending closes the await window: genRef is only claimed inside
+  // runGeneration (after the check), so without it a second entry mid-check
+  // double-fires a generation. The base is re-read from the storage cache
+  // AFTER the await on every path — the pre-await snapshot would clobber
+  // writes landing mid-check (image patch, enrichment, edit), and a chat
+  // deleted locally during the check must stay deleted.
   const genGuard = (c, go) => {
     if (!generationReady(c)) return Promise.resolve(false);
+    if (guardPendingRef.current) return Promise.resolve(false);
+    guardPendingRef.current = true;
     return (async () => {
-      let base = c;
       try {
-        const state = await storage.checkFresh?.('Chats', c.id);
-        if (state === 'conflict') { setConflictOpen(true); return false; }
-        if (state === 'pulled' || state === 'removed') base = storage.get('Chats', c.id);
-        if (!base) { setError('This chat was deleted on another device.'); return false; }
-      } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
-      go(base);
-      return null;
+        let remoteGone = false;
+        try {
+          const state = await storage.checkFresh?.('Chats', c.id);
+          if (state === 'conflict') { setConflictOpen(true); return false; }
+          remoteGone = state === 'removed';
+        } catch { /* offline — proceed; the save/conflict path stays the backstop */ }
+        const base = storage.get('Chats', c.id) ?? null;
+        if (!base) {
+          if (remoteGone) setError('This chat was deleted on another device.');
+          return false; // otherwise: deleted locally while the check was in flight
+        }
+        go(base);
+        return null;
+      } finally { guardPendingRef.current = false; }
     })();
   };
   function sendUserMessage(c, content) {
@@ -2921,7 +2944,7 @@ function Main({ storage, storageKind, storageFailed }) {
                 const c = ref.current.chats[ui.chatId];
                 if (c && !auxBusy.length) fetchSuggestions(c, c.activeLeafId);
               }}
-              composerInject=${composerInject} auxBusy=${auxBusy}
+              composerInject=${composerInject} onConsumeInject=${() => setComposerInject(null)} auxBusy=${auxBusy}
               scrollTargetRef=${scrollTargetRef} kbdSel=${kbdSel}
               onSubmitInput=${handleInput}
               onStop=${() => { genRef.current?.abort.abort(); for (const c of auxCtls.current) c.abort(); }}
@@ -2967,9 +2990,26 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modalPiece && html`
       <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
         allPieces=${mergedLorePieces(chatScenario, chat, characters)}
-        onSave=${(draft) => {
-          if (modal.source === 'chat') saveChat({ ...chat, lorePieces: (chat.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
-          else upsertScenario(chatScenario.id, { ...chatScenario, lorePieces: (chatScenario.lorePieces ?? []).map(q => q.id === draft.id ? draft : q) });
+        onSave=${(draft, mountPiece) => {
+          // Merge the draft over the LIVE piece list (re-read — a generation
+          // may have streamed mid-edit): the revision log and an
+          // enrichment-written avatar pair always survive Save; the draft owns
+          // the avatar only when the user actually changed those fields.
+          const merge = (list) => (list ?? []).map(q => q.id !== draft.id ? q : {
+            ...draft,
+            ...(q.revisions ? { revisions: q.revisions } : {}),
+            ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+              .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
+            ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+              ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}),
+          });
+          if (modal.source === 'chat') {
+            const live = ref.current.chats[chat.id];
+            if (live) saveChat({ ...live, lorePieces: merge(live.lorePieces) });
+          } else {
+            const live = ref.current.scenarios[chatScenario.id];
+            if (live) upsertScenario(live.id, { ...live, lorePieces: merge(live.lorePieces) });
+          }
           setModal(null);
         }}
         onClose=${() => setModal(null)} onGenerate=${runGen}

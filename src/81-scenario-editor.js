@@ -196,6 +196,10 @@ function RevisionRow({ rev, n, onRestore = null }) {
 // stays with Save, and id/provenance (createdBy/atLen) survive untouched.
 function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate, onGenerateAvatar = null }) {
   const [draft, setDraft] = useState(() => normalizeLorePiece(deepClone(piece)));
+  // Mount-time piece: the `piece` prop re-resolves live on every Main render,
+  // so Save compares the draft's avatar against THIS to tell a user edit from
+  // an enrichment write that landed while the popout was open.
+  const mountRef = useRef(piece);
   const [dirty, setDirty] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
@@ -215,7 +219,7 @@ function LorePieceEditor({ piece, isNew, allPieces, onSave, onClose, onGenerate,
     <${Modal} title=${isNew ? 'New lore piece' : `Lore — ${piece.title || '(untitled)'}`} wide
       onClose=${genOpen ? () => setGenOpen(false) : guardClose}
       footer=${html`${onGenerate && html`<button class="btn" onClick=${() => { setGenError(null); setGenOpen(true); }}>✦ Generate</button>`}
-        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft)}>Save</button>`}>
+        <button class="btn primary" disabled=${!draft.title.trim()} onClick=${() => onSave(draft, mountRef.current)}>Save</button>`}>
       <${LorePieceFields} piece=${draft} others=${others} set=${set} onGenerateAvatar=${onGenerateAvatar} />
       ${(piece.revisions ?? []).length > 0 && html`
         <div class="field">

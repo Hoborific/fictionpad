@@ -1,7 +1,7 @@
 const NO_KIDS = []; // stable identity for MessageItem's memo (childless nodes)
 
 function ChatPane({ chat, persona, characterNames, characterColors, avatars = null, avatarsOn = false, generating, genElsewhere = false, suggestions, onPickSuggestion, onRerollSuggestions,
-                  onSubmitInput, onStop, composerInject, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
+                  onSubmitInput, onStop, composerInject, onConsumeInject = null, auxBusy = [], dateFormat, showThinking, imagesEnabled = false, horizon = null, scrollTargetRef = null, kbdSel = null, cmdArgs = null, queueCount = 0, ...actions }) {
   const logRef = useRef(null);
   const path = useMemo(() => getActivePath(chat?.messages, chat?.activeLeafId), [chat]);
   // Branch data for the swipe-nav badge / branch popover: parentId → children,
@@ -282,7 +282,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
         </div>`}
       <${Composer} key=${chat.id} chatId=${chat.id} generating=${!!generating || genElsewhere} busy=${auxBusy.length > 0}
         initialText=${draftsRef.current.get(chat.id) ?? ''} onDraft=${onDraft} cmdArgs=${cmdArgs}
-        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${composerInject} />
+        onSubmit=${onComposerSubmit} onStop=${onStop} inject=${composerInject} onConsumeInject=${onConsumeInject} />
     </div>`;
 }
 

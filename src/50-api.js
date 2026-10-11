@@ -172,6 +172,11 @@ async function* parseEventStream(body) {
     buf += decoder.decode();
     if (buf) yield* take(buf);
   } finally {
+    // Early exit (malformed data line, in-stream error chunk, a throw in the
+    // consumer loop): cancel the body so the backend stops generating and the
+    // connection closes — releaseLock alone leaves the stream draining into
+    // the void. No-op on an already-closed or errored stream.
+    try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }
 }

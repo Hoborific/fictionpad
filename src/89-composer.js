@@ -11,7 +11,7 @@ const COMPOSER_COMMANDS = [
   ['/theme [NAME]', 'switch the UI theme'],
 ];
 
-function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, cmdArgs = null }) {
+function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, onConsumeInject = null, cmdArgs = null }) {
   // Draft text seeds from ChatPane's per-chat drafts store (this component
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
@@ -32,6 +32,9 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     if (inject.chatId && chatId && inject.chatId !== chatId) return;
     if ('text' in inject) setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
+    // Consumed: Main clears the inject, or a remount on chat-switch-back
+    // would re-apply it over the edited draft (the effect runs per mount).
+    onConsumeInject?.();
   }, [inject]);
   // onSubmit resolves to null once the send was actually accepted (clear the
   // draft), a hint string (draft kept, hint shown), or false when Main
