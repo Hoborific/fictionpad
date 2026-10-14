@@ -2215,7 +2215,7 @@ function collectImageUrls(value, into = new Set()) {
 }
 
 // ---- connection profiles ---------------------------------------------------
-// Named bundles of connection + model + sampler settings (Settings →
+// Named bundles of connection + model + sampler + prompt settings (Settings →
 // Connection → Profiles). PROFILE_FIELDS is the exact allowlist copied both
 // ways (draft → profile on save, profile → draft on apply), so unrelated
 // settings never hitchhike and serverToken (per-device) is never stored.
@@ -2225,6 +2225,10 @@ const PROFILE_FIELDS = [
   'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey',
   'model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel',
   'samplers', 'disabledSamplers', 'customSamplers',
+  'platformPrompt', 'toolsPrompt', 'imagePrompt', 'speakerPrompt',
+  'suggestionsPrompt', 'memoryPrompt', 'loreExtractPrompt', 'improvePrompt',
+  'impersonatePrompt', 'recapPrompt',
+  'scenarioGenPrompt', 'characterGenPrompt', 'pieceGenPrompt', 'avatarGenPrompt',
 ];
 // Snapshot the profiled fields out of a settings object (draft or live).
 function profileFromSettings(st) {

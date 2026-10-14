@@ -2586,12 +2586,14 @@ section('connection profiles');
   const st = {
     endpoint: 'http://a:1', apiKey: 'k1', model: 'm1', auxModel: 'm2',
     samplers: { temperature: 0.7 }, disabledSamplers: ['top_k'], customSamplers: [{ id: 'x', key: 'k' }],
-    serverToken: 'secret', contextLength: 4096, platformPrompt: 'pp',
+    serverToken: 'secret', contextLength: 4096, platformPrompt: 'pp', memoryPrompt: 'mp',
   };
   const fields = profileFromSettings(st);
   ok(fields.endpoint === 'http://a:1' && fields.model === 'm1' && fields.samplers.temperature === 0.7,
     'profile snapshot carries connection, model and sampler fields');
-  ok(!('serverToken' in fields) && !('contextLength' in fields) && !('platformPrompt' in fields)
+  ok(fields.platformPrompt === 'pp' && fields.memoryPrompt === 'mp',
+    'profile snapshot carries prompt fields');
+  ok(!('serverToken' in fields) && !('contextLength' in fields)
     && !PROFILE_FIELDS.includes('serverToken'),
     'profile snapshot excludes the server token and unrelated settings');
   const profile = { id: 'P', name: 'p', fields: { ...fields, bogus: 1 } };
@@ -2599,10 +2601,13 @@ section('connection profiles');
   ok(applied.endpoint === 'http://a:1' && applied.apiKey === 'k1' && applied.auxModel === 'm2'
     && applied.serverToken === 'secret' && applied.contextLength === 4096,
     'apply overlays profile fields, keeps the rest of the settings');
+  ok(applied.platformPrompt === 'pp' && applied.memoryPrompt === 'mp',
+    'apply overlays prompt fields');
   ok(!('bogus' in applied), 'apply ignores keys outside the allowlist');
   ok(st.endpoint === 'http://a:1' && !('bogus' in st), 'apply does not mutate the input');
-  const cleared = applyProfile(st, { id: 'P2', name: 'q', fields: { ...fields, endpoint: 'http://b:2' } });
-  ok(cleared.endpoint === 'http://b:2' && cleared.apiKey === 'k1', 'second profile overlays only what differs');
+  const cleared = applyProfile(st, { id: 'P2', name: 'q', fields: { ...fields, endpoint: 'http://b:2', platformPrompt: 'pp2' } });
+  ok(cleared.endpoint === 'http://b:2' && cleared.apiKey === 'k1' && cleared.platformPrompt === 'pp2'
+    && cleared.memoryPrompt === 'mp', 'second profile overlays only what differs');
 }
 
 // ---- image prompt prefix (v4.10) ----

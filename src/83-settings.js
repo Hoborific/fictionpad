@@ -22,7 +22,7 @@ const DEFAULT_SETTINGS = {
   embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
   // Saved connection profiles (Settings → Connection → Profiles):
   // [{ id, name, fields }] — fields covers the PROFILE_FIELDS allowlist
-  // (connection, models, samplers); serverToken is never stored.
+  // (connection, models, samplers, prompts); serverToken is never stored.
   profiles: [],
   model: '',
   auxModel: '',
@@ -186,6 +186,10 @@ const PROFILE_GROUPS = [
     'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey']],
   ['models', ['model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel']],
   ['samplers', ['samplers', 'disabledSamplers', 'customSamplers']],
+  ['prompts', ['platformPrompt', 'toolsPrompt', 'imagePrompt', 'speakerPrompt',
+    'suggestionsPrompt', 'memoryPrompt', 'loreExtractPrompt', 'improvePrompt',
+    'impersonatePrompt', 'recapPrompt',
+    'scenarioGenPrompt', 'characterGenPrompt', 'pieceGenPrompt', 'avatarGenPrompt']],
 ];
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
@@ -287,8 +291,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
-  // Connection profiles: named snapshots of the PROFILE_FIELDS group
-  // (connection, models, samplers). Apply only patches the draft — the
+  // Connection profiles: named snapshots of the PROFILE_FIELDS groups
+  // (connection, models, samplers, prompts). Apply only patches the draft — the
   // profile takes effect when the user saves the settings form.
   const [profileSel, setProfileSel] = useState('');
   const profiles = draft.profiles ?? [];
@@ -326,6 +330,22 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       <textarea rows=${rows} value=${draft[key] ?? def} onInput=${(e) => set({ [key]: e.target.value })} /></label>
     ${hint && html`<div class="hint" style=${{ margin: '-6px 0 6px' }}>${hint}</div>`}
     <button class="btn small" style=${{ marginBottom: '10px' }} onClick=${() => set({ [key]: def })}>Reset to default</button>`;
+
+  // Every prompt field's true default (mirrors DEFAULT_SETTINGS — imagePrompt
+  // and avatarGenPrompt default to blank, which means "use the built-in").
+  const PROMPT_DEFAULTS = {
+    platformPrompt: DEFAULT_PLATFORM_PROMPT, toolsPrompt: TOOLS_PROMPT, imagePrompt: '',
+    speakerPrompt: SPEAKER_PROMPT, suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT,
+    memoryPrompt: DEFAULT_MEMORY_PROMPT, loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
+    improvePrompt: DEFAULT_IMPROVE_PROMPT, impersonatePrompt: DEFAULT_IMPERSONATE_PROMPT,
+    recapPrompt: DEFAULT_RECAP_PROMPT, scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT,
+    characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT,
+    avatarGenPrompt: '',
+  };
+  const resetAllPrompts = async () => {
+    if (!await uiConfirm('Reset every prompt on this tab to its default?', { okLabel: 'Reset all' })) return;
+    set({ ...PROMPT_DEFAULTS });
+  };
 
   // Compact numeric field for the advanced knobs. NumInput lets the user type
   // freely and clamps on blur/Enter instead of fighting every keystroke.
@@ -408,7 +428,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <button class="btn small" onClick=${saveProfile}>Save…</button>
             <button class="btn small danger" disabled=${!profileSel} onClick=${deleteSelectedProfile}>Delete</button>
           </div>`,
-          'Save the current connection, models and samplers as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
+          'Save the current connection, models, samplers and prompts as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
         ${section('API connection', html`
           <div class="grid2">
             <label class="field"><span>Endpoint</span>
@@ -796,6 +816,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'Protocol instructions are editable in the Prompts tab.')}`}
 
       ${tab === 'prompts' && html`
+        <div style=${{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
+          <button class="btn small danger" onClick=${resetAllPrompts}>Reset all prompts to defaults</button>
+        </div>
         ${section('Core', html`
           ${promptField('platformPrompt', 'Platform system prompt — lowest instruction rank; {{user}} works here', DEFAULT_PLATFORM_PROMPT, 5)}
           ${draft.toolsEnabled !== false
