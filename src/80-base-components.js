@@ -151,16 +151,40 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
 // renders as a wrapping popover instead: free typing stays, typing filters,
 // ▾ toggles the full list, click picks. Closes on outside pointerdown and on
 // Escape (stopped before it reaches the modal's own Escape handler).
+// The popover measures the space actually available before showing — against
+// the scrolling modal body when inside one (its footer would clip a taller
+// list), else the viewport — caps its height to that, and flips above the
+// input when there is more room there. Re-measures on any scroll/resize
+// while open, so a row scrolled near the modal bottom never spills.
 function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
+  const [place, setPlace] = useState({ up: false, maxH: 260 });
   const wrapRef = useRef(null);
   const inputRef = useRef(null);
   useEffect(() => {
     if (!open) return;
+    const measure = () => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const scroller = wrapRef.current.closest('.m-body');
+      const bounds = scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      const below = Math.min(bounds.bottom, window.innerHeight) - rect.bottom - 8;
+      const above = rect.top - Math.max(bounds.top, 0) - 8;
+      const up = below < 180 && above > below;
+      const maxH = Math.max(120, Math.min(up ? above : below, 320));
+      setPlace(p => (p.up === up && p.maxH === maxH) ? p : { up, maxH });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true); // capture: catches the modal body's own scroll
     const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
     window.addEventListener('pointerdown', close, true);
-    return () => window.removeEventListener('pointerdown', close, true);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      window.removeEventListener('pointerdown', close, true);
+    };
   }, [open]);
   const all = models ?? [];
   const q = (value ?? '').toLowerCase();
@@ -179,7 +203,7 @@ function ModelPicker({ value, models, placeholder, onChange }) {
     ${all.length > 0 && html`<button type="button" class="btn mp-toggle" tabindex="-1"
       title="Show fetched models"
       onClick=${() => { setTyping(false); setOpen(!open); }}>▾</button>`}
-    ${open && shown.length > 0 && html`<div class="mp-pop">
+    ${open && shown.length > 0 && html`<div class=${`mp-pop ${place.up ? 'up' : ''}`} style=${{ maxHeight: `${place.maxH}px` }}>
       ${shown.map(m => html`<button type="button" key=${m}
         class=${`mp-item ${m === value ? 'cur' : ''}`}
         onClick=${() => pick(m)}>${m}</button>`)}
