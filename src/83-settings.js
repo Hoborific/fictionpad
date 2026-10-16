@@ -272,8 +272,16 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       const { ids, ctxs } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
       setModels(ids);
       // Remember detected context lengths per model — resolveLimits uses them
-      // for the auto context/reserve knobs (Generation tab).
-      if (Object.keys(ctxs).length) set({ modelCtxs: { ...(draft.modelCtxs ?? {}), ...ctxs } });
+      // for the auto context/reserve knobs (Generation tab). Silent draft
+      // merge: detected metadata is not a user edit, so it must not dirty the
+      // form (the tab auto-fetches on entry — merely opening it would always
+      // prompt "discard changes?" on close). Skipped when nothing changed.
+      if (Object.keys(ctxs).length) setDraft(d => {
+        const merged = { ...(d.modelCtxs ?? {}), ...ctxs };
+        const same = Object.keys(merged).length === Object.keys(d.modelCtxs ?? {}).length
+          && Object.entries(merged).every(([k, v]) => d.modelCtxs?.[k] === v);
+        return same ? d : { ...d, modelCtxs: merged };
+      });
     }
     catch (e) { setModels(null); setModelsError(describeApiError(e)); }
     finally { setModelsBusy(false); }
