@@ -92,17 +92,22 @@ function Main({ storage, storageKind, storageFailed }) {
   // locally on download. apiKey syncs with the rest (single-user convenience).
   // localStorage remains the offline cache/fallback.
   const SETTINGS_SYNC_KEY = 'app.settings';
-  const settingsSync = useRef({ adopted: false, lastWritten: null });
+  const settingsSync = useRef({ adopted: false, lastWritten: null, lastPushed: null, lastPulled: null, live: null });
+  settingsSync.current.live = settingsRaw;
   useEffect(() => { // adopt the server copy once at boot
     if (storageKind !== 'server') return;
     const remote = storage.get('Meta', SETTINGS_SYNC_KEY);
     if (remote && typeof remote === 'object') {
       // serverToken is per-device — never adopted from the server. apiKey syncs
       // like any other setting; fall back to the local copy if the server has none yet.
-      setSettings(prev => ({ ...remote, serverToken: prev?.serverToken ?? '', apiKey: remote.apiKey ?? prev?.apiKey ?? '' }));
-      // Skip the pre-adoption upload: the write effect fires in this same
-      // commit with the *local* settings — don't let them clobber the server.
-      settingsSync.current.lastWritten = settingsRaw;
+      const adoptedSettings = { ...remote, serverToken: settingsRaw?.serverToken ?? '', apiKey: remote.apiKey ?? settingsRaw?.apiKey ?? '' };
+      setSettings(adoptedSettings);
+      // Never echo the adopted copy back: the server already holds it, and the
+      // pointless write would bump the rev — staling every other open tab's
+      // guarded write (the false "changed on another device" 409 on the next
+      // settings save there).
+      settingsSync.current.lastPulled = remote;
+      settingsSync.current.lastWritten = adoptedSettings;
     }
     settingsSync.current.adopted = true;
   }, [storageKind]);
@@ -111,8 +116,26 @@ function Main({ storage, storageKind, storageFailed }) {
     if (settingsSync.current.lastWritten === settingsRaw) return;
     settingsSync.current.lastWritten = settingsRaw;
     const { serverToken, ...rest } = settingsRaw ?? {};
+    settingsSync.current.lastPushed = rest; // own write — the pull listener below ignores it
     storage.set('Meta', SETTINGS_SYNC_KEY, rest);
   }, [settingsRaw, storageKind]);
+  useEffect(() => { // adopt settings pulled by focus sync (changed on another device)
+    if (storageKind !== 'server') return;
+    const onChange = (e) => {
+      if (e.detail?.store !== 'Meta' || e.detail?.key !== SETTINGS_SYNC_KEY) return;
+      const remote = storage.get('Meta', SETTINGS_SYNC_KEY);
+      if (!remote || typeof remote !== 'object') return;
+      // Local writes fire storechange too — only adopt copies that aren't ours.
+      if (remote === settingsSync.current.lastPushed || remote === settingsSync.current.lastPulled) return;
+      const live = settingsSync.current.live ?? {};
+      const adoptedSettings = { ...remote, serverToken: live.serverToken ?? '', apiKey: remote.apiKey ?? live.apiKey ?? '' };
+      settingsSync.current.lastPulled = remote;
+      settingsSync.current.lastWritten = adoptedSettings; // suppress the echo-back upload
+      setSettings(adoptedSettings);
+    };
+    storage.addEventListener('storechange', onChange);
+    return () => storage.removeEventListener('storechange', onChange);
+  }, [storage, storageKind]);
   const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
   const [theme, setTheme] = usePersistentState('fictionpad.theme', 'defaultTheme');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);

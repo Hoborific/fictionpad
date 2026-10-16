@@ -502,7 +502,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
       ${tab === 'models' && html`
         ${section('Models', html`
-          <div class="grid3">
+          <div class="grid2">
             <label class="field"><span>Chat model</span>
               <div style=${{ display: 'flex', gap: '6px' }}>
                 <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
@@ -515,12 +515,12 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
               <span class="hint">Memory summaries, suggestions, /improve, /recap. Blank = chat model.</span>
             </label>
+          </div>
+          <div class="grid2">
             <label class="field"><span>Generator model</span>
               <${ModelPicker} value=${draft.genModel ?? ''} models=${models} onChange=${(v) => set({ genModel: v })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
             </label>
-          </div>
-          <div class="grid3">
             <label class="field"><span>Image model</span>
               <${ModelPicker} value=${draft.imageModel ?? ''} models=${models} onChange=${(v) => set({ imageModel: v })} />
               <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>

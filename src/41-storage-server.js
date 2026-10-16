@@ -518,10 +518,12 @@ class ServerDBAdapter extends AbstractStorage {
   }
   // Focus sync: ONE cheap /list diff when the tab regains attention — not
   // polling, no sockets. Entities that changed on other devices are pulled
-  // into the cache (storechange updates the UI); keys with in-flight local
-  // writes or an open conflict are left to the rev guard. Meta is excluded:
-  // settings stay boot-sync + guarded writes only. Emits `sync` with an
-  // { updated, removed } summary when anything changed.
+  // into the cache (storechange updates the UI; Main adopts a pulled
+  // Meta/app.settings into live settings). Keys with in-flight local writes
+  // or an open conflict are left to the rev guard. Meta joins the pull but
+  // never the removal pass — settings keys are never deleted server-side, and
+  // a cache-only settings row must not vanish under the UI. Emits `sync`
+  // with an { updated, removed } summary when anything changed.
   async syncFromServer() {
     if (!this.revEnabled) return null;
     const now = Date.now();
@@ -538,7 +540,6 @@ class ServerDBAdapter extends AbstractStorage {
         || this._streamKey === `${store}/${key}`;
       let updated = 0, removed = 0;
       for (const store of STORES) {
-        if (store === 'Meta') continue;
         const remoteRevs = remote[store] ?? {};
         const localRevs = this.revs[store] ?? {};
         for (const [key, rev] of Object.entries(remoteRevs)) {
@@ -553,6 +554,7 @@ class ServerDBAdapter extends AbstractStorage {
             updated++;
           } catch (e) { if (e?.status !== 404) console.warn('FictionPad: sync pull failed', e); }
         }
+        if (store === 'Meta') continue; // settings are never deleted — no removal pass
         for (const key of Object.keys(this.cache[store] ?? {})) {
           if (key in remoteRevs || dirty(store, key)) continue;
           // In cache, not on the server, nothing queued locally: deleted on
