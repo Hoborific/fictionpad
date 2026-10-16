@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS = {
   ctxAuto: true, // context length follows the detected model context (modelCtxs) until edited
   maxTokens: DEFAULT_MAX_TOKENS,
   reserveAuto: true, // response reserve derived from the context length until edited
-  modelCtxs: {}, // { [modelId]: contextLength } detected on Fetch (vLLM/llama.cpp/OpenRouter vendor fields)
+  modelCtxs: {}, // { [modelId]: contextLength } detected on the Models-tab fetch (vLLM/llama.cpp/OpenRouter vendor fields)
   responseLength: 'medium',
   // Editable length instruction appended to the prompt tail; '' = no directive.
   // Follows the preset's default text until the user edits it.
@@ -207,6 +207,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const [dirty, setDirty] = useState(false);
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
+  const [modelsBusy, setModelsBusy] = useState(false);
   const [migBusy, setMigBusy] = useState(null);
   const [migNote, setMigNote] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
@@ -266,6 +267,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   const fetchModels = async () => {
     setModelsError(null);
+    setModelsBusy(true);
     try {
       const { ids, ctxs } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
       setModels(ids);
@@ -274,7 +276,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       if (Object.keys(ctxs).length) set({ modelCtxs: { ...(draft.modelCtxs ?? {}), ...ctxs } });
     }
     catch (e) { setModels(null); setModelsError(describeApiError(e)); }
+    finally { setModelsBusy(false); }
   };
+  // The Models tab fetches on entry — no manual Fetch button. Entering the
+  // tab again (or opening the modal on it) refetches against the CURRENT
+  // draft endpoint/key, so an edit on the Connection tab is picked up by
+  // simply switching over.
+  useEffect(() => { if (tab === 'models') fetchModels(); }, [tab]);
 
   // Manual config check (Connection tab): hits /models with the draft
   // endpoint + key and reports reachability, auth, and whether the configured
@@ -504,12 +512,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
         ${section('Models', html`
           <div class="grid2">
             <label class="field"><span>Chat model</span>
-              <div style=${{ display: 'flex', gap: '6px' }}>
-                <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
-                <button class="btn" onClick=${fetchModels}>Fetch</button>
-              </div>
-              ${modelsError && html`<span class="warn">${modelsError}</span>`}
-              ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
+              <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
             </label>
             <label class="field"><span>Aux model</span>
               <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
@@ -525,13 +528,17 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <${ModelPicker} value=${draft.imageModel ?? ''} models=${models} onChange=${(v) => set({ imageModel: v })} />
               <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
-          </div>`)}
+          </div>`,
+          modelsBusy ? 'Fetching the model list…'
+            : modelsError ? html`<span class="warn">Fetch failed — ${modelsError}</span>`
+            : models ? `${models.length} model(s) on this endpoint — pick from the list or type freely.`
+            : 'The model list fetches automatically when this tab opens; re-enter the tab to refresh.')}
         ${section('Embeddings', html`
           <div class="grid2">
             <label class="field"><span>Embedding model</span>
               <${ModelPicker} value=${draft.embeddingModel ?? ''} models=${models} placeholder="e.g. bge-m3"
                 onChange=${(v) => set({ embeddingModel: v })} />
-              <span class="hint">Semantic lore activation; blank = off. Often a separate model name — Fetch above populates the list.</span>
+              <span class="hint">Semantic lore activation; blank = off. Often a separate model name — the list fetches automatically on this tab.</span>
             </label>
             ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
           </div>`,
@@ -546,8 +553,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 onCommit=${(n) => set({ contextLength: n, ctxAuto: false })} />
               <span class="hint">${draft.ctxAuto !== false
                 ? (draft.modelCtxs?.[draft.model]
-                  ? `Detected ${draft.modelCtxs[draft.model]} from the model on Fetch. Editing pins a manual value.`
-                  : `Default ${DEFAULT_CONTEXT_LENGTH} — Fetch in the Models tab to detect. Editing pins a manual value.`)
+                  ? `Detected ${draft.modelCtxs[draft.model]} from the model list (Models tab). Editing pins a manual value.`
+                  : `Default ${DEFAULT_CONTEXT_LENGTH} — open the Models tab to detect it from the model. Editing pins a manual value.`)
                 : html`Manual. <a style=${{ cursor: 'pointer' }} onClick=${() => set({ ctxAuto: true })}>Back to auto</a>`}</span></label>
             <label class="field"><span>Response length preset</span>
               <select value=${draft.responseLength}
