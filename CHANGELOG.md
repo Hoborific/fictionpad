@@ -1474,3 +1474,21 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 - A manual "Summarize now" clicked mid-generation no longer double-records the same window when the generation-end cadence pass fires too; one summary pass runs at a time.
 - Renaming a chat no longer clobbers background writes (focus sync, memory passes) that landed while the rename prompt was open.
 - A stream that ends early on a malformed chunk or in-stream error now cancels the response body — the backend stops generating instead of burning tokens into a dead connection.
+
+### v4.12.4
+
+**Added**
+
+- Connection profiles now capture prompts too: saving a profile (Settings → Connection → Profiles) snapshots every editable prompt alongside the connection, models, and samplers, and Apply restores them — the apply confirm names "prompts" when that group moves. The server token stays excluded, as before.
+- A "Reset all prompts to defaults" button sits at the top of Settings → Prompts (with a confirm), complementing the per-field reset buttons — it restores every prompt on the tab, including the two blank-means-default ones (image protocol, avatar generation), which go back to tracking the built-in text.
+
+**Changed**
+
+- Settings now sync live between devices/tabs: focus sync (tab visible / window focus) pulls a changed `app.settings` from the server and the app adopts it on the spot — endpoint, models, samplers, prompts — instead of only at page load. No more generating against a stale API/model because the other device's settings change hadn't been picked up. The per-device server token is still never adopted, and the sync notice ("Synced from another device") tells you when it happens.
+- Settings → Models lays its four model fields out as two full-width pairs (Chat + Aux, Generator + Image), matching the endpoint/key rows on the Connection tab — long model ids get twice the room, and the fetched-list popover wraps far less.
+- Settings → Models fetches the model list automatically when the tab opens (re-entering the tab refetches, against the current draft endpoint/key) — the manual Fetch button is gone. The fetch status lives under the Models section header like other tabs' hints: a "fetching" note while in flight, a warning when it fails, or the number of models found.
+
+**Fixed**
+
+- The model picker dropdown no longer runs under the settings modal's Cancel/Save footer or forces the modal to scroll: on open it measures the space actually available above/below its input (against the modal's scrolling body, not just the viewport), caps its height to that, and flips above the input when there's more room there — re-measuring on any scroll or resize while open, so every row of every tab fits, and the list scrolls internally beyond that.
+- Saving settings no longer raises a phantom "Changed on another device" conflict when no other device touched them: every boot used to echo the just-adopted server settings straight back as a write, bumping the revision and staling every other open tab's guarded write — the next settings save there 409'd even though the data was identical. The boot adoption (and the new live pull adoption) never re-uploads the copy it received.

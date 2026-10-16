@@ -746,10 +746,14 @@ button.pill.tools-toggle:hover { color: var(--c-text); border-color: var(--c-bor
 .mp-wrap .mp-toggle { flex: none; padding: 4px 8px; }
 .mp-wrap .mp-pop {
   position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
-  max-height: 40vh; overflow-y: auto; touch-action: pan-y; /* drag scrolls, tap selects (rows pick on click) */
+  /* Fallback only — ModelPicker measures the real available space (modal
+     body / viewport) on open and sets an exact max-height inline, flipping
+     above the input (.up) when there is more room there. */
+  max-height: min(40vh, 260px); overflow-y: auto; touch-action: pan-y; /* drag scrolls, tap selects (rows pick on click) */
   background: var(--c-bg-2); border: 1px solid var(--c-border); border-radius: 8px;
   padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
 }
+.mp-wrap .mp-pop.up { top: auto; bottom: calc(100% + 4px); }
 .mp-wrap .mp-item {
   display: block; width: 100%; text-align: left; font: inherit; font-size: 13px;
   padding: 6px 8px; background: transparent; border: none; border-radius: 6px;
@@ -1007,7 +1011,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.3';
+const APP_VERSION = '4.12.4';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -3495,7 +3499,7 @@ function collectImageUrls(value, into = new Set()) {
 }
 
 // ---- connection profiles ---------------------------------------------------
-// Named bundles of connection + model + sampler settings (Settings →
+// Named bundles of connection + model + sampler + prompt settings (Settings →
 // Connection → Profiles). PROFILE_FIELDS is the exact allowlist copied both
 // ways (draft → profile on save, profile → draft on apply), so unrelated
 // settings never hitchhike and serverToken (per-device) is never stored.
@@ -3505,6 +3509,10 @@ const PROFILE_FIELDS = [
   'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey',
   'model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel',
   'samplers', 'disabledSamplers', 'customSamplers',
+  'platformPrompt', 'toolsPrompt', 'imagePrompt', 'speakerPrompt',
+  'suggestionsPrompt', 'memoryPrompt', 'loreExtractPrompt', 'improvePrompt',
+  'impersonatePrompt', 'recapPrompt',
+  'scenarioGenPrompt', 'characterGenPrompt', 'pieceGenPrompt', 'avatarGenPrompt',
 ];
 // Snapshot the profiled fields out of a settings object (draft or live).
 function profileFromSettings(st) {
@@ -4556,10 +4564,12 @@ class ServerDBAdapter extends AbstractStorage {
   }
   // Focus sync: ONE cheap /list diff when the tab regains attention — not
   // polling, no sockets. Entities that changed on other devices are pulled
-  // into the cache (storechange updates the UI); keys with in-flight local
-  // writes or an open conflict are left to the rev guard. Meta is excluded:
-  // settings stay boot-sync + guarded writes only. Emits `sync` with an
-  // { updated, removed } summary when anything changed.
+  // into the cache (storechange updates the UI; Main adopts a pulled
+  // Meta/app.settings into live settings). Keys with in-flight local writes
+  // or an open conflict are left to the rev guard. Meta joins the pull but
+  // never the removal pass — settings keys are never deleted server-side, and
+  // a cache-only settings row must not vanish under the UI. Emits `sync`
+  // with an { updated, removed } summary when anything changed.
   async syncFromServer() {
     if (!this.revEnabled) return null;
     const now = Date.now();
@@ -4576,7 +4586,6 @@ class ServerDBAdapter extends AbstractStorage {
         || this._streamKey === `${store}/${key}`;
       let updated = 0, removed = 0;
       for (const store of STORES) {
-        if (store === 'Meta') continue;
         const remoteRevs = remote[store] ?? {};
         const localRevs = this.revs[store] ?? {};
         for (const [key, rev] of Object.entries(remoteRevs)) {
@@ -4591,6 +4600,7 @@ class ServerDBAdapter extends AbstractStorage {
             updated++;
           } catch (e) { if (e?.status !== 404) console.warn('FictionPad: sync pull failed', e); }
         }
+        if (store === 'Meta') continue; // settings are never deleted — no removal pass
         for (const key of Object.keys(this.cache[store] ?? {})) {
           if (key in remoteRevs || dirty(store, key)) continue;
           // In cache, not on the server, nothing queued locally: deleted on
@@ -5648,16 +5658,40 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
 // renders as a wrapping popover instead: free typing stays, typing filters,
 // ▾ toggles the full list, click picks. Closes on outside pointerdown and on
 // Escape (stopped before it reaches the modal's own Escape handler).
+// The popover measures the space actually available before showing — against
+// the scrolling modal body when inside one (its footer would clip a taller
+// list), else the viewport — caps its height to that, and flips above the
+// input when there is more room there. Re-measures on any scroll/resize
+// while open, so a row scrolled near the modal bottom never spills.
 function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
+  const [place, setPlace] = useState({ up: false, maxH: 260 });
   const wrapRef = useRef(null);
   const inputRef = useRef(null);
   useEffect(() => {
     if (!open) return;
+    const measure = () => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const scroller = wrapRef.current.closest('.m-body');
+      const bounds = scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      const below = Math.min(bounds.bottom, window.innerHeight) - rect.bottom - 8;
+      const above = rect.top - Math.max(bounds.top, 0) - 8;
+      const up = below < 180 && above > below;
+      const maxH = Math.max(120, Math.min(up ? above : below, 320));
+      setPlace(p => (p.up === up && p.maxH === maxH) ? p : { up, maxH });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true); // capture: catches the modal body's own scroll
     const close = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
     window.addEventListener('pointerdown', close, true);
-    return () => window.removeEventListener('pointerdown', close, true);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      window.removeEventListener('pointerdown', close, true);
+    };
   }, [open]);
   const all = models ?? [];
   const q = (value ?? '').toLowerCase();
@@ -5676,7 +5710,7 @@ function ModelPicker({ value, models, placeholder, onChange }) {
     ${all.length > 0 && html`<button type="button" class="btn mp-toggle" tabindex="-1"
       title="Show fetched models"
       onClick=${() => { setTyping(false); setOpen(!open); }}>▾</button>`}
-    ${open && shown.length > 0 && html`<div class="mp-pop">
+    ${open && shown.length > 0 && html`<div class=${`mp-pop ${place.up ? 'up' : ''}`} style=${{ maxHeight: `${place.maxH}px` }}>
       ${shown.map(m => html`<button type="button" key=${m}
         class=${`mp-item ${m === value ? 'cur' : ''}`}
         onClick=${() => pick(m)}>${m}</button>`)}
@@ -6157,7 +6191,7 @@ const DEFAULT_SETTINGS = {
   embedEndpoint: '', embedApiKey: '', // semantic lore/memory embeddings
   // Saved connection profiles (Settings → Connection → Profiles):
   // [{ id, name, fields }] — fields covers the PROFILE_FIELDS allowlist
-  // (connection, models, samplers); serverToken is never stored.
+  // (connection, models, samplers, prompts); serverToken is never stored.
   profiles: [],
   model: '',
   auxModel: '',
@@ -6171,7 +6205,7 @@ const DEFAULT_SETTINGS = {
   ctxAuto: true, // context length follows the detected model context (modelCtxs) until edited
   maxTokens: DEFAULT_MAX_TOKENS,
   reserveAuto: true, // response reserve derived from the context length until edited
-  modelCtxs: {}, // { [modelId]: contextLength } detected on Fetch (vLLM/llama.cpp/OpenRouter vendor fields)
+  modelCtxs: {}, // { [modelId]: contextLength } detected on the Models-tab fetch (vLLM/llama.cpp/OpenRouter vendor fields)
   responseLength: 'medium',
   // Editable length instruction appended to the prompt tail; '' = no directive.
   // Follows the preset's default text until the user edits it.
@@ -6321,6 +6355,10 @@ const PROFILE_GROUPS = [
     'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey']],
   ['models', ['model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel']],
   ['samplers', ['samplers', 'disabledSamplers', 'customSamplers']],
+  ['prompts', ['platformPrompt', 'toolsPrompt', 'imagePrompt', 'speakerPrompt',
+    'suggestionsPrompt', 'memoryPrompt', 'loreExtractPrompt', 'improvePrompt',
+    'impersonatePrompt', 'recapPrompt',
+    'scenarioGenPrompt', 'characterGenPrompt', 'pieceGenPrompt', 'avatarGenPrompt']],
 ];
 
 function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent, onAccentChange, onOpenLogitBias,
@@ -6338,6 +6376,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
   const [dirty, setDirty] = useState(false);
   const [models, setModels] = useState(null);
   const [modelsError, setModelsError] = useState(null);
+  const [modelsBusy, setModelsBusy] = useState(false);
   const [migBusy, setMigBusy] = useState(null);
   const [migNote, setMigNote] = useState(null);
   const set = (patch) => { setDirty(true); setDraft(d => ({ ...d, ...patch })); };
@@ -6397,6 +6436,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
   const fetchModels = async () => {
     setModelsError(null);
+    setModelsBusy(true);
     try {
       const { ids, ctxs } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
       setModels(ids);
@@ -6405,7 +6445,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       if (Object.keys(ctxs).length) set({ modelCtxs: { ...(draft.modelCtxs ?? {}), ...ctxs } });
     }
     catch (e) { setModels(null); setModelsError(describeApiError(e)); }
+    finally { setModelsBusy(false); }
   };
+  // The Models tab fetches on entry — no manual Fetch button. Entering the
+  // tab again (or opening the modal on it) refetches against the CURRENT
+  // draft endpoint/key, so an edit on the Connection tab is picked up by
+  // simply switching over.
+  useEffect(() => { if (tab === 'models') fetchModels(); }, [tab]);
 
   // Manual config check (Connection tab): hits /models with the draft
   // endpoint + key and reports reachability, auth, and whether the configured
@@ -6422,8 +6468,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     } catch (e) { setTestState({ ok: false, msg: describeApiError(e) }); }
   };
 
-  // Connection profiles: named snapshots of the PROFILE_FIELDS group
-  // (connection, models, samplers). Apply only patches the draft — the
+  // Connection profiles: named snapshots of the PROFILE_FIELDS groups
+  // (connection, models, samplers, prompts). Apply only patches the draft — the
   // profile takes effect when the user saves the settings form.
   const [profileSel, setProfileSel] = useState('');
   const profiles = draft.profiles ?? [];
@@ -6461,6 +6507,22 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       <textarea rows=${rows} value=${draft[key] ?? def} onInput=${(e) => set({ [key]: e.target.value })} /></label>
     ${hint && html`<div class="hint" style=${{ margin: '-6px 0 6px' }}>${hint}</div>`}
     <button class="btn small" style=${{ marginBottom: '10px' }} onClick=${() => set({ [key]: def })}>Reset to default</button>`;
+
+  // Every prompt field's true default (mirrors DEFAULT_SETTINGS — imagePrompt
+  // and avatarGenPrompt default to blank, which means "use the built-in").
+  const PROMPT_DEFAULTS = {
+    platformPrompt: DEFAULT_PLATFORM_PROMPT, toolsPrompt: TOOLS_PROMPT, imagePrompt: '',
+    speakerPrompt: SPEAKER_PROMPT, suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT,
+    memoryPrompt: DEFAULT_MEMORY_PROMPT, loreExtractPrompt: DEFAULT_LORE_EXTRACT_PROMPT,
+    improvePrompt: DEFAULT_IMPROVE_PROMPT, impersonatePrompt: DEFAULT_IMPERSONATE_PROMPT,
+    recapPrompt: DEFAULT_RECAP_PROMPT, scenarioGenPrompt: DEFAULT_SCENARIO_GEN_PROMPT,
+    characterGenPrompt: DEFAULT_CHARACTER_GEN_PROMPT, pieceGenPrompt: DEFAULT_PIECE_GEN_PROMPT,
+    avatarGenPrompt: '',
+  };
+  const resetAllPrompts = async () => {
+    if (!await uiConfirm('Reset every prompt on this tab to its default?', { okLabel: 'Reset all' })) return;
+    set({ ...PROMPT_DEFAULTS });
+  };
 
   // Compact numeric field for the advanced knobs. NumInput lets the user type
   // freely and clamps on blur/Enter instead of fighting every keystroke.
@@ -6543,7 +6605,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
             <button class="btn small" onClick=${saveProfile}>Save…</button>
             <button class="btn small danger" disabled=${!profileSel} onClick=${deleteSelectedProfile}>Delete</button>
           </div>`,
-          'Save the current connection, models and samplers as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
+          'Save the current connection, models, samplers and prompts as a named profile; Apply loads one back into this form (Save settings still persists). The server token is never part of a profile.')}
         ${section('API connection', html`
           <div class="grid2">
             <label class="field"><span>Endpoint</span>
@@ -6617,36 +6679,36 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
 
       ${tab === 'models' && html`
         ${section('Models', html`
-          <div class="grid3">
+          <div class="grid2">
             <label class="field"><span>Chat model</span>
-              <div style=${{ display: 'flex', gap: '6px' }}>
-                <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
-                <button class="btn" onClick=${fetchModels}>Fetch</button>
-              </div>
-              ${modelsError && html`<span class="warn">${modelsError}</span>`}
-              ${models && html`<span class="hint">${models.length} model(s) found — pick one or type freely.</span>`}
+              <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
+              <span class="hint">The main model — every reply generation goes through it.</span>
             </label>
             <label class="field"><span>Aux model</span>
               <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
               <span class="hint">Memory summaries, suggestions, /improve, /recap. Blank = chat model.</span>
             </label>
+          </div>
+          <div class="grid2">
             <label class="field"><span>Generator model</span>
               <${ModelPicker} value=${draft.genModel ?? ''} models=${models} onChange=${(v) => set({ genModel: v })} />
               <span class="hint">✦ scenario/character/piece generator. Blank = aux model.</span>
             </label>
-          </div>
-          <div class="grid3">
             <label class="field"><span>Image model</span>
               <${ModelPicker} value=${draft.imageModel ?? ''} models=${models} onChange=${(v) => set({ imageModel: v })} />
               <span class="hint">OpenAI image backend only — some require it; blank sends no model field.</span>
             </label>
-          </div>`)}
+          </div>`,
+          modelsBusy ? 'Fetching the model list…'
+            : modelsError ? html`<span class="warn">Fetch failed — ${modelsError}</span>`
+            : models ? `${models.length} model(s) on this endpoint — pick from the list or type freely.`
+            : 'The model list fetches automatically when this tab opens; re-enter the tab to refresh.')}
         ${section('Embeddings', html`
           <div class="grid2">
             <label class="field"><span>Embedding model</span>
               <${ModelPicker} value=${draft.embeddingModel ?? ''} models=${models} placeholder="e.g. bge-m3"
                 onChange=${(v) => set({ embeddingModel: v })} />
-              <span class="hint">Semantic lore activation; blank = off. Often a separate model name — Fetch above populates the list.</span>
+              <span class="hint">Semantic lore activation; blank = off. Often a separate model name — the list fetches automatically on this tab.</span>
             </label>
             ${numField('semanticThreshold', 'Semantic threshold (0–1)', 0.55, { min: 0, max: 1, step: 0.05 })}
           </div>`,
@@ -6661,8 +6723,8 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 onCommit=${(n) => set({ contextLength: n, ctxAuto: false })} />
               <span class="hint">${draft.ctxAuto !== false
                 ? (draft.modelCtxs?.[draft.model]
-                  ? `Detected ${draft.modelCtxs[draft.model]} from the model on Fetch. Editing pins a manual value.`
-                  : `Default ${DEFAULT_CONTEXT_LENGTH} — Fetch in the Models tab to detect. Editing pins a manual value.`)
+                  ? `Detected ${draft.modelCtxs[draft.model]} from the model list (Models tab). Editing pins a manual value.`
+                  : `Default ${DEFAULT_CONTEXT_LENGTH} — open the Models tab to detect it from the model. Editing pins a manual value.`)
                 : html`Manual. <a style=${{ cursor: 'pointer' }} onClick=${() => set({ ctxAuto: true })}>Back to auto</a>`}</span></label>
             <label class="field"><span>Response length preset</span>
               <select value=${draft.responseLength}
@@ -6931,6 +6993,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           'Protocol instructions are editable in the Prompts tab.')}`}
 
       ${tab === 'prompts' && html`
+        <div style=${{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
+          <button class="btn small danger" onClick=${resetAllPrompts}>Reset all prompts to defaults</button>
+        </div>
         ${section('Core', html`
           ${promptField('platformPrompt', 'Platform system prompt — lowest instruction rank; {{user}} works here', DEFAULT_PLATFORM_PROMPT, 5)}
           ${draft.toolsEnabled !== false
@@ -10086,17 +10151,22 @@ function Main({ storage, storageKind, storageFailed }) {
   // locally on download. apiKey syncs with the rest (single-user convenience).
   // localStorage remains the offline cache/fallback.
   const SETTINGS_SYNC_KEY = 'app.settings';
-  const settingsSync = useRef({ adopted: false, lastWritten: null });
+  const settingsSync = useRef({ adopted: false, lastWritten: null, lastPushed: null, lastPulled: null, live: null });
+  settingsSync.current.live = settingsRaw;
   useEffect(() => { // adopt the server copy once at boot
     if (storageKind !== 'server') return;
     const remote = storage.get('Meta', SETTINGS_SYNC_KEY);
     if (remote && typeof remote === 'object') {
       // serverToken is per-device — never adopted from the server. apiKey syncs
       // like any other setting; fall back to the local copy if the server has none yet.
-      setSettings(prev => ({ ...remote, serverToken: prev?.serverToken ?? '', apiKey: remote.apiKey ?? prev?.apiKey ?? '' }));
-      // Skip the pre-adoption upload: the write effect fires in this same
-      // commit with the *local* settings — don't let them clobber the server.
-      settingsSync.current.lastWritten = settingsRaw;
+      const adoptedSettings = { ...remote, serverToken: settingsRaw?.serverToken ?? '', apiKey: remote.apiKey ?? settingsRaw?.apiKey ?? '' };
+      setSettings(adoptedSettings);
+      // Never echo the adopted copy back: the server already holds it, and the
+      // pointless write would bump the rev — staling every other open tab's
+      // guarded write (the false "changed on another device" 409 on the next
+      // settings save there).
+      settingsSync.current.lastPulled = remote;
+      settingsSync.current.lastWritten = adoptedSettings;
     }
     settingsSync.current.adopted = true;
   }, [storageKind]);
@@ -10105,8 +10175,26 @@ function Main({ storage, storageKind, storageFailed }) {
     if (settingsSync.current.lastWritten === settingsRaw) return;
     settingsSync.current.lastWritten = settingsRaw;
     const { serverToken, ...rest } = settingsRaw ?? {};
+    settingsSync.current.lastPushed = rest; // own write — the pull listener below ignores it
     storage.set('Meta', SETTINGS_SYNC_KEY, rest);
   }, [settingsRaw, storageKind]);
+  useEffect(() => { // adopt settings pulled by focus sync (changed on another device)
+    if (storageKind !== 'server') return;
+    const onChange = (e) => {
+      if (e.detail?.store !== 'Meta' || e.detail?.key !== SETTINGS_SYNC_KEY) return;
+      const remote = storage.get('Meta', SETTINGS_SYNC_KEY);
+      if (!remote || typeof remote !== 'object') return;
+      // Local writes fire storechange too — only adopt copies that aren't ours.
+      if (remote === settingsSync.current.lastPushed || remote === settingsSync.current.lastPulled) return;
+      const live = settingsSync.current.live ?? {};
+      const adoptedSettings = { ...remote, serverToken: live.serverToken ?? '', apiKey: remote.apiKey ?? live.apiKey ?? '' };
+      settingsSync.current.lastPulled = remote;
+      settingsSync.current.lastWritten = adoptedSettings; // suppress the echo-back upload
+      setSettings(adoptedSettings);
+    };
+    storage.addEventListener('storechange', onChange);
+    return () => storage.removeEventListener('storechange', onChange);
+  }, [storage, storageKind]);
   const [ui, setUi] = usePersistentState('fictionpad.ui', { scenarioId: null, chatId: null, drawer: null, sidebarCollapsed: false });
   const [theme, setTheme] = usePersistentState('fictionpad.theme', 'defaultTheme');
   const [accent, setAccent] = usePersistentState('fictionpad.accent', DEFAULT_ACCENT);
