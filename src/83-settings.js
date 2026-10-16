@@ -513,6 +513,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
           <div class="grid2">
             <label class="field"><span>Chat model</span>
               <${ModelPicker} value=${draft.model} models=${models} onChange=${(v) => set({ model: v })} />
+              <span class="hint">The main model — every reply generation goes through it.</span>
             </label>
             <label class="field"><span>Aux model</span>
               <${ModelPicker} value=${draft.auxModel} models=${models} onChange=${(v) => set({ auxModel: v })} />
