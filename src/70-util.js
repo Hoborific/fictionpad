@@ -126,6 +126,9 @@ const SAMPLER_FIELDS = [
   { key: 'presence_penalty',   label: 'presence_penalty',   type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
   { key: 'frequency_penalty',  label: 'frequency_penalty',  type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
   { key: 'seed',               label: 'seed (−1 = random)', type: 'number', min: -1, max: 2147483647, step: 1,    def: -1   },
+  // Prefill is NOT a request param: openaiChatStream strips it from the body
+  // and appends it as a trailing assistant message the model continues from.
+  { key: 'prefill',            label: 'Prefill', type: 'string', def: '<|think|>' },
 ];
 const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f]));
 

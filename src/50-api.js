@@ -195,6 +195,12 @@ async function* parseEventStream(body) {
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
+  // `prefill` is intercepted here instead of going out as a request param: a
+  // non-empty value rides as a trailing assistant message the model continues
+  // from (the classic "put words in its mouth" trick — e.g. forcing a
+  // reasoning tag open on backends whose template omits it).
+  const { prefill, ...restSamplers } = samplers;
+  const msgs = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   // Client-side stop filter (fallback — backends normally strip server-side).
   // A stop string split across chunks must not leak into the display text or
@@ -230,7 +236,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     body: JSON.stringify({
       // expandSamplerParams: dotted custom-sampler keys (e.g.
       // chat_template_kwargs.enable_thinking) become nested objects.
-      model, messages, stream: true, max_tokens: maxTokens, ...expandSamplerParams(samplers),
+      model, messages: msgs, stream: true, max_tokens: maxTokens, ...expandSamplerParams(restSamplers),
       ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),

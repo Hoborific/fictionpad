@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS = {
   tokenProbs: true, // request logprobs + top_logprobs on generations
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: true, // response-suggestion chips after generations (they fire an aux call per swipe)
+  suggestions: false, // response-suggestion chips after generations (they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here

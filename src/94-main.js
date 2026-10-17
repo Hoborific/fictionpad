@@ -231,7 +231,9 @@ function Main({ storage, storageKind, storageFailed }) {
       // temperature wins. Per-chat overrides don't apply outside a chat.
       samplers: { ...Object.fromEntries(
         Object.entries(enabledSamplers(st))
-          .filter(([k]) => new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+          // prefill is a streaming-path concept (trailing assistant message) —
+          // never leak it upstream as a raw request param on aux calls.
+          .filter(([k]) => k !== 'prefill' && new Set(allSamplerFields(st).map(f => f.key)).has(k))),
         temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
@@ -1501,6 +1503,11 @@ function Main({ storage, storageKind, storageFailed }) {
     const effSamplers = Object.fromEntries(
       Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
         .filter(([k]) => allowedSamplerKeys.has(k)));
+    // Prefill forces the START of a reply. A continuation already carries its
+    // own prefix — the trailing assistant partial IS the prefill mechanics
+    // (regen-from-token rides continuation too) — so a second trailing
+    // assistant message would steer the model off the text being continued.
+    if (continuation) delete effSamplers.prefill;
     let work = ref.current.chats[chatObj.id] ?? chatObj;
     // ^ Re-base on the stored chat, not the caller's snapshot: a background
     // merge-on-write (an image job's patch, enrichment) may have landed
