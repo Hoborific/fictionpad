@@ -1549,6 +1549,17 @@ function Main({ storage, storageKind, storageFailed }) {
     // protocol text too — can still be aligned and projected onto the
     // stripped display text.
     let rawAcc = null, probMap = null;
+    // Streaming UI flush throttle: per-token applyText calls write the storage
+    // cache + ref directly (quiet — merge-on-write, focus sync and the save
+    // queue all read those) but defer the React state flush to this ~15 Hz
+    // interval. A per-token flush re-renders the whole Main tree per token,
+    // which phones can't sustain: the saturated main thread can't rasterize
+    // newly revealed log content mid-scroll (blank messages above the fold)
+    // and scroll-throttled timers collapse the visible stream to ~1 Hz
+    // updates. The interval starts just before the stream loop (after the
+    // prep early-returns) and the finally clears it with a trailing flush.
+    let streamDirty = false;
+    let streamIv = null;
     // Merge-on-write: rebuild from the CURRENT stored chat and overlay only
     // the message tree, so drawer/panel edits made mid-stream (memory pins,
     // renames, chat options) survive the per-token upserts. Chat deleted
@@ -1566,7 +1577,15 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[work.id];
       if (!cur) { work = { ...work, messages }; return; }
       work = { ...cur, messages, updatedAt: Date.now() };
-      upsertChat(work.id, work);
+      // Quiet cache write + immediate ref sync per token; the React flush
+      // rides streamIv while streaming, settled writes go straight through.
+      // skipGc: a per-token write only grows the swipe's text/tokens (the
+      // spread keeps its images), so it can never drop an image reference —
+      // running imageRefDropped's full recursive chat walk at token rate
+      // pegged mobile main threads; the trailing direct flush runs the scan.
+      storage.set('Chats', work.id, work, { quiet: true, skipGc: true });
+      ref.current.chats = { ...ref.current.chats, [work.id]: work };
+      if (streamIv) streamDirty = true; else upsertChat(work.id, work);
     };
     // One global alignment pass over the finished text + raw lp tape; attaches
     // swipe.tokens when at least one span carries real prob data. Runs on
@@ -1621,6 +1640,9 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
+    streamIv = setInterval(() => { // see the throttle note at applyText
+      if (streamDirty) { streamDirty = false; upsertChat(work.id, work); }
+    }, 65);
     let sawDone = false; // a chunk with finish_reason arrived (clean finish)
     let truncated = false; // finish_reason 'length' — surfaced on the manifest
     // OpenAI-style backends 400 the whole request when stop has >4 entries:
@@ -1686,6 +1708,10 @@ function Main({ storage, storageKind, storageFailed }) {
       if (e.name !== 'AbortError')
         setError(`Generation failed: ${describeApiError(e)}`);
     } finally {
+      if (streamIv) { clearInterval(streamIv); streamIv = null; }
+      // Trailing UI flush so the exact end state is on screen before the
+      // post-stream writes — never resurrect a chat deleted mid-generation.
+      if (streamDirty) { streamDirty = false; if (ref.current.chats[work.id]) upsertChat(work.id, work); }
       storage.endStream(); // restore the 500 ms debounce + flush the tail
       genRef.current = null;
       setGenerating(null);

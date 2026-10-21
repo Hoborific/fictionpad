@@ -94,7 +94,14 @@ class AbstractStorage extends EventTarget {
   async init() {}
   getAll(store) { return this.cache[store] ?? {}; }
   get(store, key) { return this.cache[store]?.[key]; }
-  set(store, key, value) {
+  // opts.quiet: cache + save queue update WITHOUT the storechange dispatch —
+  // the generation stream uses it for per-token writes so the React tree
+  // isn't re-rendered per token; a throttled flush re-emits via a plain set.
+  // opts.skipGc: skip the imageRefDropped scan — a full recursive walk of the
+  // entity per call, which at token rate pegs the main thread on phones. Only
+  // for writes that provably can't drop an image reference (stream text
+  // growth); the caller's trailing flush runs the scan.
+  set(store, key, value, opts) {
     const prev = this.cache[store][key];
     this.cache[store][key] = value;
     // Conflicted key: the cache keeps tracking edits (a "keep mine" resolution
@@ -106,8 +113,8 @@ class AbstractStorage extends EventTarget {
     // Overwrites trigger GC too (not just remove()): an edit that drops the
     // last in-entity reference to a stored image — avatar cleared, swipe
     // images purged — must not leave the row orphaned.
-    if (prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
-    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+    if (!opts?.skipGc && prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
+    if (!opts?.quiet) this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   remove(store, key) {
     const prevName = this.cache[store][key]?.name; // stashed on a delete-conflict for the UI

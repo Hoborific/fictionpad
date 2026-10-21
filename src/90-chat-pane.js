@@ -49,10 +49,14 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     return m;
   }, [chat?.memoryStore, path]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
-  // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
-  // unpin/re-pin themselves via the scroll listener.
+  // the bottom zone (~80px). Programmatic scrolls are recognized by WHERE they
+  // land (the exact target we set), so they don't unpin/re-pin themselves via
+  // the scroll listener. Never a flag cleared by rAF: mobile browsers pause
+  // rAF while a finger is down, which stranded the flag mid-gesture and
+  // swallowed the user's own scroll events — the pinned flag never cleared
+  // and every stream flush yanked back to the bottom (the up/down fight).
   const pinnedRef = useRef(true);
-  const programmaticRef = useRef(false);
+  const programmaticTopRef = useRef(null); // scrollTop our last programmatic write lands at
   const lastTopRef = useRef(0); // for detecting user-initiated upward scrolls
   const [pinned, setPinned] = useState(true);
   // Real user scroll gestures (touch drag / wheel) — used to tell deliberate
@@ -66,15 +70,20 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     clearTimeout(gestureTimer.current);
     gestureTimer.current = setTimeout(() => { gestureRef.current = false; }, 300);
   };
-  // Programmatic scroll-to-bottom: flag the scroll listener, then clear the
-  // flag on the next frame regardless — when already at bottom no scroll event
-  // fires, and waiting for one would swallow the next genuine user scroll.
-  // (A real scroll event fires before rAF callbacks, so the listener still
-  // gets first crack at the flag.)
+  // Programmatic scroll-to-bottom: record where the write lands so the scroll
+  // listener recognizes its own event. A stale target is cleared by the first
+  // non-matching scroll event, so a no-op write (already at bottom — no event
+  // fires) can't swallow a later user scroll.
   const scrollElToBottom = (el) => {
-    programmaticRef.current = true;
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => { programmaticRef.current = false; });
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    programmaticTopRef.current = target;
+    el.scrollTop = target;
+  };
+  // Same recognition for programmatic scrolls to an arbitrary offset.
+  const scrollElTo = (el, target) => {
+    const t = Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight));
+    programmaticTopRef.current = t;
+    el.scrollTop = t;
   };
   // "Jump to latest" is deliberately shy: it only appears once the latest
   // message (e.g. the one being generated) is entirely scrolled out of view —
@@ -101,8 +110,16 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     const el = logRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    if (programmaticRef.current) { programmaticRef.current = false; lastTopRef.current = top; return; }
+    const pTarget = programmaticTopRef.current;
+    programmaticTopRef.current = null;
     const dist = el.scrollHeight - top - el.clientHeight;
+    if (pTarget != null && Math.abs(top - pTarget) <= 1) {
+      // Our own write landed — but still allow the bottom re-pin, so a stale
+      // target can't swallow a user's deliberate scroll back to the bottom.
+      lastTopRef.current = top;
+      if (dist < 40 && !pinnedRef.current) { pinnedRef.current = true; setPinned(true); }
+      return;
+    }
     let p = pinnedRef.current;
     // Unpin on upward scrolls only when they're user-driven (an active
     // gesture) or land clearly away from the bottom. Layout-driven clamp
@@ -133,9 +150,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
           const r = nodeEl.getBoundingClientRect();
           const lr = el.getBoundingClientRect();
           if (r.top < lr.top + 8 || r.top > lr.bottom - 80) { // not comfortably visible
-            programmaticRef.current = true;
-            el.scrollTop += (r.top - lr.top) - 12; // settle near the top of the log
-            requestAnimationFrame(() => { programmaticRef.current = false; });
+            scrollElTo(el, el.scrollTop + (r.top - lr.top) - 12); // settle near the top of the log
           }
         }
         computeJump();
@@ -173,7 +188,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     }
   }, [path]);
   // Keyboard message selection (↑/↓ in Main): highlight only while the node
-  // is on the active path; scroll it into view (a third down) when needed.
+  // is on the active path; scroll it into view when needed. A message that
+  // fits the viewport is shown whole (top margin when entering from below,
+  // bottom margin when entering from above); one taller than the view aligns
+  // its start when reached from below and its end when reached from above —
+  // never the old one-size "top a third down", which cut short messages off.
   const selId = kbdSel && path.some(n => n.id === kbdSel) ? kbdSel : null;
   useEffect(() => {
     if (!selId) return;
@@ -183,11 +202,13 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     const r = nodeEl.getBoundingClientRect();
     const lr = el.getBoundingClientRect();
     if (r.top < lr.top + 8 || r.bottom > lr.bottom - 8) {
+      const fits = r.height <= el.clientHeight - 24;
+      const delta = r.top < lr.top + 8
+        ? (r.top - lr.top) - (fits ? 12 : 8)          // cut at the top → align top
+        : (r.bottom - lr.bottom) + (fits ? 12 : 8);   // cut at the bottom → align bottom
       pinnedRef.current = false;
       setPinned(false);
-      programmaticRef.current = true;
-      el.scrollTop += (r.top - lr.top) - el.clientHeight / 3;
-      requestAnimationFrame(() => { programmaticRef.current = false; });
+      scrollElTo(el, el.scrollTop + delta);
       computeJump();
     }
   }, [selId]);
