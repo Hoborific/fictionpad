@@ -1492,3 +1492,21 @@ Full-codebase audit release: fixes across generation, storage, streaming, the se
 
 - The model picker dropdown no longer runs under the settings modal's Cancel/Save footer or forces the modal to scroll: on open it measures the space actually available above/below its input (against the modal's scrolling body, not just the viewport), caps its height to that, and flips above the input when there's more room there — re-measuring on any scroll or resize while open, so every row of every tab fits, and the list scrolls internally beyond that.
 - Saving settings no longer raises a phantom "Changed on another device" conflict when no other device touched them: every boot used to echo the just-adopted server settings straight back as a write, bumping the revision and staling every other open tab's guarded write — the next settings save there 409'd even though the data was identical. The boot adoption (and the new live pull adoption) never re-uploads the copy it received.
+
+### v4.12.5
+
+**Added**
+
+- New built-in sampler **Prefill** (Settings → Generation, per-chat overridable like any knob): a non-empty value rides as a trailing assistant message the model continues from — the classic "put words in its mouth" trick, e.g. opening a reasoning tag by hand on backends whose chat template omits it. It is stripped from continuations (`/continue`, regen-from-token), where the partial reply already IS the trailing assistant message, and never leaks into aux calls (the ✦ generator rides the global sampler set) as a raw request param. The prefill text itself is not part of the stored reply or the logprob tape — the swipe holds only what the model generated.
+
+**Changed**
+
+- Response suggestions (the chips after each AI reply) are now OFF by default for fresh installs — they fire an aux call per generation. Existing settings are untouched; Settings → Features still toggles them.
+
+- Keyboard message selection (↑/↓) now frames the selected message properly: a message that fits the viewport is shown whole (top margin when entering from below, bottom margin from above), and one taller than the view aligns its start when reached from below, its end when reached from above. The old "top of the message a third of the view down" rule cut the bottom off short messages and never snapped to the bottom when stepping down.
+
+**Fixed**
+
+- Mobile: scrolling the chat log during a generation no longer shows blank, unpainted messages above the fold, and touching the scroll view no longer collapses the visible stream to ~1 update/sec. Two per-token costs pegged the phone's main thread mid-generation, starving the paint that reveals content while scrolling: a whole-tree React flush per token, and the image-GC reference scan (a full recursive walk of the chat) running inside every per-token storage write. Per-token writes now go straight to the storage cache with both skipped (quiet + skipGc — stream text growth can never drop an image reference), the React flush rides a ~15 Hz interval with a guaranteed trailing flush at stream end, and the GC scan runs on that trailing flush.
+- Mobile: holding or dragging the scroll position during a generation no longer turns into an indefinite up/down fight with the follow-to-bottom. Programmatic scrolls used to be flagged with a boolean cleared by requestAnimationFrame — which mobile browsers pause while a finger is down, stranding the flag mid-gesture: the user's own scroll events were then swallowed as programmatic, the pinned flag never cleared, and every stream flush yanked back to the bottom. Programmatic scrolls are now recognized by where they land (the exact scrollTop target each write sets), with stale targets cleared by the first non-matching scroll event and a deliberate scroll back to the bottom still re-pinning.
+- Merely opening Settings → Models no longer arms the "Discard unsaved changes?" prompt on close: the tab auto-fetches `/v1/models` on entry and used to merge the detected context lengths through the dirty-marking setter. Detected metadata now merges silently (and is skipped entirely when nothing changed), so only real edits prompt.

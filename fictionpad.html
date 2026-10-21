@@ -1011,7 +1011,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.4';
+const APP_VERSION = '4.12.5';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -3758,7 +3758,14 @@ class AbstractStorage extends EventTarget {
   async init() {}
   getAll(store) { return this.cache[store] ?? {}; }
   get(store, key) { return this.cache[store]?.[key]; }
-  set(store, key, value) {
+  // opts.quiet: cache + save queue update WITHOUT the storechange dispatch —
+  // the generation stream uses it for per-token writes so the React tree
+  // isn't re-rendered per token; a throttled flush re-emits via a plain set.
+  // opts.skipGc: skip the imageRefDropped scan — a full recursive walk of the
+  // entity per call, which at token rate pegs the main thread on phones. Only
+  // for writes that provably can't drop an image reference (stream text
+  // growth); the caller's trailing flush runs the scan.
+  set(store, key, value, opts) {
     const prev = this.cache[store][key];
     this.cache[store][key] = value;
     // Conflicted key: the cache keeps tracking edits (a "keep mine" resolution
@@ -3770,8 +3777,8 @@ class AbstractStorage extends EventTarget {
     // Overwrites trigger GC too (not just remove()): an edit that drops the
     // last in-entity reference to a stored image — avatar cleared, swipe
     // images purged — must not leave the row orphaned.
-    if (prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
-    this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+    if (!opts?.skipGc && prev && this.imagesEnabled && imageRefDropped(prev, value)) this.#scheduleImageGc();
+    if (!opts?.quiet) this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   remove(store, key) {
     const prevName = this.cache[store][key]?.name; // stashed on a delete-conflict for the UI
@@ -4877,6 +4884,12 @@ async function* parseEventStream(body) {
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
 async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
+  // `prefill` is intercepted here instead of going out as a request param: a
+  // non-empty value rides as a trailing assistant message the model continues
+  // from (the classic "put words in its mouth" trick — e.g. forcing a
+  // reasoning tag open on backends whose template omits it).
+  const { prefill, ...restSamplers } = samplers;
+  const msgs = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   // Client-side stop filter (fallback — backends normally strip server-side).
   // A stop string split across chunks must not leak into the display text or
@@ -4912,7 +4925,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     body: JSON.stringify({
       // expandSamplerParams: dotted custom-sampler keys (e.g.
       // chat_template_kwargs.enable_thinking) become nested objects.
-      model, messages, stream: true, max_tokens: maxTokens, ...expandSamplerParams(samplers),
+      model, messages: msgs, stream: true, max_tokens: maxTokens, ...expandSamplerParams(restSamplers),
       ...(tokenProbs ? { logprobs: true, top_logprobs: Math.max(1, Math.min(20, topLogprobs | 0 || 10)) } : {}),
       ...(logitBias && Object.keys(logitBias).length ? { logit_bias: logitBias } : {}),
       ...(stopSet ? { stop } : {}),
@@ -5435,6 +5448,9 @@ const SAMPLER_FIELDS = [
   { key: 'presence_penalty',   label: 'presence_penalty',   type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
   { key: 'frequency_penalty',  label: 'frequency_penalty',  type: 'number', min: -2, max: 2,          step: 0.01, def: 0    },
   { key: 'seed',               label: 'seed (−1 = random)', type: 'number', min: -1, max: 2147483647, step: 1,    def: -1   },
+  // Prefill is NOT a request param: openaiChatStream strips it from the body
+  // and appends it as a trailing assistant message the model continues from.
+  { key: 'prefill',            label: 'Prefill', type: 'string', def: '<|think|>' },
 ];
 const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f]));
 
@@ -6221,7 +6237,7 @@ const DEFAULT_SETTINGS = {
   tokenProbs: true, // request logprobs + top_logprobs on generations
   showThinking: true, // show reasoning_content (thinking) in a collapsible box on replies
   topLogprobs: 10, // how many alternative tokens to request/store per position
-  suggestions: true, // response-suggestion chips after generations (they fire an aux call per swipe)
+  suggestions: false, // response-suggestion chips after generations (they fire an aux call per swipe)
   suggestionsCount: 2, // chips offered per reply (1–5)
   suggestionsWords: 20, // max words per suggestion (5–60)
   suggestionsPrompt: DEFAULT_SUGGESTIONS_PROMPT, // aux prompt; {{user}} {{count}} {{words}} work here
@@ -6441,8 +6457,16 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
       const { ids, ctxs } = await listModels({ endpoint: effectiveEndpoint(draft, storageKind === 'server'), apiKey: draft.apiKey, serverToken: draft.serverToken });
       setModels(ids);
       // Remember detected context lengths per model — resolveLimits uses them
-      // for the auto context/reserve knobs (Generation tab).
-      if (Object.keys(ctxs).length) set({ modelCtxs: { ...(draft.modelCtxs ?? {}), ...ctxs } });
+      // for the auto context/reserve knobs (Generation tab). Silent draft
+      // merge: detected metadata is not a user edit, so it must not dirty the
+      // form (the tab auto-fetches on entry — merely opening it would always
+      // prompt "discard changes?" on close). Skipped when nothing changed.
+      if (Object.keys(ctxs).length) setDraft(d => {
+        const merged = { ...(d.modelCtxs ?? {}), ...ctxs };
+        const same = Object.keys(merged).length === Object.keys(d.modelCtxs ?? {}).length
+          && Object.entries(merged).every(([k, v]) => d.modelCtxs?.[k] === v);
+        return same ? d : { ...d, modelCtxs: merged };
+      });
     }
     catch (e) { setModels(null); setModelsError(describeApiError(e)); }
     finally { setModelsBusy(false); }
@@ -8822,10 +8846,14 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     return m;
   }, [chat?.memoryStore, path]);
   // Stick-to-bottom: follow content growth only while the user is pinned to
-  // the bottom zone (~80px). Programmatic scrolls are flagged so they don't
-  // unpin/re-pin themselves via the scroll listener.
+  // the bottom zone (~80px). Programmatic scrolls are recognized by WHERE they
+  // land (the exact target we set), so they don't unpin/re-pin themselves via
+  // the scroll listener. Never a flag cleared by rAF: mobile browsers pause
+  // rAF while a finger is down, which stranded the flag mid-gesture and
+  // swallowed the user's own scroll events — the pinned flag never cleared
+  // and every stream flush yanked back to the bottom (the up/down fight).
   const pinnedRef = useRef(true);
-  const programmaticRef = useRef(false);
+  const programmaticTopRef = useRef(null); // scrollTop our last programmatic write lands at
   const lastTopRef = useRef(0); // for detecting user-initiated upward scrolls
   const [pinned, setPinned] = useState(true);
   // Real user scroll gestures (touch drag / wheel) — used to tell deliberate
@@ -8839,15 +8867,20 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     clearTimeout(gestureTimer.current);
     gestureTimer.current = setTimeout(() => { gestureRef.current = false; }, 300);
   };
-  // Programmatic scroll-to-bottom: flag the scroll listener, then clear the
-  // flag on the next frame regardless — when already at bottom no scroll event
-  // fires, and waiting for one would swallow the next genuine user scroll.
-  // (A real scroll event fires before rAF callbacks, so the listener still
-  // gets first crack at the flag.)
+  // Programmatic scroll-to-bottom: record where the write lands so the scroll
+  // listener recognizes its own event. A stale target is cleared by the first
+  // non-matching scroll event, so a no-op write (already at bottom — no event
+  // fires) can't swallow a later user scroll.
   const scrollElToBottom = (el) => {
-    programmaticRef.current = true;
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => { programmaticRef.current = false; });
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    programmaticTopRef.current = target;
+    el.scrollTop = target;
+  };
+  // Same recognition for programmatic scrolls to an arbitrary offset.
+  const scrollElTo = (el, target) => {
+    const t = Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight));
+    programmaticTopRef.current = t;
+    el.scrollTop = t;
   };
   // "Jump to latest" is deliberately shy: it only appears once the latest
   // message (e.g. the one being generated) is entirely scrolled out of view —
@@ -8874,8 +8907,16 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     const el = logRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    if (programmaticRef.current) { programmaticRef.current = false; lastTopRef.current = top; return; }
+    const pTarget = programmaticTopRef.current;
+    programmaticTopRef.current = null;
     const dist = el.scrollHeight - top - el.clientHeight;
+    if (pTarget != null && Math.abs(top - pTarget) <= 1) {
+      // Our own write landed — but still allow the bottom re-pin, so a stale
+      // target can't swallow a user's deliberate scroll back to the bottom.
+      lastTopRef.current = top;
+      if (dist < 40 && !pinnedRef.current) { pinnedRef.current = true; setPinned(true); }
+      return;
+    }
     let p = pinnedRef.current;
     // Unpin on upward scrolls only when they're user-driven (an active
     // gesture) or land clearly away from the bottom. Layout-driven clamp
@@ -8906,9 +8947,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
           const r = nodeEl.getBoundingClientRect();
           const lr = el.getBoundingClientRect();
           if (r.top < lr.top + 8 || r.top > lr.bottom - 80) { // not comfortably visible
-            programmaticRef.current = true;
-            el.scrollTop += (r.top - lr.top) - 12; // settle near the top of the log
-            requestAnimationFrame(() => { programmaticRef.current = false; });
+            scrollElTo(el, el.scrollTop + (r.top - lr.top) - 12); // settle near the top of the log
           }
         }
         computeJump();
@@ -8946,7 +8985,11 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     }
   }, [path]);
   // Keyboard message selection (↑/↓ in Main): highlight only while the node
-  // is on the active path; scroll it into view (a third down) when needed.
+  // is on the active path; scroll it into view when needed. A message that
+  // fits the viewport is shown whole (top margin when entering from below,
+  // bottom margin when entering from above); one taller than the view aligns
+  // its start when reached from below and its end when reached from above —
+  // never the old one-size "top a third down", which cut short messages off.
   const selId = kbdSel && path.some(n => n.id === kbdSel) ? kbdSel : null;
   useEffect(() => {
     if (!selId) return;
@@ -8956,11 +8999,13 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
     const r = nodeEl.getBoundingClientRect();
     const lr = el.getBoundingClientRect();
     if (r.top < lr.top + 8 || r.bottom > lr.bottom - 8) {
+      const fits = r.height <= el.clientHeight - 24;
+      const delta = r.top < lr.top + 8
+        ? (r.top - lr.top) - (fits ? 12 : 8)          // cut at the top → align top
+        : (r.bottom - lr.bottom) + (fits ? 12 : 8);   // cut at the bottom → align bottom
       pinnedRef.current = false;
       setPinned(false);
-      programmaticRef.current = true;
-      el.scrollTop += (r.top - lr.top) - el.clientHeight / 3;
-      requestAnimationFrame(() => { programmaticRef.current = false; });
+      scrollElTo(el, el.scrollTop + delta);
       computeJump();
     }
   }, [selId]);
@@ -10290,7 +10335,9 @@ function Main({ storage, storageKind, storageFailed }) {
       // temperature wins. Per-chat overrides don't apply outside a chat.
       samplers: { ...Object.fromEntries(
         Object.entries(enabledSamplers(st))
-          .filter(([k]) => new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+          // prefill is a streaming-path concept (trailing assistant message) —
+          // never leak it upstream as a raw request param on aux calls.
+          .filter(([k]) => k !== 'prefill' && new Set(allSamplerFields(st).map(f => f.key)).has(k))),
         temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
@@ -11560,6 +11607,11 @@ function Main({ storage, storageKind, storageFailed }) {
     const effSamplers = Object.fromEntries(
       Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
         .filter(([k]) => allowedSamplerKeys.has(k)));
+    // Prefill forces the START of a reply. A continuation already carries its
+    // own prefix — the trailing assistant partial IS the prefill mechanics
+    // (regen-from-token rides continuation too) — so a second trailing
+    // assistant message would steer the model off the text being continued.
+    if (continuation) delete effSamplers.prefill;
     let work = ref.current.chats[chatObj.id] ?? chatObj;
     // ^ Re-base on the stored chat, not the caller's snapshot: a background
     // merge-on-write (an image job's patch, enrichment) may have landed
@@ -11601,6 +11653,17 @@ function Main({ storage, storageKind, storageFailed }) {
     // protocol text too — can still be aligned and projected onto the
     // stripped display text.
     let rawAcc = null, probMap = null;
+    // Streaming UI flush throttle: per-token applyText calls write the storage
+    // cache + ref directly (quiet — merge-on-write, focus sync and the save
+    // queue all read those) but defer the React state flush to this ~15 Hz
+    // interval. A per-token flush re-renders the whole Main tree per token,
+    // which phones can't sustain: the saturated main thread can't rasterize
+    // newly revealed log content mid-scroll (blank messages above the fold)
+    // and scroll-throttled timers collapse the visible stream to ~1 Hz
+    // updates. The interval starts just before the stream loop (after the
+    // prep early-returns) and the finally clears it with a trailing flush.
+    let streamDirty = false;
+    let streamIv = null;
     // Merge-on-write: rebuild from the CURRENT stored chat and overlay only
     // the message tree, so drawer/panel edits made mid-stream (memory pins,
     // renames, chat options) survive the per-token upserts. Chat deleted
@@ -11618,7 +11681,15 @@ function Main({ storage, storageKind, storageFailed }) {
       const cur = ref.current.chats[work.id];
       if (!cur) { work = { ...work, messages }; return; }
       work = { ...cur, messages, updatedAt: Date.now() };
-      upsertChat(work.id, work);
+      // Quiet cache write + immediate ref sync per token; the React flush
+      // rides streamIv while streaming, settled writes go straight through.
+      // skipGc: a per-token write only grows the swipe's text/tokens (the
+      // spread keeps its images), so it can never drop an image reference —
+      // running imageRefDropped's full recursive chat walk at token rate
+      // pegged mobile main threads; the trailing direct flush runs the scan.
+      storage.set('Chats', work.id, work, { quiet: true, skipGc: true });
+      ref.current.chats = { ...ref.current.chats, [work.id]: work };
+      if (streamIv) streamDirty = true; else upsertChat(work.id, work);
     };
     // One global alignment pass over the finished text + raw lp tape; attaches
     // swipe.tokens when at least one span carries real prob data. Runs on
@@ -11673,6 +11744,9 @@ function Main({ storage, storageKind, storageFailed }) {
     }
     setManifestFor(chatObj.id, man, messages);
     setSuggestions(null);
+    streamIv = setInterval(() => { // see the throttle note at applyText
+      if (streamDirty) { streamDirty = false; upsertChat(work.id, work); }
+    }, 65);
     let sawDone = false; // a chunk with finish_reason arrived (clean finish)
     let truncated = false; // finish_reason 'length' — surfaced on the manifest
     // OpenAI-style backends 400 the whole request when stop has >4 entries:
@@ -11738,6 +11812,10 @@ function Main({ storage, storageKind, storageFailed }) {
       if (e.name !== 'AbortError')
         setError(`Generation failed: ${describeApiError(e)}`);
     } finally {
+      if (streamIv) { clearInterval(streamIv); streamIv = null; }
+      // Trailing UI flush so the exact end state is on screen before the
+      // post-stream writes — never resurrect a chat deleted mid-generation.
+      if (streamDirty) { streamDirty = false; if (ref.current.chats[work.id]) upsertChat(work.id, work); }
       storage.endStream(); // restore the 500 ms debounce + flush the tail
       genRef.current = null;
       setGenerating(null);
