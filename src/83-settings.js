@@ -134,7 +134,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     <div class="lore-card">
       <div class="lc-head" onClick=${() => setOpen(!open)}>
         <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
-        <span class="pill">${d.type === 'boolean' ? 'bool' : d.type === 'string' ? 'str' : 'num'}</span>
+        <span class="pill">${d.type === 'boolean' ? 'bool' : d.type === 'string' ? 'str' : d.type === 'list' ? 'list' : 'num'}</span>
         <span>${open ? '▾' : '▸'}</span>
       </div>
       ${open && html`
@@ -149,18 +149,23 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
           </div>
           <div class="grid3">
             <label class="field"><span>Type</span>
-              <select value=${d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : 'number'}
+              <select value=${d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : d.type === 'list' ? 'list' : 'number'}
                 onChange=${(e) => setDef({ type: e.target.value,
-                  def: e.target.value === 'boolean' ? true : e.target.value === 'string' ? '' : 0 })}>
+                  def: e.target.value === 'boolean' ? true : e.target.value === 'string' ? '' : e.target.value === 'list' ? [] : 0 })}>
                 <option value="number">number</option>
                 <option value="boolean">boolean (true/false)</option>
                 <option value="string">string (text / choices)</option>
+                <option value="list">list (comma-separated → array)</option>
               </select></label>
             ${d.type === 'boolean'
               ? html`<label class="field"><span>Default when enabled</span>
                   <select value=${String(d.def !== false)} onChange=${(e) => setDef({ def: e.target.value === 'true' })}>
                     <option value="true">true</option><option value="false">false</option>
                   </select></label>`
+              : d.type === 'list'
+                ? html`<label class="field"><span>Default when enabled</span>
+                    <${ListInput} delim=',' values=${parseListDef(d.def)} placeholder="specimen, slop"
+                      onChange=${(arr) => setDef({ def: arr })} /></label>`
               : d.type === 'string'
                 ? html`
                   <label class="field"><span>Default when enabled</span>
@@ -649,7 +654,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
                 samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
               })} />`)}`,
-          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>, and key <b>chat_template_kwargs.reasoning_effort</b> with type string + choices <b>low, medium, high</b> sends the picked string. Built-in keys are reserved. Registered samplers join the lists above.`,
+          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>, key <b>chat_template_kwargs.reasoning_effort</b> with type string + choices <b>low, medium, high</b> sends the picked string, and key <b>bad_words</b> with type list sends the entries as a JSON array <b>["specimen","slop"]</b> (vLLM bans them from the output). Built-in keys are reserved. Registered samplers join the lists above.`,
           html`<button class="btn small"
             onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button>`)}
         ${section('Logprobs', html`

@@ -9,6 +9,7 @@ const COMPOSER_COMMANDS = [
   ['/memory [N]', 'save a memory from the last N messages'],
   ['/model [NAME]', 'set this chat’s model'],
   ['/theme [NAME]', 'switch the UI theme'],
+  ['/export [png|json|md]', 'export the chat (full-length PNG, JSON, Markdown)'],
 ];
 
 function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, onConsumeInject = null, cmdArgs = null }) {

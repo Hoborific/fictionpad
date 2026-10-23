@@ -354,11 +354,12 @@ function Main({ storage, storageKind, storageFailed }) {
   // Slash-command argument completion domains (composer hint chips + Tab):
   // /pov completes from the chat's known characters — the exact list the /pov
   // handler matches against — /theme from theme names, /model from model ids
-  // seen by /v1/models fetches (modelCtxs keys).
+  // seen by /v1/models fetches (modelCtxs keys), /export from format names.
   const cmdArgs = useMemo(() => ({
     '/pov': characterNames,
     '/theme': Object.values(THEMES).map(t => t.name),
     '/model': Object.keys(settings.modelCtxs ?? {}),
+    '/export': ['png', 'json', 'md'],
   }), [characterNames, settings.modelCtxs]);
   // Speaker-name colour overrides (global character cards with an explicit
   // colour), keyed by lowercase name — everything else falls back to the
@@ -2162,6 +2163,13 @@ function Main({ storage, storageKind, storageFailed }) {
         });
       }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
+      if (cmd === '/export') {
+        const fmt = (arg || 'png').toLowerCase();
+        if (fmt === 'png') { onExportChatPNG(c); return null; }
+        if (fmt === 'json') { onExportChat(c); return null; }
+        if (fmt === 'md' || fmt === 'markdown') { onExportChatMarkdown(c); return null; }
+        return 'Usage: /export [png|json|md] — defaults to a full-length PNG of the chat pane.';
+      }
       if (cmd === '/recap') {
         const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
         recapChat(c, n);
@@ -2189,7 +2197,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME, /export [png|json|md]`;
     }
     return sendUserMessage(c, raw);
   }
@@ -2607,6 +2615,19 @@ function Main({ storage, storageKind, storageFailed }) {
     await storage.hydrate('Chats', c.id);
     const fresh = storage.get('Chats', c.id) ?? c;
     downloadJSON(`fictionpad-chat-${fresh.name}.json`, { type: 'fictionpad-chat', version: 1, data: fresh });
+  };
+  // /export companions: a full-length PNG of the rendered chat pane (the
+  // zero-dep SVG-foreignObject snapshot in 70-util) and a Markdown transcript
+  // of the active branch. Both are read-only — no genGuard needed.
+  const onExportChatPNG = async (c) => {
+    try {
+      await snapshotChatLogPNG(`fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
+    } catch (e) { setError(`PNG export failed: ${e?.message ?? e}`); }
+  };
+  const onExportChatMarkdown = (c) => {
+    const md = chatTranscriptMarkdown(c, personaName, characterNames);
+    downloadBlob(new Blob([md], { type: 'text/markdown' }),
+      `fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.md`);
   };
   // ---- import/export: files from the sidebar's ↑ button. Imported JSON is
   // normalized (pure core) before upsert — a hand-edited/third-party file can
