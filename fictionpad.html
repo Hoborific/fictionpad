@@ -84,8 +84,8 @@ input[type=text], input[type=number], input[type=password], select, textarea {
   border-radius: 6px; padding: 5px 8px; width: 100%;
 }
 textarea { resize: vertical; }
-label.field { display: block; margin: 8px 0; }
-label.field > span { display: block; font-size: 12px; color: var(--c-dim); margin-bottom: 2px; }
+label.field, div.field { display: block; margin: 8px 0; }
+label.field > span, div.field > span { display: block; font-size: 12px; color: var(--c-dim); margin-bottom: 2px; }
 label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 13px; }
 .hint { font-size: 12px; color: var(--c-dim); }
 .warn { color: var(--c-warning); }
@@ -1011,7 +1011,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.5';
+const APP_VERSION = '4.12.6';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -5359,6 +5359,163 @@ function imageFilename(name, url, num = 0) {
   return `${base || `image-${Date.now()}`}${suffix}.${ext || 'png'}`;
 }
 
+// Full-length PNG snapshot of the chat log (`.chatlog`) — the whole rendered
+// conversation, not just the scrolled-into-view part. Zero-dep: the log is
+// cloned, re-laid-out offscreen at full content height, serialized into an
+// SVG foreignObject with the app's own stylesheet embedded, and rasterized
+// via <img> + canvas. An SVG loaded as an image may only load data: URL
+// subresources — which is all the chat column ever renders (avatars,
+// generated images) — so the canvas stays untainted and exportable.
+async function snapshotChatLogPNG(filename) {
+  const el = document.querySelector('.chatlog');
+  if (!el) throw new Error('chat pane not found');
+  const width = Math.ceil(el.getBoundingClientRect().width);
+  if (!width) throw new Error('chat pane is not visible');
+  // The app's own stylesheet text (same-document <style>, always readable in
+  // the single-file build).
+  let css = '';
+  for (const sheet of document.styleSheets) {
+    try { for (const rule of sheet.cssRules) css += rule.cssText + '\n'; } catch { /* no cross-origin sheets in this build */ }
+  }
+  // Theme colors are inline custom properties on <html>; inside the SVG
+  // document `:root` is the <svg> element, so every var() would resolve to
+  // nothing. Copy each custom property defined anywhere in the CSS onto the
+  // wrapper element with its currently-computed value.
+  const rootCS = getComputedStyle(document.documentElement);
+  const varNames = [...new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map(m => m[1]))];
+  const vars = varNames.map(n => `${n}:${rootCS.getPropertyValue(n)};`).join('');
+  // Full-height clone: strip the scroll constraints, lay out offscreen at the
+  // live width, measure, serialize. Scrollable sub-regions (thinking boxes)
+  // are expanded too, or the snapshot would keep their on-screen clipping.
+  const clone = el.cloneNode(true);
+  clone.style.cssText = `width:${width}px;height:auto;max-height:none;overflow:visible;flex:none;`;
+  for (const n of clone.querySelectorAll('.rail-body, .rail-wrap, .think-body, .think'))
+    n.style.cssText += ';max-height:none;overflow:visible;';
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-100000px;top:0;pointer-events:none;';
+  host.appendChild(clone);
+  document.body.appendChild(host);
+  // Cloned <img> elements re-decode asynchronously — measuring before they
+  // size themselves undercounts the height and cuts off the tail of the chat
+  // (invisible on short chats whose images are still warm). Wait for every
+  // image (and webfonts) before measuring.
+  await Promise.all([...clone.querySelectorAll('img')].map(i => {
+    if (i.complete && i.naturalWidth) return null;
+    return (i.decode ? i.decode() : new Promise(r => { i.onload = i.onerror = r; })).catch(() => {});
+  }));
+  await (document.fonts?.ready ?? Promise.resolve());
+  const cloneTop = clone.getBoundingClientRect().top;
+  const height = Math.ceil(clone.getBoundingClientRect().height);
+  // Message-row boundaries, for cut points that never slice a bubble.
+  const rows = [...clone.querySelectorAll(':scope > .msg, :scope > .ctx-horizon')].map(n => {
+    const r = n.getBoundingClientRect();
+    return { top: r.top - cloneTop, bottom: r.bottom - cloneTop };
+  }).sort((a, b) => a.top - b.top);
+  host.remove();
+  if (!height) throw new Error('nothing to snapshot');
+  // Canvas guard: browsers cap canvas dimensions (16384px on mobile Safari,
+  // 32767 on Firefox, more elsewhere) and total pixels. The SVG is vector —
+  // drawImage at any scale re-renders it crisply, so the scale never drops
+  // below the device pixel ratio to fit a tall chat: the render TILES
+  // vertically into part files (name-1.png, name-2.png, …) at full resolution
+  // instead of downscaling into illegibility or clipping the tail. Cuts snap
+  // to message-row tops — a message that would straddle a boundary moves
+  // whole to the next part; a single message taller than a full part is the
+  // only case still cut mid-row (nothing can fit it whole).
+  const MAX_SIDE = 32767, MAX_AREA = 64e6;
+  const scale = Math.min(3, window.devicePixelRatio || 1, MAX_SIDE / width);
+  const outW = Math.max(1, Math.round(width * scale));
+  const fullH = Math.max(1, Math.round(height * scale));
+  const tileH = Math.max(1, Math.min(MAX_SIDE, Math.floor(MAX_AREA / outW)));
+  const cap = tileH / scale; // canvas px per part → CSS px
+  const cuts = [0];
+  let start = 0;
+  for (const { top, bottom } of rows) {
+    if (bottom - start > cap && top - start > 0) {
+      const cut = Math.floor(top);
+      if (cut > cuts[cuts.length - 1]) { cuts.push(cut); start = cut; }
+    }
+  }
+  cuts.push(height);
+  const parts = cuts.length - 1;
+  if (parts > 16) throw new Error(`chat is too tall even tiled (${height}px) — use /export json or /export md`);
+  // Base text/background come from <body>, which does not exist inside the
+  // SVG — re-apply them on the wrapper. Kept in a CSS rule (not an inline
+  // attribute) so quoted font-family values can't break the XML attribute.
+  const bodyCS = getComputedStyle(document.body);
+  const bg = rootCS.getPropertyValue('--c-bg').trim() || bodyCS.backgroundColor;
+  css += `\n.snapwrap{${vars}width:${width}px;margin:0;font-family:${bodyCS.fontFamily};font-size:${bodyCS.fontSize};line-height:${bodyCS.lineHeight};color:${bodyCS.color};background:${bg};}`;
+  const xhtml = new XMLSerializer().serializeToString(clone);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+    `<foreignObject width="100%" height="100%">` +
+    `<div xmlns="http://www.w3.org/1999/xhtml" class="snapwrap"><style><![CDATA[${css.replace(/]]>/g, ']] >')}]]></style>${xhtml}</div>` +
+    `</foreignObject></svg>`;
+  const img = new Image();
+  await new Promise((res, rej) => {
+    img.onload = res;
+    img.onerror = () => rej(new Error('snapshot render failed'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+  // Rasterize one canvas per part: the whole SVG is drawn into each with its
+  // top shifted up by the part's (message-snapped) offset, so every part
+  // renders at full resolution. A platform refusing the canvas (memory
+  // pressure) fails the export with a hint rather than shipping a blank file.
+  const dot = filename.lastIndexOf('.');
+  const stem = dot === -1 ? filename : filename.slice(0, dot);
+  const ext = dot === -1 ? '' : filename.slice(dot);
+  for (let p = 0; p < parts; p++) {
+    const off = Math.round(cuts[p] * scale);
+    const h = Math.round(cuts[p + 1] * scale) - off;
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas unavailable — use /export json or /export md');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outW, h);
+    ctx.drawImage(img, 0, -off, outW, fullH);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    if (!blob) throw new Error(`PNG encode failed on part ${p + 1}/${parts} — use /export json or /export md`);
+    downloadBlob(blob, parts > 1 ? `${stem}-${p + 1}${ext}` : filename);
+  }
+}
+
+// Plain-text transcript of the active branch as Markdown: persona name on
+// user messages, the same speaker resolution the chat column uses on
+// assistant replies (multi-speaker swipes split into per-speaker blocks).
+// Thinking, tool machinery and swipe alternates are display concerns — only
+// the viewed take's text (and image notes) are exported.
+function chatTranscriptMarkdown(chat, personaName = 'User', characterNames = []) {
+  const path = getActivePath(chat.messages, chat.activeLeafId);
+  const out = [`# ${chat.name || 'FictionPad chat'}`, '',
+    `_Exported from FictionPad · ${fmtDate(Date.now(), 'dd/mm/yyyy')}_`, ''];
+  for (const node of path) {
+    const swipe = node.swipes?.[node.activeSwipe ?? 0];
+    if (!swipe) continue;
+    const text = subUser(swipe.text ?? '', personaName);
+    const imgNotes = (swipe.images ?? [])
+      .filter(i => i && !i.pending && !i.error)
+      .map(i => `_\\[image${i.prompt ? `: ${i.prompt}` : ''}\\]_`);
+    if (node.role === 'user') {
+      out.push(`**${personaName}:**`, '', text, ...imgNotes, '');
+      continue;
+    }
+    if (node.role !== 'assistant') continue;
+    const segments = splitSpeakerSegments(text, characterNames);
+    if (segments?.length > 1) {
+      for (const seg of segments)
+        out.push(`**${seg.speaker ?? 'Narrator'}:**`, '', seg.text, '');
+      out.push(...imgNotes, '');
+      continue;
+    }
+    const speaker = swipe.speaker ?? detectSpeaker(text, characterNames) ?? 'Narrator';
+    const body = speaker !== 'Narrator' ? stripSpeakerPrefix(text, speaker) : text;
+    if (!body.trim() && !imgNotes.length) continue; // tool-only placeholder etc.
+    out.push(`**${speaker}:**`, '', body, ...imgNotes, '');
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
 function pickFile(accept) {
   return new Promise((resolve) => {
     const input = document.createElement('input');
@@ -5462,11 +5619,26 @@ const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f])
 //   string  — send-checkbox + text input, or a dropdown when the def carries
 //             a comma-separated choices list (e.g. reasoning_effort:
 //             "low, medium, high"); the chosen string is sent verbatim
+//   list    — send-checkbox + popout list editor (one per line, commas also
+//             split); entries are sent as a JSON string array (e.g. vLLM's
+//             bad_words → ["a","b"])
+//   nlist   — the same but numeric (vLLM stop_token_ids → [1,2])
+//   json    — send-checkbox + raw JSON input; the parsed value is sent as-is
+//             (objects/arrays/whatever — vLLM structured_outputs, Anthropic-
+//             style thinking blocks). Invalid JSON sends nothing.
+const parseListDef = (v) => Array.isArray(v) ? v.map(s => String(s).trim()).filter(Boolean)
+  : String(v ?? '').split(',').map(s => s.trim()).filter(Boolean);
+const parseNumListDef = (v) => parseListDef(v).map(Number).filter(Number.isFinite);
+const parseJsonDef = (v) => {
+  if (v == null) return null;
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return null; }
+};
 const customSamplerFields = (st) => (st?.customSamplers ?? [])
   .filter(d => d?.key?.trim() && !SAMPLER_FIELD_MAP[d.key.trim()])
   .map(d => {
     const options = String(d.choices ?? '').split(',').map(s => s.trim()).filter(Boolean);
-    const type = d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : 'number';
+    const type = ['boolean', 'string', 'list', 'nlist', 'json'].includes(d.type) ? d.type : 'number';
     return {
       key: d.key.trim(),
       label: d.name?.trim() || d.key.trim(),
@@ -5476,6 +5648,9 @@ const customSamplerFields = (st) => (st?.customSamplers ?? [])
       step: Number.isFinite(d.step) && d.step > 0 ? d.step : 0.01,
       def: type === 'boolean' ? d.def !== false
         : type === 'string' ? String(d.def ?? options[0] ?? '')
+        : type === 'list' ? parseListDef(d.def)
+        : type === 'nlist' ? parseNumListDef(d.def)
+        : type === 'json' ? parseJsonDef(d.def)
         : (Number.isFinite(d.def) ? d.def : 0),
       options,
       custom: true,
@@ -5483,17 +5658,106 @@ const customSamplerFields = (st) => (st?.customSamplers ?? [])
   });
 const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)];
 
+// A json knob with no valid value yet (null / blank '') sends NOTHING —
+// enabling it must not leak `key: ""` upstream. All other types pass through.
+const samplerEntryOk = (f, v) => !(f?.type === 'json' && (v == null || v === ''));
+
 // Samplers minus the user-disabled keys — the set actually sent. Values stay
 // in settings.samplers while disabled, so re-enabling restores the tuned
 // number instead of resetting it.
 const enabledSamplers = (st) => Object.fromEntries(
   Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
 
+// Popout list editor for list/nlist samplers: the row shows a compact button
+// (first entries + overflow count, full list on hover); clicking opens a
+// modal textarea, one entry per line (commas also split). Edits are STAGED in
+// the modal — Done commits, ✕/Escape/backdrop/Cancel discard. A long ban
+// list (bad_words & co) would wreck a one-line row input fast.
+// The modal is wrapped in a propagation shield: an ancestor <label> (the
+// custom-sampler card's field wrapper) would otherwise see modal clicks and
+// Safari's label activation would re-fire the edit button — re-opening the
+// popout the instant Done/✕ closes it (Escape worked, clicks didn't).
+function ListSamplerInput({ values, onChange, numeric = false }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const parse = (t) => {
+    const arr = t.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    return numeric ? arr.map(Number).filter(Number.isFinite) : arr;
+  };
+  const openEditor = () => { setText(values.join('\n')); setOpen(true); };
+  const commit = () => { onChange(parse(text)); setOpen(false); };
+  const draftCount = parse(text).length;
+  const preview = values.length <= 2 ? values.join(', ')
+    : `${values.slice(0, 2).join(', ')}  +${values.length - 2}`;
+  return html`
+    <button type="button" class="btn small" title=${values.join('\n') || 'Edit list'}
+      style=${{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      onClick=${openEditor}>${values.length ? preview : 'edit list…'}</button>
+    ${open && html`<span style=${{ display: 'contents' }}
+      onClick=${(e) => e.stopPropagation()} onMouseDown=${(e) => e.stopPropagation()}
+      onMouseUp=${(e) => e.stopPropagation()}><${Modal} title="List items" onClose=${() => setOpen(false)}
+      footer=${html`
+        <button class="btn" onClick=${() => setOpen(false)}>Cancel</button>
+        <button class="btn primary" onClick=${commit}>Done</button>`}>
+      <textarea rows=${10} value=${text}
+        placeholder=${numeric ? '128009\n128001' : 'one per line (commas also split)'}
+        onInput=${(e) => setText(e.target.value)} />
+      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''} — Done applies; ✕/Escape discard.</div>
+    <//></span>`}
+  `;
+}
+
+// Popout raw-JSON editor for json samplers: same compact-button pattern as
+// ListSamplerInput (staged edits, propagation shield — see its comment).
+// The hint flags unparseable text live; Done with invalid JSON stays open
+// (there is nothing committable), blank commits '' (stays enabled, filtered
+// from requests by samplerEntryOk).
+function JsonSamplerInput({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const [bad, setBad] = useState(false);
+  const toText = (v) => v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  const openEditor = () => { setText(toText(value)); setBad(false); setOpen(true); };
+  const handle = (e) => {
+    const t = e.target.value;
+    setText(t);
+    if (!t.trim()) { setBad(false); return; }
+    try { JSON.parse(t); setBad(false); } catch { setBad(true); }
+  };
+  const commit = () => {
+    if (!text.trim()) { onChange(''); setOpen(false); return; }
+    try { onChange(JSON.parse(text)); setOpen(false); } catch { setBad(true); }
+  };
+  const preview = (() => {
+    if (value == null || value === '') return null;
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    return s.length > 24 ? s.slice(0, 24) + '…' : s;
+  })();
+  return html`
+    <button type="button" class="btn small" title=${toText(value) || 'Edit JSON'}
+      style=${{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      onClick=${openEditor}>${preview ?? 'edit JSON…'}</button>
+    ${open && html`<span style=${{ display: 'contents' }}
+      onClick=${(e) => e.stopPropagation()} onMouseDown=${(e) => e.stopPropagation()}
+      onMouseUp=${(e) => e.stopPropagation()}><${Modal} title="JSON value" onClose=${() => setOpen(false)}
+      footer=${html`
+        <button class="btn" onClick=${() => setOpen(false)}>Cancel</button>
+        <button class="btn primary" onClick=${commit}>Done</button>`}>
+      <textarea rows=${8} value=${text} placeholder='{"key": "value"}' onInput=${handle}
+        style=${{ fontFamily: 'monospace', ...(bad ? { borderColor: 'var(--c-danger)' } : {}) }} />
+      <div class="hint" style=${{ marginTop: '6px', ...(bad ? { color: 'var(--c-danger)' } : {}) }}>
+        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing. Done applies; ✕/Escape discard.'}</div>
+    <//></span>`}
+  `;
+}
+
 // Value editor for a sampler field — true/false select for booleans, dropdown
 // for strings with a choices list (a stored value outside the list is kept as
 // an extra option, never silently dropped), plain text input for free-form
-// strings, NumInput otherwise. Shared by every surface that edits a sampler
-// set (per-chat overrides, scenario defaults), so the rows can't drift.
+// strings, popout editors for list/nlist (arrays sent verbatim) and json
+// (raw value sent as-is), NumInput otherwise. Shared by every surface that
+// edits a sampler set (per-chat overrides, scenario defaults), so the rows
+// can't drift.
 const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
   ? html`<select value=${String(value ?? f.def ?? true)} onChange=${(e) => onChange(e.target.value === 'true')}>
       <option value="true">true</option><option value="false">false</option></select>`
@@ -5505,8 +5769,14 @@ const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
             .map(o => html`<option key=${o} value=${o}>${o}</option>`)}</select>`
       : html`<input type="text" value=${String(value ?? '')} placeholder=${f.def || f.key}
           onInput=${(e) => onChange(e.target.value)} />`)
-    : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
-      onCommit=${onChange} />`;
+    : f.type === 'list'
+      ? html`<${ListSamplerInput} values=${parseListDef(value)} onChange=${onChange} />`
+      : f.type === 'nlist'
+        ? html`<${ListSamplerInput} numeric=${true} values=${parseNumListDef(value)} onChange=${onChange} />`
+        : f.type === 'json'
+          ? html`<${JsonSamplerInput} value=${value ?? f.def ?? null} onChange=${onChange} />`
+          : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+            onCommit=${onChange} />`;
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {
@@ -6319,7 +6589,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     <div class="lore-card">
       <div class="lc-head" onClick=${() => setOpen(!open)}>
         <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
-        <span class="pill">${d.type === 'boolean' ? 'bool' : d.type === 'string' ? 'str' : 'num'}</span>
+        <span class="pill">${{ boolean: 'bool', string: 'str', list: 'str[]', nlist: 'num[]', json: 'json' }[d.type] ?? 'num'}</span>
         <span>${open ? '▾' : '▸'}</span>
       </div>
       ${open && html`
@@ -6334,18 +6604,33 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
           </div>
           <div class="grid3">
             <label class="field"><span>Type</span>
-              <select value=${d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : 'number'}
+              <select value=${['boolean', 'string', 'list', 'nlist', 'json'].includes(d.type) ? d.type : 'number'}
                 onChange=${(e) => setDef({ type: e.target.value,
-                  def: e.target.value === 'boolean' ? true : e.target.value === 'string' ? '' : 0 })}>
+                  def: { boolean: true, string: '', list: [], nlist: [], json: null }[e.target.value] ?? 0 })}>
                 <option value="number">number</option>
                 <option value="boolean">boolean (true/false)</option>
                 <option value="string">string (text / choices)</option>
+                <option value="list">list (text entries → string array)</option>
+                <option value="nlist">number list (numeric entries → number array)</option>
+                <option value="json">json (raw value, e.g. object)</option>
               </select></label>
             ${d.type === 'boolean'
               ? html`<label class="field"><span>Default when enabled</span>
                   <select value=${String(d.def !== false)} onChange=${(e) => setDef({ def: e.target.value === 'true' })}>
                     <option value="true">true</option><option value="false">false</option>
                   </select></label>`
+              : d.type === 'list'
+                ? html`<div class="field"><span>Default when enabled</span>
+                    <${ListSamplerInput} values=${parseListDef(d.def)}
+                      onChange=${(arr) => setDef({ def: arr })} /></div>`
+              : d.type === 'nlist'
+                ? html`<div class="field"><span>Default when enabled</span>
+                    <${ListSamplerInput} numeric=${true} values=${parseNumListDef(d.def)}
+                      onChange=${(arr) => setDef({ def: arr })} /></div>`
+              : d.type === 'json'
+                ? html`<div class="field"><span>Default when enabled (raw JSON)</span>
+                    <${JsonSamplerInput} value=${d.def ?? null}
+                      onChange=${(v) => setDef({ def: v })} /></div>`
               : d.type === 'string'
                 ? html`
                   <label class="field"><span>Default when enabled</span>
@@ -6403,7 +6688,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     const disabledSamplers = (d.disabledSamplers ?? []).filter(k => k !== f.key);
     if (!on) disabledSamplers.push(f.key);
     const samplers = { ...(d.samplers ?? {}) };
-    if (on && samplers[f.key] == null) samplers[f.key] = f.def; // never set before — seed the default
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def ?? ''; // never set before — seed the default ('' for a json knob with no default yet; filtered from requests)
     return { ...d, samplers, disabledSamplers };
   }); };
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
@@ -6784,7 +7069,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                   <span class="sval">
                     ${active
                       ? samplerValueCtl(f, draft.samplers[f.key], (v) => setSampler(f.key, v))
-                      : html`<span class="hint">${draft.samplers?.[f.key] != null ? String(draft.samplers[f.key]) : '—'}</span>`}
+                      : html`<span class="hint">${draft.samplers?.[f.key] != null
+                          ? (typeof draft.samplers[f.key] === 'object' ? JSON.stringify(draft.samplers[f.key]) : String(draft.samplers[f.key]))
+                          : '—'}</span>`}
                   </span>
                 </div>`;
             })}
@@ -6834,7 +7121,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
                 samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
               })} />`)}`,
-          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>, and key <b>chat_template_kwargs.reasoning_effort</b> with type string + choices <b>low, medium, high</b> sends the picked string. Built-in keys are reserved. Registered samplers join the lists above.`,
+          html`
+            <div>Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests. Built-in keys are reserved. Registered samplers join the lists above. Examples:</div>
+            <div>• key <b>chat_template_kwargs.enable_thinking</b>, type boolean → <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b></div>
+            <div>• key <b>chat_template_kwargs.reasoning_effort</b>, type string + choices <b>low, medium, high</b> → sends the picked string</div>
+            <div>• key <b>bad_words</b>, type list → JSON array <b>["specimen","slop"]</b> — vLLM bans the words; the quotes are JSON syntax, not part of them</div>
+            <div>• key <b>stop_token_ids</b>, type number list → <b>[128009,128001]</b></div>
+            <div>• key <b>structured_outputs</b>, type json → <b>${'{"regex":"…"}'}</b> (invalid JSON sends nothing)</div>`,
           html`<button class="btn small"
             onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button>`)}
         ${section('Logprobs', html`
@@ -8655,6 +8948,7 @@ const COMPOSER_COMMANDS = [
   ['/memory [N]', 'save a memory from the last N messages'],
   ['/model [NAME]', 'set this chat’s model'],
   ['/theme [NAME]', 'switch the UI theme'],
+  ['/export [png|json|md]', 'export the chat (full-length PNG, JSON, Markdown)'],
 ];
 
 function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialText, onDraft, onConsumeInject = null, cmdArgs = null }) {
@@ -10337,7 +10631,11 @@ function Main({ storage, storageKind, storageFailed }) {
         Object.entries(enabledSamplers(st))
           // prefill is a streaming-path concept (trailing assistant message) —
           // never leak it upstream as a raw request param on aux calls.
-          .filter(([k]) => k !== 'prefill' && new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+          .filter(([k, v]) => {
+            if (k === 'prefill') return false;
+            const f = allSamplerFields(st).find(f => f.key === k);
+            return f && samplerEntryOk(f, v);
+          })),
         temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
@@ -10458,11 +10756,12 @@ function Main({ storage, storageKind, storageFailed }) {
   // Slash-command argument completion domains (composer hint chips + Tab):
   // /pov completes from the chat's known characters — the exact list the /pov
   // handler matches against — /theme from theme names, /model from model ids
-  // seen by /v1/models fetches (modelCtxs keys).
+  // seen by /v1/models fetches (modelCtxs keys), /export from format names.
   const cmdArgs = useMemo(() => ({
     '/pov': characterNames,
     '/theme': Object.values(THEMES).map(t => t.name),
     '/model': Object.keys(settings.modelCtxs ?? {}),
+    '/export': ['png', 'json', 'md'],
   }), [characterNames, settings.modelCtxs]);
   // Speaker-name colour overrides (global character cards with an explicit
   // colour), keyed by lowercase name — everything else falls back to the
@@ -11603,10 +11902,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // (built-ins + customSamplers) are ever sent — a removed custom def can't
     // leak a stale key upstream. Disabled globals keep their values but are
     // not sent (enabledSamplers); a per-chat override can still force one.
-    const allowedSamplerKeys = new Set(allSamplerFields(st).map(f => f.key));
+    // samplerEntryOk drops json knobs with no valid value yet.
+    const samplerFieldMap = new Map(allSamplerFields(st).map(f => [f.key, f]));
     const effSamplers = Object.fromEntries(
       Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
-        .filter(([k]) => allowedSamplerKeys.has(k)));
+        .filter(([k, v]) => samplerFieldMap.has(k) && samplerEntryOk(samplerFieldMap.get(k), v)));
     // Prefill forces the START of a reply. A continuation already carries its
     // own prefix — the trailing assistant partial IS the prefill mechanics
     // (regen-from-token rides continuation too) — so a second trailing
@@ -12266,6 +12566,13 @@ function Main({ storage, storageKind, storageFailed }) {
         });
       }
       if (cmd === '/impersonate') { onImpersonate(); return null; }
+      if (cmd === '/export') {
+        const fmt = (arg || 'png').toLowerCase();
+        if (fmt === 'png') { onExportChatPNG(c); return null; }
+        if (fmt === 'json') { onExportChat(c); return null; }
+        if (fmt === 'md' || fmt === 'markdown') { onExportChatMarkdown(c); return null; }
+        return 'Usage: /export [png|json|md] — defaults to a full-length PNG of the chat pane.';
+      }
       if (cmd === '/recap') {
         const n = Math.max(10, Math.min(500, parseInt(arg, 10) || 50));
         recapChat(c, n);
@@ -12293,7 +12600,7 @@ function Main({ storage, storageKind, storageFailed }) {
         setTheme(id);
         return `Theme set to ${THEMES[id].name}.`;
       }
-      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME`;
+      return `Unknown command ${cmd}. Available: /ooc, /continue, /pov CHAR [TEXT], /improve, /impersonate, /image [PROMPT], /recap N, /memory N, /model NAME, /theme NAME, /export [png|json|md]`;
     }
     return sendUserMessage(c, raw);
   }
@@ -12711,6 +13018,19 @@ function Main({ storage, storageKind, storageFailed }) {
     await storage.hydrate('Chats', c.id);
     const fresh = storage.get('Chats', c.id) ?? c;
     downloadJSON(`fictionpad-chat-${fresh.name}.json`, { type: 'fictionpad-chat', version: 1, data: fresh });
+  };
+  // /export companions: a full-length PNG of the rendered chat pane (the
+  // zero-dep SVG-foreignObject snapshot in 70-util) and a Markdown transcript
+  // of the active branch. Both are read-only — no genGuard needed.
+  const onExportChatPNG = async (c) => {
+    try {
+      await snapshotChatLogPNG(`fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
+    } catch (e) { setError(`PNG export failed: ${e?.message ?? e}`); }
+  };
+  const onExportChatMarkdown = (c) => {
+    const md = chatTranscriptMarkdown(c, personaName, characterNames);
+    downloadBlob(new Blob([md], { type: 'text/markdown' }),
+      `fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.md`);
   };
   // ---- import/export: files from the sidebar's ↑ button. Imported JSON is
   // normalized (pure core) before upsert — a hand-edited/third-party file can

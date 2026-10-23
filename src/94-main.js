@@ -233,7 +233,11 @@ function Main({ storage, storageKind, storageFailed }) {
         Object.entries(enabledSamplers(st))
           // prefill is a streaming-path concept (trailing assistant message) —
           // never leak it upstream as a raw request param on aux calls.
-          .filter(([k]) => k !== 'prefill' && new Set(allSamplerFields(st).map(f => f.key)).has(k))),
+          .filter(([k, v]) => {
+            if (k === 'prefill') return false;
+            const f = allSamplerFields(st).find(f => f.key === k);
+            return f && samplerEntryOk(f, v);
+          })),
         temperature: st.genTemp ?? 0.9 },
     });
     const obj = extractGenJSON(out);
@@ -1500,10 +1504,11 @@ function Main({ storage, storageKind, storageFailed }) {
     // (built-ins + customSamplers) are ever sent — a removed custom def can't
     // leak a stale key upstream. Disabled globals keep their values but are
     // not sent (enabledSamplers); a per-chat override can still force one.
-    const allowedSamplerKeys = new Set(allSamplerFields(st).map(f => f.key));
+    // samplerEntryOk drops json knobs with no valid value yet.
+    const samplerFieldMap = new Map(allSamplerFields(st).map(f => [f.key, f]));
     const effSamplers = Object.fromEntries(
       Object.entries({ ...enabledSamplers(st), ...(chatObj.settings?.samplers ?? {}) })
-        .filter(([k]) => allowedSamplerKeys.has(k)));
+        .filter(([k, v]) => samplerFieldMap.has(k) && samplerEntryOk(samplerFieldMap.get(k), v)));
     // Prefill forces the START of a reply. A continuation already carries its
     // own prefix — the trailing assistant partial IS the prefill mechanics
     // (regen-from-token rides continuation too) — so a second trailing

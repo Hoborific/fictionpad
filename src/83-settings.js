@@ -134,7 +134,7 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
     <div class="lore-card">
       <div class="lc-head" onClick=${() => setOpen(!open)}>
         <span class="t">${d.name?.trim() || d.key?.trim() || '(new sampler)'}</span>
-        <span class="pill">${d.type === 'boolean' ? 'bool' : d.type === 'string' ? 'str' : d.type === 'list' ? 'list' : 'num'}</span>
+        <span class="pill">${{ boolean: 'bool', string: 'str', list: 'str[]', nlist: 'num[]', json: 'json' }[d.type] ?? 'num'}</span>
         <span>${open ? '▾' : '▸'}</span>
       </div>
       ${open && html`
@@ -149,13 +149,15 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
           </div>
           <div class="grid3">
             <label class="field"><span>Type</span>
-              <select value=${d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : d.type === 'list' ? 'list' : 'number'}
+              <select value=${['boolean', 'string', 'list', 'nlist', 'json'].includes(d.type) ? d.type : 'number'}
                 onChange=${(e) => setDef({ type: e.target.value,
-                  def: e.target.value === 'boolean' ? true : e.target.value === 'string' ? '' : e.target.value === 'list' ? [] : 0 })}>
+                  def: { boolean: true, string: '', list: [], nlist: [], json: null }[e.target.value] ?? 0 })}>
                 <option value="number">number</option>
                 <option value="boolean">boolean (true/false)</option>
                 <option value="string">string (text / choices)</option>
-                <option value="list">list (comma-separated → array)</option>
+                <option value="list">list (text entries → string array)</option>
+                <option value="nlist">number list (numeric entries → number array)</option>
+                <option value="json">json (raw value, e.g. object)</option>
               </select></label>
             ${d.type === 'boolean'
               ? html`<label class="field"><span>Default when enabled</span>
@@ -163,9 +165,17 @@ function CustomSamplerCard({ def: d, keyClash, onChange, onRemove }) {
                     <option value="true">true</option><option value="false">false</option>
                   </select></label>`
               : d.type === 'list'
-                ? html`<label class="field"><span>Default when enabled</span>
-                    <${ListInput} delim=',' values=${parseListDef(d.def)} placeholder="specimen, slop"
-                      onChange=${(arr) => setDef({ def: arr })} /></label>`
+                ? html`<div class="field"><span>Default when enabled</span>
+                    <${ListSamplerInput} values=${parseListDef(d.def)}
+                      onChange=${(arr) => setDef({ def: arr })} /></div>`
+              : d.type === 'nlist'
+                ? html`<div class="field"><span>Default when enabled</span>
+                    <${ListSamplerInput} numeric=${true} values=${parseNumListDef(d.def)}
+                      onChange=${(arr) => setDef({ def: arr })} /></div>`
+              : d.type === 'json'
+                ? html`<div class="field"><span>Default when enabled (raw JSON)</span>
+                    <${JsonSamplerInput} value=${d.def ?? null}
+                      onChange=${(v) => setDef({ def: v })} /></div>`
               : d.type === 'string'
                 ? html`
                   <label class="field"><span>Default when enabled</span>
@@ -223,7 +233,7 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
     const disabledSamplers = (d.disabledSamplers ?? []).filter(k => k !== f.key);
     if (!on) disabledSamplers.push(f.key);
     const samplers = { ...(d.samplers ?? {}) };
-    if (on && samplers[f.key] == null) samplers[f.key] = f.def; // never set before — seed the default
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def ?? ''; // never set before — seed the default ('' for a json knob with no default yet; filtered from requests)
     return { ...d, samplers, disabledSamplers };
   }); };
   const setCap = (k, pct) => { setDirty(true); setDraft(d => ({
@@ -604,7 +614,9 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                   <span class="sval">
                     ${active
                       ? samplerValueCtl(f, draft.samplers[f.key], (v) => setSampler(f.key, v))
-                      : html`<span class="hint">${draft.samplers?.[f.key] != null ? String(draft.samplers[f.key]) : '—'}</span>`}
+                      : html`<span class="hint">${draft.samplers?.[f.key] != null
+                          ? (typeof draft.samplers[f.key] === 'object' ? JSON.stringify(draft.samplers[f.key]) : String(draft.samplers[f.key]))
+                          : '—'}</span>`}
                   </span>
                 </div>`;
             })}
@@ -654,7 +666,13 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
                 disabledSamplers: (draft.disabledSamplers ?? []).filter(k => k !== (d.key ?? '').trim()),
                 samplerFields: (draft.samplerFields ?? []).filter(k => k !== (d.key ?? '').trim()),
               })} />`)}`,
-          html`Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests — e.g. key <b>chat_template_kwargs.enable_thinking</b> with type boolean sends <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b>, key <b>chat_template_kwargs.reasoning_effort</b> with type string + choices <b>low, medium, high</b> sends the picked string, and key <b>bad_words</b> with type list sends the entries as a JSON array <b>["specimen","slop"]</b> (vLLM bans them from the output). Built-in keys are reserved. Registered samplers join the lists above.`,
+          html`
+            <div>Backend-specific params (llama.cpp, vLLM extras…). The request key is sent as-is; a dotted key nests. Built-in keys are reserved. Registered samplers join the lists above. Examples:</div>
+            <div>• key <b>chat_template_kwargs.enable_thinking</b>, type boolean → <b>chat_template_kwargs: ${'{'}enable_thinking: true/false${'}'}</b></div>
+            <div>• key <b>chat_template_kwargs.reasoning_effort</b>, type string + choices <b>low, medium, high</b> → sends the picked string</div>
+            <div>• key <b>bad_words</b>, type list → JSON array <b>["specimen","slop"]</b> — vLLM bans the words; the quotes are JSON syntax, not part of them</div>
+            <div>• key <b>stop_token_ids</b>, type number list → <b>[128009,128001]</b></div>
+            <div>• key <b>structured_outputs</b>, type json → <b>${'{"regex":"…"}'}</b> (invalid JSON sends nothing)</div>`,
           html`<button class="btn small"
             onClick=${() => set({ customSamplers: [...(draft.customSamplers ?? []), { id: uid(), name: '', key: '', type: 'number', min: 0, max: 1, step: 0.01, def: 0 }] })}>+ add sampler</button>`)}
         ${section('Logprobs', html`

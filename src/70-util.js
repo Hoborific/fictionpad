@@ -297,15 +297,26 @@ const SAMPLER_FIELD_MAP = Object.fromEntries(SAMPLER_FIELDS.map(f => [f.key, f])
 //   string  — send-checkbox + text input, or a dropdown when the def carries
 //             a comma-separated choices list (e.g. reasoning_effort:
 //             "low, medium, high"); the chosen string is sent verbatim
-//   list    — send-checkbox + comma-separated input; the entries are sent as
-//             a JSON string array (e.g. vLLM's bad_words: "a, b" → ["a","b"])
+//   list    — send-checkbox + popout list editor (one per line, commas also
+//             split); entries are sent as a JSON string array (e.g. vLLM's
+//             bad_words → ["a","b"])
+//   nlist   — the same but numeric (vLLM stop_token_ids → [1,2])
+//   json    — send-checkbox + raw JSON input; the parsed value is sent as-is
+//             (objects/arrays/whatever — vLLM structured_outputs, Anthropic-
+//             style thinking blocks). Invalid JSON sends nothing.
 const parseListDef = (v) => Array.isArray(v) ? v.map(s => String(s).trim()).filter(Boolean)
   : String(v ?? '').split(',').map(s => s.trim()).filter(Boolean);
+const parseNumListDef = (v) => parseListDef(v).map(Number).filter(Number.isFinite);
+const parseJsonDef = (v) => {
+  if (v == null) return null;
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return null; }
+};
 const customSamplerFields = (st) => (st?.customSamplers ?? [])
   .filter(d => d?.key?.trim() && !SAMPLER_FIELD_MAP[d.key.trim()])
   .map(d => {
     const options = String(d.choices ?? '').split(',').map(s => s.trim()).filter(Boolean);
-    const type = d.type === 'boolean' ? 'boolean' : d.type === 'string' ? 'string' : d.type === 'list' ? 'list' : 'number';
+    const type = ['boolean', 'string', 'list', 'nlist', 'json'].includes(d.type) ? d.type : 'number';
     return {
       key: d.key.trim(),
       label: d.name?.trim() || d.key.trim(),
@@ -316,6 +327,8 @@ const customSamplerFields = (st) => (st?.customSamplers ?? [])
       def: type === 'boolean' ? d.def !== false
         : type === 'string' ? String(d.def ?? options[0] ?? '')
         : type === 'list' ? parseListDef(d.def)
+        : type === 'nlist' ? parseNumListDef(d.def)
+        : type === 'json' ? parseJsonDef(d.def)
         : (Number.isFinite(d.def) ? d.def : 0),
       options,
       custom: true,
@@ -323,18 +336,106 @@ const customSamplerFields = (st) => (st?.customSamplers ?? [])
   });
 const allSamplerFields = (st) => [...SAMPLER_FIELDS, ...customSamplerFields(st)];
 
+// A json knob with no valid value yet (null / blank '') sends NOTHING —
+// enabling it must not leak `key: ""` upstream. All other types pass through.
+const samplerEntryOk = (f, v) => !(f?.type === 'json' && (v == null || v === ''));
+
 // Samplers minus the user-disabled keys — the set actually sent. Values stay
 // in settings.samplers while disabled, so re-enabling restores the tuned
 // number instead of resetting it.
 const enabledSamplers = (st) => Object.fromEntries(
   Object.entries(st?.samplers ?? {}).filter(([k]) => !(st?.disabledSamplers ?? []).includes(k)));
 
+// Popout list editor for list/nlist samplers: the row shows a compact button
+// (first entries + overflow count, full list on hover); clicking opens a
+// modal textarea, one entry per line (commas also split). Edits are STAGED in
+// the modal — Done commits, ✕/Escape/backdrop/Cancel discard. A long ban
+// list (bad_words & co) would wreck a one-line row input fast.
+// The modal is wrapped in a propagation shield: an ancestor <label> (the
+// custom-sampler card's field wrapper) would otherwise see modal clicks and
+// Safari's label activation would re-fire the edit button — re-opening the
+// popout the instant Done/✕ closes it (Escape worked, clicks didn't).
+function ListSamplerInput({ values, onChange, numeric = false }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const parse = (t) => {
+    const arr = t.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    return numeric ? arr.map(Number).filter(Number.isFinite) : arr;
+  };
+  const openEditor = () => { setText(values.join('\n')); setOpen(true); };
+  const commit = () => { onChange(parse(text)); setOpen(false); };
+  const draftCount = parse(text).length;
+  const preview = values.length <= 2 ? values.join(', ')
+    : `${values.slice(0, 2).join(', ')}  +${values.length - 2}`;
+  return html`
+    <button type="button" class="btn small" title=${values.join('\n') || 'Edit list'}
+      style=${{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      onClick=${openEditor}>${values.length ? preview : 'edit list…'}</button>
+    ${open && html`<span style=${{ display: 'contents' }}
+      onClick=${(e) => e.stopPropagation()} onMouseDown=${(e) => e.stopPropagation()}
+      onMouseUp=${(e) => e.stopPropagation()}><${Modal} title="List items" onClose=${() => setOpen(false)}
+      footer=${html`
+        <button class="btn" onClick=${() => setOpen(false)}>Cancel</button>
+        <button class="btn primary" onClick=${commit}>Done</button>`}>
+      <textarea rows=${10} value=${text}
+        placeholder=${numeric ? '128009\n128001' : 'one per line (commas also split)'}
+        onInput=${(e) => setText(e.target.value)} />
+      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''} — Done applies; ✕/Escape discard.</div>
+    <//></span>`}
+  `;
+}
+
+// Popout raw-JSON editor for json samplers: same compact-button pattern as
+// ListSamplerInput (staged edits, propagation shield — see its comment).
+// The hint flags unparseable text live; Done with invalid JSON stays open
+// (there is nothing committable), blank commits '' (stays enabled, filtered
+// from requests by samplerEntryOk).
+function JsonSamplerInput({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const [bad, setBad] = useState(false);
+  const toText = (v) => v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  const openEditor = () => { setText(toText(value)); setBad(false); setOpen(true); };
+  const handle = (e) => {
+    const t = e.target.value;
+    setText(t);
+    if (!t.trim()) { setBad(false); return; }
+    try { JSON.parse(t); setBad(false); } catch { setBad(true); }
+  };
+  const commit = () => {
+    if (!text.trim()) { onChange(''); setOpen(false); return; }
+    try { onChange(JSON.parse(text)); setOpen(false); } catch { setBad(true); }
+  };
+  const preview = (() => {
+    if (value == null || value === '') return null;
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    return s.length > 24 ? s.slice(0, 24) + '…' : s;
+  })();
+  return html`
+    <button type="button" class="btn small" title=${toText(value) || 'Edit JSON'}
+      style=${{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      onClick=${openEditor}>${preview ?? 'edit JSON…'}</button>
+    ${open && html`<span style=${{ display: 'contents' }}
+      onClick=${(e) => e.stopPropagation()} onMouseDown=${(e) => e.stopPropagation()}
+      onMouseUp=${(e) => e.stopPropagation()}><${Modal} title="JSON value" onClose=${() => setOpen(false)}
+      footer=${html`
+        <button class="btn" onClick=${() => setOpen(false)}>Cancel</button>
+        <button class="btn primary" onClick=${commit}>Done</button>`}>
+      <textarea rows=${8} value=${text} placeholder='{"key": "value"}' onInput=${handle}
+        style=${{ fontFamily: 'monospace', ...(bad ? { borderColor: 'var(--c-danger)' } : {}) }} />
+      <div class="hint" style=${{ marginTop: '6px', ...(bad ? { color: 'var(--c-danger)' } : {}) }}>
+        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing. Done applies; ✕/Escape discard.'}</div>
+    <//></span>`}
+  `;
+}
+
 // Value editor for a sampler field — true/false select for booleans, dropdown
 // for strings with a choices list (a stored value outside the list is kept as
 // an extra option, never silently dropped), plain text input for free-form
-// strings, a comma-separated ListInput for lists (array value sent verbatim),
-// NumInput otherwise. Shared by every surface that edits a sampler
-// set (per-chat overrides, scenario defaults), so the rows can't drift.
+// strings, popout editors for list/nlist (arrays sent verbatim) and json
+// (raw value sent as-is), NumInput otherwise. Shared by every surface that
+// edits a sampler set (per-chat overrides, scenario defaults), so the rows
+// can't drift.
 const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
   ? html`<select value=${String(value ?? f.def ?? true)} onChange=${(e) => onChange(e.target.value === 'true')}>
       <option value="true">true</option><option value="false">false</option></select>`
@@ -347,10 +448,13 @@ const samplerValueCtl = (f, value, onChange) => f.type === 'boolean'
       : html`<input type="text" value=${String(value ?? '')} placeholder=${f.def || f.key}
           onInput=${(e) => onChange(e.target.value)} />`)
     : f.type === 'list'
-      ? html`<${ListInput} delim=',' values=${parseListDef(value)}
-          placeholder="comma-separated, sent as an array" onChange=${(arr) => onChange(arr)} />`
-      : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
-        onCommit=${onChange} />`;
+      ? html`<${ListSamplerInput} values=${parseListDef(value)} onChange=${onChange} />`
+      : f.type === 'nlist'
+        ? html`<${ListSamplerInput} numeric=${true} values=${parseNumListDef(value)} onChange=${onChange} />`
+        : f.type === 'json'
+          ? html`<${JsonSamplerInput} value=${value ?? f.def ?? null} onChange=${onChange} />`
+          : html`<${NumInput} value=${value} min=${f.min} max=${f.max} step=${f.step} fallback=${f.def}
+            onCommit=${onChange} />`;
 
 // Date order is a user setting (settings.dateFormat), not locale-dependent.
 const DATE_FORMATS = {
