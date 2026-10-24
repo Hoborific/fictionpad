@@ -17,7 +17,7 @@ src = src.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
 src = src.replace(/createRoot\(document\.getElementById\('root'\)\)\.render[\s\S]*$/, `
 export { ContextInspector, MessageItem, Markdown, assemblePrompt, ProbsView,
   openaiChatStream, alignTokensToSpans, alignStrippedToolSpans, stripToolBlocksMapped, tokenize, getTokenCount, embed, embedCached, cosine, SEMANTIC_THRESHOLD,
-  effectiveEndpoint, roleConn, html, SettingsModal, DEFAULT_SETTINGS,
+  effectiveEndpoint, roleConn, html, SettingsModal, DEFAULT_SETTINGS, ModelPicker, modelPickerItems, listModels,
   Sidebar, CharacterEditor, ScenarioEditor, NewChatModal, LORE_TEMPLATES, newLoreFromTemplate,
   LorePieceEditor, chatSearchText, matchExcerpt, ChatOptions, MemoryPanel,
   Avatar, Lightbox, AvatarField,
@@ -1200,6 +1200,27 @@ trial('effectiveEndpoint rewriting', () => {
       throw new Error('absolute same-origin proxy was wrapped twice');
   } finally { globalThis.location = oldLocation; }
   if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
+});
+
+trial('model picker: duplicate response ids never multiply while searching', async () => {
+  const models = ['gemma-1', 'gemma-2', 'gemma-1', 'gemma-2', 'other-1'];
+  for (const q of ['g', 'ge', 'gem', 'gemma', 'gem', 'g', 'gemma']) {
+    const shown = fp.modelPickerItems(models, q, true);
+    if (shown.join(',') !== 'gemma-1,gemma-2')
+      throw new Error(`search ${q} produced duplicate/wrong rows: ${shown}`);
+  }
+  if (fp.modelPickerItems(models, '', true).join(',') !== 'gemma-1,gemma-2,other-1')
+    throw new Error('clearing search did not restore the unique full list');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [
+    { id: 'gemma-1', max_model_len: 8192 }, { id: 'gemma-1', max_model_len: 8192 },
+    { id: 'gemma-2' }, { id: 'other-1' },
+  ] }), { status: 200 });
+  try {
+    const { ids } = await fp.listModels({ endpoint: 'http://x' });
+    if (ids.join(',') !== 'gemma-1,gemma-2,other-1')
+      throw new Error('/v1/models ids were not deduplicated: ' + ids);
+  } finally { globalThis.fetch = oldFetch; }
 });
 
 // roleConn: per-role endpoint/key overrides, per-field inheritance, chains.

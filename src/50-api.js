@@ -105,7 +105,7 @@ async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
     const ctx = Number(m.max_model_len ?? m.n_ctx ?? m.meta?.n_ctx ?? m.context_length);
     if (Number.isFinite(ctx) && ctx > 0) ctxs[m.id] = ctx;
   }
-  return { ids: ids.sort(), ctxs };
+  return { ids: [...new Set(ids)].sort(), ctxs };
 }
 
 // Error for a non-OK API response. An OpenAI-style JSON error body wins;

@@ -178,6 +178,12 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
 // list), else the viewport — caps its height to that, and flips above the
 // input when there is more room there. Re-measures on any scroll/resize
 // while open, so a row scrolled near the modal bottom never spills.
+function modelPickerItems(models, value, typing) {
+  const all = [...new Set(models ?? [])];
+  const q = (value ?? '').toLowerCase();
+  return typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+}
+
 function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
@@ -208,9 +214,8 @@ function ModelPicker({ value, models, placeholder, onChange }) {
       window.removeEventListener('pointerdown', close, true);
     };
   }, [open]);
-  const all = models ?? [];
-  const q = (value ?? '').toLowerCase();
-  const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+  const all = modelPickerItems(models, value, false);
+  const shown = modelPickerItems(models, value, typing);
   // Blur after a pick so the mobile keyboard dismisses over the confirmed
   // choice instead of staying up with the list already closed.
   const pick = (m) => { onChange(m); setTyping(false); setOpen(false); inputRef.current?.blur(); };
