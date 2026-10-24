@@ -28,7 +28,7 @@ function isServerProxy(endpoint) {
 // endpoints pass through unchanged.
 function effectiveEndpoint(settings, serverStorageActive) {
   const ep = String(settings?.endpoint ?? '');
-  if (!ep || ep.startsWith('/proxy/')) return ep;
+  if (!ep || isServerProxy(ep)) return ep;
   return serverStorageActive && settings?.routeViaServer !== false ? `/proxy/${ep}` : ep;
 }
 
@@ -146,18 +146,25 @@ function describeApiError(e) {
   return msg;
 }
 
-// Minimal SSE parser: line-based, only data: fields, JSON payloads.
+// Minimal SSE parser: data fields accumulate until a blank event boundary;
+// multiline payloads join with newlines as required by the SSE wire format.
 // getReader()+TextDecoder instead of pipeThrough(TextDecoderStream): some
 // mobile WebKit builds lack ReadableStream.pipeThrough / TextDecoderStream.
 async function* parseEventStream(body) {
   let buf = '';
-  const take = function* (line) {
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
-    if (!data || data === '[DONE]') return;
+  const dataLines = [];
+  const take = function* () {
+    if (!dataLines.length) return;
+    const data = dataLines.join('\n');
+    dataLines.length = 0;
+    if (!data.trim() || data.trim() === '[DONE]') return;
     const json = JSON.parse(data);
     if (json.error?.message) throw new Error(json.error.message);
     yield json;
+  };
+  const line = function* (text) {
+    if (!text) { yield* take(); return; }
+    if (text.startsWith('data:')) dataLines.push(text.slice(5).replace(/^ /, ''));
   };
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -167,10 +174,11 @@ async function* parseEventStream(body) {
       if (done) break;
       const lines = (buf + decoder.decode(value, { stream: true })).split(/\r\n|\r|\n/);
       buf = lines.pop();
-      for (const line of lines) yield* take(line);
+      for (const text of lines) yield* line(text);
     }
     buf += decoder.decode();
-    if (buf) yield* take(buf);
+    if (buf) yield* line(buf);
+    yield* take();
   } finally {
     // Early exit (malformed data line, in-stream error chunk, a throw in the
     // consumer loop): cancel the body so the backend stops generating and the
@@ -230,6 +238,33 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
   } : null;
   let heldText = '';  // held-back content tail (split stop-string guard)
   const lpHeld = [];  // the same guard for the logprob tape
+  // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
+  const tapeOf = (choice) => {
+    const content = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
+    if (!Array.isArray(content)) return [];
+    const tape = [];
+    for (const t of content) {
+      if (!t?.token || stopSet?.has(t.token)) continue;
+      tape.push({
+        token: t.token,
+        logprob: t.logprob ?? null,
+        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
+          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+      });
+    }
+    return tape;
+  };
+  const cutLp = () => {
+    const joined = lpHeld.map(e => e.token).join('');
+    const cut = stopCut(joined);
+    if (cut === -1) return [...lpHeld];
+    // Keep entries starting before the cut; global alignment resolves one that
+    // straddles the boundary against the authoritative display text.
+    const out = [];
+    let acc = 0;
+    for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
+    return out;
+  };
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -265,6 +300,23 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     const thinkText = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
       ?? choice?.message?.reasoning_content;
     if (thinkText) yield { think: thinkText };
+    if (stopTail && deltaText) {
+      const combined = heldText + deltaText;
+      const cut = stopCut(combined);
+      if (cut !== -1) {
+        // The fallback owns termination once an unstripped stop is complete:
+        // emit only its prefix, trim the held tape on its own stop boundary,
+        // and close the SSE iterator (whose finally cancels the response).
+        if (cut) yield { content: combined.slice(0, cut) };
+        heldText = '';
+        lpHeld.push(...tapeOf(choice));
+        const out = cutLp();
+        lpHeld.length = 0;
+        if (out.length) yield { lp: out };
+        yield { done: true, finishReason: 'stop' };
+        return;
+      }
+    }
     // Terminal chunk: report the finish reason so the caller can tell a clean
     // finish from a dropped connection (stream that just ends). A finish
     // chunk with empty/missing delta carries the sampled EOS in logprobs —
@@ -275,10 +327,6 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     }
     if (deltaText) {
       if (!stopTail) yield { content: deltaText };
-      // A chunk that IS exactly a stop string is dropped outright, anywhere in
-      // the stream — the hold-back guard only covers split/tail cases and
-      // would re-emit an exact match once more text follows.
-      else if (stopSet.has(deltaText) && !heldText) { /* dropped */ }
       else {
         const combined = heldText + deltaText;
         heldText = stopTail(combined);
@@ -286,35 +334,21 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
           yield { content: combined.slice(0, combined.length - heldText.length) };
       }
     }
-    // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
-    const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
-    if (Array.isArray(lpContent) && lpContent.length) {
-      const tape = [];
-      for (const t of lpContent) {
-        if (!t?.token) continue;
-        if (stopSet?.has(t.token)) continue; // whole-token stop match, anywhere in the stream
-        tape.push({
-          token: t.token,
-          logprob: t.logprob ?? null,
-          top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
-            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-        });
-      }
-      if (tape.length) {
-        if (!stopTail) yield { lp: tape };
-        else {
-          // Hold back enough trailing entries to cover a stop string still
-          // split across them; release the rest — their text can no longer
-          // be part of one.
-          lpHeld.push(...tape);
-          let total = 0;
-          for (const e of lpHeld) total += e.token.length;
-          const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
-          let n = 0;
-          while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
-            total -= lpHeld[n++].token.length;
-          if (n) yield { lp: lpHeld.splice(0, n) };
-        }
+    const tape = tapeOf(choice);
+    if (tape.length) {
+      if (!stopTail) yield { lp: tape };
+      else {
+        // Hold back enough trailing entries to cover a stop string still
+        // split across them; release the rest — their text can no longer
+        // be part of one.
+        lpHeld.push(...tape);
+        let total = 0;
+        for (const e of lpHeld) total += e.token.length;
+        const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
+        let n = 0;
+        while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
+          total -= lpHeld[n++].token.length;
+        if (n) yield { lp: lpHeld.splice(0, n) };
       }
     }
   }
@@ -327,16 +361,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (out) yield { content: out };
   }
   if (lpHeld.length) {
-    const joined = lpHeld.map(e => e.token).join('');
-    const cut = stopCut(joined);
-    let out = lpHeld;
-    if (cut !== -1) {
-      // Keep the entries starting before the cut; a token straddling the
-      // boundary is approximated away by the global alignment pass.
-      out = [];
-      let acc = 0;
-      for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
-    }
+    const out = cutLp();
     if (out.length) yield { lp: out };
   }
 }

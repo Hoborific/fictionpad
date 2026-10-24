@@ -34,19 +34,41 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
   useEffect(() => {
     const dlg = dlgRef.current;
     if (!dlg) return;
+    const opener = document.activeElement;
     // Initial focus: first field in the body, else the dialog container.
     const target = dlg.querySelector('.m-body input, .m-body textarea, .m-body select, .m-body button') ?? dlg;
     target.focus?.();
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' && e.key !== 'Tab') return;
       // Only the topmost overlay reacts — one Escape must not close a stacked
-      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor).
+      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor),
+      // and Tab must never cycle through a dialog underneath the active one.
       const overlays = document.querySelectorAll('.modal-overlay');
       if (overlays.length && overlays[overlays.length - 1] !== dlg.closest('.modal-overlay')) return;
-      onCloseRef.current();
+      if (e.key === 'Escape') { onCloseRef.current(); return; }
+      const items = [...dlg.querySelectorAll(
+        'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]'
+      )].filter(el => el.tabIndex >= 0 && !el.disabled && el.type !== 'hidden'
+        && !el.hidden && el.getAttribute('aria-hidden') !== 'true' && el.getClientRects().length);
+      if (!items.length) { e.preventDefault(); dlg.focus(); return; }
+      const first = items[0], last = items[items.length - 1];
+      const active = document.activeElement;
+      if (active === dlg || !dlg.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (opener?.isConnected) opener.focus?.();
+    };
   }, []);
   return html`
     <div class="modal-overlay" onMouseDown=${(e) => e.target === e.currentTarget && onClose()}>

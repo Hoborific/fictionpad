@@ -197,6 +197,27 @@ try {
     for (const k of ['p1', 'p2', 'p4']) await post(portA, '/delete', { store: 'Personas', key: k });
   }
 
+  // ---- prototype-like keys in revision maps and delta deletion ----
+  {
+    const keys = ['__proto__', 'constructor', 'toString'];
+    for (const key of keys)
+      await post(portA, '/save', { store: 'Characters', key, data: { id: key } });
+    const full = await (await post(portA, '/all', { store: 'Characters' })).json();
+    ok(keys.every((key) => Object.hasOwn(full.entries ?? {}, key) && full.entries[key]?.id === key) &&
+      keys.every((key) => Object.hasOwn(full.revs ?? {}, key) && full.revs[key] === 1),
+      '/all roundtrips __proto__/constructor/toString entries and revs');
+    const listed = await (await post(portA, '/list', { revs: true })).json();
+    ok(keys.every((key) => Object.hasOwn(listed.revs?.Characters ?? {}, key) && listed.revs.Characters[key] === 1),
+      '/list revs:true roundtrips prototype-like keys');
+    const unchanged = await (await post(portA, '/all', { store: 'Characters', known: full.revs })).json();
+    ok(Object.keys(unchanged.entries ?? {}).length === 0 && unchanged.deleted?.length === 0,
+      'delta /all treats unchanged prototype-like keys as present');
+    for (const key of keys) await post(portA, '/delete', { store: 'Characters', key });
+    const deleted = await (await post(portA, '/all', { store: 'Characters', known: full.revs })).json();
+    ok(keys.every((key) => deleted.deleted?.includes(key) && !Object.hasOwn(deleted.revs ?? {}, key)),
+      'delta /all reports deleted __proto__/constructor/toString keys');
+  }
+
   // ---- guarded /delete ----
   // Same optimistic-concurrency contract as /save: baseRev is the rev the
   // client's copy is based on; a stale baseRev is refused with 409 instead
@@ -256,6 +277,44 @@ try {
     ok(!(imgId in ((await (await post(portA, '/all', { store: 'Images' })).json()).entries ?? {})),
       'Images store row deleted');
     await post(portA, '/delete', { store: 'Chats', key: 'cimg' });
+  }
+
+  // ---- /save reports missing imgref payloads without rejecting the write ----
+  {
+    const present = '1111111111111111', missingA = '2222222222222222', missingB = '3333333333333333';
+    const imageSave = await (await post(portA, '/save', {
+      store: 'Images', key: present, data: 'data:image/png;base64,PRESENT',
+    })).json();
+    ok(imageSave.ok === true && imageSave.missingImages === undefined,
+      'Images /save succeeds without an entity missingImages report');
+    const blindRes = await post(portA, '/save', {
+      store: 'Chats', key: 'missing-images',
+      data: { first: `imgref:${missingA}`, nested: [`imgref:${present}`, `imgref:${missingA}`, `imgref:${missingB}`] },
+    });
+    const blind = await blindRes.json();
+    ok(blindRes.ok && blind.ok === true && blind.rev === 1 &&
+      JSON.stringify(blind.missingImages) === JSON.stringify([missingA, missingB]),
+      'blind /save reports unique missingImages ids and keeps rev behavior');
+    const stored = await (await post(portA, '/load', {
+      store: 'Chats', key: 'missing-images', refs: true,
+    })).json();
+    ok(stored.data?.first === `imgref:${missingA}` && stored.rev === 1,
+      'blind /save with missing image rows still stores the entity');
+    const guardedRes = await post(portA, '/save', {
+      store: 'Chats', key: 'missing-images', baseRev: 1,
+      data: { present: `imgref:${present}`, missing: `imgref:${missingB}` },
+    });
+    const guarded = await guardedRes.json();
+    ok(guardedRes.ok && guarded.ok === true && guarded.rev === 2 &&
+      JSON.stringify(guarded.missingImages) === JSON.stringify([missingB]),
+      'guarded /save reports missingImages ids and bumps the rev');
+    const empty = await (await post(portA, '/save', {
+      store: 'Chats', key: 'missing-images', baseRev: 2, data: { present: `imgref:${present}` },
+    })).json();
+    ok(empty.rev === 3 && Array.isArray(empty.missingImages) && empty.missingImages.length === 0,
+      'successful /save reports an empty missingImages array when all rows exist');
+    await post(portA, '/delete', { store: 'Chats', key: 'missing-images' });
+    await post(portA, '/delete', { store: 'Images', key: present });
   }
 
   // corrupted kv blob: one bad row must not crash the server or kill /all.
@@ -327,7 +386,7 @@ try {
   ok(badBearer.headers.get('x-fictionpad-auth') === 'required',
     'basic+bearer: Bearer 401 still carries X-FictionPad-Auth: required');
 
-  // ---- /backup (checkpointed full-db download) ----
+  // ---- /backup (SQLite-consistent full-db download) ----
   await post(portA, '/save', { store: 'Meta', key: 'bkp', data: { stamp: 'backup-me' } });
   const bak = await fetch(`http://127.0.0.1:${portA}/backup`);
   ok(bak.status === 200, '/backup → 200');
@@ -341,16 +400,38 @@ try {
     '/backup Content-Length matches the streamed body byte count');
   ok(bakBuf.length > 100 && bakBuf.subarray(0, 15).toString('utf8') === 'SQLite format 3' && bakBuf[15] === 0,
     '/backup body is a SQLite database file');
-  // The row saved moments ago lives only in the WAL until a checkpoint — its
-  // presence in the streamed .db proves /backup checkpoints before reading.
+  // VACUUM INTO includes recent WAL contents in the standalone snapshot.
   const bakCopy = join(tmp, 'backup-copy.db');
   writeFileSync(bakCopy, bakBuf);
   {
     const raw = new DatabaseSync(bakCopy);
     ok(!!raw.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get('Meta', 'bkp'),
-      '/backup contains the just-saved row (checkpoint-before-stream)');
+      '/backup contains the just-saved row from the WAL');
+    ok(raw.prepare('PRAGMA integrity_check').get()?.integrity_check === 'ok',
+      '/backup snapshot passes SQLite integrity_check');
     raw.close();
   }
+  const [concurrentA, concurrentWrite, concurrentB] = await Promise.all([
+    fetch(`http://127.0.0.1:${portA}/backup`),
+    post(portA, '/save', { store: 'Meta', key: 'bkp-concurrent', data: { ok: true } }),
+    fetch(`http://127.0.0.1:${portA}/backup`),
+  ]);
+  const concurrentBodies = await Promise.all([concurrentA.arrayBuffer(), concurrentB.arrayBuffer()]);
+  let concurrentValid = concurrentWrite.ok && concurrentA.status === 200 && concurrentB.status === 200;
+  for (const [i, body] of concurrentBodies.entries()) {
+    const buf = Buffer.from(body);
+    const response = i === 0 ? concurrentA : concurrentB;
+    concurrentValid &&= response.headers.get('content-length') === String(buf.length);
+    const path = join(tmp, `backup-concurrent-${i}.db`);
+    writeFileSync(path, buf);
+    try {
+      const raw = new DatabaseSync(path);
+      concurrentValid &&= raw.prepare('PRAGMA integrity_check').get()?.integrity_check === 'ok';
+      concurrentValid &&= !!raw.prepare('SELECT data FROM kv WHERE store = ? AND key = ?').get('Meta', 'bkp');
+      raw.close();
+    } catch { concurrentValid = false; }
+  }
+  ok(concurrentValid, 'concurrent /backup snapshots remain complete and SQLite-consistent during a write');
   ok((await post(portA, '/backup', {})).status === 405, '/backup rejects POST (405)');
   const bakNoAuth = await fetch(`http://127.0.0.1:${portB}/backup`);
   ok(bakNoAuth.status === 401 && bakNoAuth.headers.get('x-fictionpad-auth') === 'required',
@@ -408,14 +489,24 @@ try {
   await post(portA, '/delete', { store: 'Scenarios', key: 'bogus' });
   {
     const refImg = 'aaaa1111bbbb2222', orphanImg = 'cccc3333dddd4444';
+    const inlineImg = 'dddd4444eeee5555', inlineAlias = 'eeee5555ffff6666';
+    const inlinePayload = 'data:image/png;base64,INLINE';
     await post(portA, '/save', { store: 'Images', key: refImg, data: 'data:image/webp;base64,REFERENCED' });
     await post(portA, '/save', { store: 'Images', key: orphanImg, data: 'data:image/webp;base64,ORPHAN' });
-    await post(portA, '/save', { store: 'Chats', key: 'gc-chat', data: { id: 'gc-chat', msgs: [{ pic: `imgref:${refImg}` }] } });
+    await post(portA, '/save', { store: 'Images', key: inlineImg, data: inlinePayload });
+    await post(portA, '/save', { store: 'Images', key: inlineAlias, data: inlinePayload });
+    await post(portA, '/save', { store: 'Chats', key: 'gc-chat', data: {
+      id: 'gc-chat', msgs: [{ pic: `imgref:${refImg}`, inline: inlinePayload }],
+    } });
     const gc = await post(portA, '/gc-images');
     ok(gc.status === 200, '/gc-images → 200');
-    ok((await gc.json()).deleted === 1, '/gc-images deletes exactly the orphan row');
+    const gcBody = await gc.json();
+    ok(gcBody.deleted === 1 && JSON.stringify(gcBody.deletedIds) === JSON.stringify([orphanImg]),
+      '/gc-images deletes exactly the orphan row and returns deletedIds');
     const imgs = (await (await post(portA, '/all', { store: 'Images' })).json()).entries ?? {};
     ok(imgs[refImg] === 'data:image/webp;base64,REFERENCED', '/gc-images keeps the referenced image row');
+    ok(imgs[inlineImg] === inlinePayload && imgs[inlineAlias] === inlinePayload,
+      '/gc-images keeps every Images row whose payload matches an inline data:image reference');
     ok(!(orphanImg in imgs), '/gc-images removes the unreferenced image row');
     // Meta is excluded from the reference scan but must never be swept.
     ok((await post(portA, '/load', { store: 'Meta', key: 'bkp' })).ok, '/gc-images leaves Meta rows alone');
@@ -424,7 +515,7 @@ try {
     ok((await post(portB, '/gc-images')).status === 401, '/gc-images: token server without Bearer → 401');
     ok((await post(portB, '/gc-images', {}, auth)).ok, '/gc-images: token server with Bearer → 200');
     await post(portA, '/delete', { store: 'Chats', key: 'gc-chat' });
-    await post(portA, '/delete', { store: 'Images', key: refImg });
+    for (const key of [refImg, inlineImg, inlineAlias]) await post(portA, '/delete', { store: 'Images', key });
   }
 
   // ---- request body cap (FICTIONPAD_MAX_BODY_MB) ----

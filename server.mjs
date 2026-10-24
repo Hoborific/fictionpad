@@ -37,8 +37,8 @@
 //   FICTIONPAD_CHECKPOINT_MS  interval for PRAGMA wal_checkpoint(TRUNCATE)
 //                       in ms (default 60000) — keeps the on-disk .db a
 //                       recent complete snapshot even without a shutdown.
-//   GET /backup       checkpoints the WAL, snapshots the .db to a temp copy,
-//                     then streams the copy as an attachment (same auth as the
+//   GET /backup       writes a SQLite-consistent VACUUM INTO temp snapshot,
+//                     then streams it as an attachment (same auth as the
 //                     storage routes).
 //   POST /gc-images   server-side image GC: deletes Images rows no stored
 //                     entity references (same auth + Origin guard as the
@@ -72,7 +72,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { copyFile, readFile, unlink } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -190,6 +190,20 @@ function maybeRehydrate(text, refs) {
   const data = JSON.parse(text);
   if (refs === true || !text.includes('imgref:')) return data;
   return rehydrateRefs(data, imagesLoader());
+}
+function collectImgrefs(value, refs = new Set()) {
+  if (typeof value === 'string') {
+    const m = value.startsWith('imgref:') && IMGREF_RE.exec(value);
+    if (m) refs.add(m[1]);
+    return refs;
+  }
+  if (Array.isArray(value)) { for (const v of value) collectImgrefs(v, refs); return refs; }
+  if (value && typeof value === 'object') { for (const k of Object.keys(value)) collectImgrefs(value[k], refs); }
+  return refs;
+}
+const imageExists = db.prepare('SELECT 1 FROM kv WHERE store = ? AND key = ?');
+function missingImageRefs(value) {
+  return [...collectImgrefs(value)].filter((id) => !imageExists.get('Images', id));
 }
 
 // ---- WAL durability ----
@@ -427,19 +441,16 @@ async function handleRequest(req, res) {
     return sendJson(req, res, 200, { version: 1, storage: true, images: true, gc: true, rev: true, gzip: true });
   }
 
-  // Full-db backup: checkpoint the WAL, then snapshot the .db to a temp copy
-  // and stream THAT. Streaming the live file would race: a mid-stream
-  // auto-checkpoint or a second concurrent /backup's TRUNCATE can change the
-  // file size under the open read stream, corrupting the download against its
-  // stat'd Content-Length. The copy is stat'd after landing and unlinked when
-  // the response closes (completion, client disconnect, or error alike).
+  // Full-db backup: VACUUM INTO writes a SQLite-consistent snapshot to a temp
+  // file, including WAL contents, and stream THAT. Streaming the live file
+  // would race with checkpoints and concurrent writes. The snapshot is stat'd
+  // after landing and unlinked when the response closes or its stream errors.
   if (url.pathname === '/backup') {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     if (req.method !== 'GET') return sendJson(req, res, 405, { error: 'GET required' });
     const tmpFile = join(tmpdir(), `fictionpad-backup-${process.pid}-${crypto.randomUUID()}.db`);
     try {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-      await copyFile(DB_PATH, tmpFile);
+      db.prepare('VACUUM INTO ?').run(tmpFile);
       const { size } = statSync(tmpFile);
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       res.writeHead(200, {
@@ -448,8 +459,15 @@ async function handleRequest(req, res) {
         'Content-Length': size,
         ...acaoFor(req),
       });
-      res.on('close', () => { unlink(tmpFile).catch(() => {}); });
-      createReadStream(tmpFile).pipe(res);
+      const cleanup = () => { unlink(tmpFile).catch(() => {}); };
+      res.on('close', cleanup);
+      const snapshot = createReadStream(tmpFile);
+      snapshot.on('error', (err) => {
+        console.warn(`backup stream failed: ${err?.message || err}`);
+        res.destroy();
+        cleanup();
+      });
+      snapshot.pipe(res);
     } catch (err) {
       await unlink(tmpFile).catch(() => {});
       return sendJson(req, res, 500, { error: `backup failed: ${err?.message || err}` });
@@ -468,16 +486,29 @@ async function handleRequest(req, res) {
     if (!credsOk(req)) return sendJson(req, res, 401, { error: 'unauthorized' });
     if (req.method !== 'POST') return sendJson(req, res, 405, { error: 'POST required' });
     const refs = new Set();
-    const collect = (value) => {
-      if (typeof value === 'string') {
-        const m = value.startsWith('imgref:') && IMGREF_RE.exec(value);
-        if (m) refs.add(m[1]);
-        return;
-      }
-      if (Array.isArray(value)) { for (const v of value) collect(v); return; }
-      if (value && typeof value === 'object') { for (const k of Object.keys(value)) collect(value[k]); }
-    };
+    const payloadIds = new Map();
     try {
+      for (const row of db.prepare('SELECT key, data FROM kv WHERE store = ?').all('Images')) {
+        try {
+          const payload = JSON.parse(gunzipSync(row.data).toString('utf8'));
+          if (typeof payload !== 'string') continue;
+          const ids = payloadIds.get(payload);
+          if (ids) ids.add(row.key);
+          else payloadIds.set(payload, new Set([row.key]));
+        } catch {}
+      }
+      const collect = (value) => {
+        if (typeof value === 'string') {
+          const m = value.startsWith('imgref:') && IMGREF_RE.exec(value);
+          if (m) refs.add(m[1]);
+          else if (value.startsWith('data:image/')) {
+            for (const id of payloadIds.get(value) ?? []) refs.add(id);
+          }
+          return;
+        }
+        if (Array.isArray(value)) { for (const v of value) collect(v); return; }
+        if (value && typeof value === 'object') { for (const k of Object.keys(value)) collect(value[k]); }
+      };
       for (const row of db.prepare("SELECT store, key, data FROM kv WHERE store NOT IN ('Images', 'Meta')").all()) {
         // Safe-fail, not skip: a row that fails to decode MIGHT reference
         // images, so skipping it could orphan-delete live rows. Abort the
@@ -489,12 +520,12 @@ async function handleRequest(req, res) {
       console.warn(`gc-images aborted: ${err?.message || err}`);
       return sendJson(req, res, 500, { error: `gc-images aborted: ${err?.message || err}` });
     }
-    let deleted = 0;
+    const deletedIds = [];
     const del = db.prepare('DELETE FROM kv WHERE store = ? AND key = ?');
     for (const row of db.prepare('SELECT key FROM kv WHERE store = ?').all('Images')) {
-      if (!refs.has(row.key)) { del.run('Images', row.key); deleted++; }
+      if (!refs.has(row.key)) { del.run('Images', row.key); deletedIds.push(row.key); }
     }
-    return sendJson(req, res, 200, { deleted });
+    return sendJson(req, res, 200, { deleted: deletedIds.length, deletedIds });
   }
 
   if (['/load', '/save', '/all', '/delete', '/list'].includes(url.pathname)) {
@@ -526,6 +557,7 @@ async function handleRequest(req, res) {
         if (key == null || String(key) === '') return sendJson(req, res, 400, { error: 'missing key' });
         if (data === undefined) return sendJson(req, res, 400, { error: 'missing data' });
         const blob = gzipSync(Buffer.from(JSON.stringify(data), 'utf8'));
+        const saveInfo = store === 'Images' ? {} : { missingImages: missingImageRefs(data) };
         // Guarded write: baseRev is the rev the client's copy is based on
         // (0 = "must not exist yet"). A mismatch means another device wrote
         // in between — refuse with 409 instead of clobbering. No baseRev
@@ -536,7 +568,7 @@ async function handleRequest(req, res) {
             'ON CONFLICT(store, key) DO UPDATE SET data = excluded.data, rev = kv.rev + 1')
             .run(store, String(key), blob);
           const { rev } = db.prepare('SELECT rev FROM kv WHERE store = ? AND key = ?').get(store, String(key));
-          return sendJson(req, res, 200, { ok: true, rev });
+          return sendJson(req, res, 200, { ok: true, rev, ...saveInfo });
         }
         if (!Number.isInteger(baseRev) || baseRev < 0)
           return sendJson(req, res, 400, { error: 'baseRev must be a non-negative integer' });
@@ -549,7 +581,7 @@ async function handleRequest(req, res) {
               'ON CONFLICT(store, key) DO UPDATE SET data = excluded.data, rev = kv.rev + 1')
               .run(store, String(key), blob);
             db.exec('COMMIT');
-            return sendJson(req, res, 200, { ok: true, rev: (current ?? 0) + 1 });
+            return sendJson(req, res, 200, { ok: true, rev: (current ?? 0) + 1, ...saveInfo });
           }
           db.exec('ROLLBACK');
           // No data payload — the client /loads the winning version; keeps
@@ -571,7 +603,7 @@ async function handleRequest(req, res) {
         // detects an old server that ignored the hint.
         const known = (body.known && typeof body.known === 'object' && !Array.isArray(body.known))
           ? body.known : null;
-        const entries = {}, revs = {};
+        const entries = Object.create(null), revs = Object.create(null);
         const loadImages = imagesLoader();
         for (const row of db.prepare('SELECT key, data, rev FROM kv WHERE store = ?').all(store)) {
           revs[row.key] = row.rev;
@@ -587,7 +619,7 @@ async function handleRequest(req, res) {
           }
         }
         const out = { entries, revs };
-        if (known) out.deleted = Object.keys(known).filter((k) => !(k in revs));
+        if (known) out.deleted = Object.keys(known).filter((k) => !Object.hasOwn(revs, k));
         return sendJson(req, res, 200, out);
       }
       case '/delete': {
@@ -630,9 +662,9 @@ async function handleRequest(req, res) {
         // revs: true — cheap per-key revision map (the client's focus sync
         // diffs against this instead of re-pulling every entity).
         if (body.revs === true) {
-          out.revs = {};
+          out.revs = Object.create(null);
           for (const row of db.prepare('SELECT store, key, rev FROM kv').all())
-            (out.revs[row.store] ??= {})[row.key] = row.rev;
+            (out.revs[row.store] ??= Object.create(null))[row.key] = row.rev;
         }
         return sendJson(req, res, 200, out);
       }

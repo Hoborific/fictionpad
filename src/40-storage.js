@@ -4,6 +4,50 @@
 // keeps an in-memory cache that React reads synchronously.
 // ============================================================================
 const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
+const FICTIONPAD_DB_VERSION = 5;
+const mirrorStoreName = store => store === 'Images' ? 'MirrorImages' : `Mirror${store}`;
+
+// The local world and the server mirror share one database, never one object
+// store. v5 copies only v4 rows tracked by the old rev snapshot into the new
+// Mirror<Store> stores; untracked rows remain local-only. Images are copied so
+// either world can resolve the other's out-of-band references.
+function openFictionPadDB(dbName = 'FictionPad') {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(dbName, FICTIONPAD_DB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (e) => {
+      const db = req.result, tx = req.transaction;
+      for (const s of [...STORES, 'Images', 'Mirror', ...STORES.map(mirrorStoreName), 'MirrorImages'])
+        if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+      if (e.oldVersion >= 4 && e.oldVersion < 5) {
+        const revReq = tx.objectStore('Mirror').get('revs');
+        revReq.onsuccess = () => {
+          const tracked = revReq.result?.revs ?? {};
+          for (const s of STORES) {
+            const cursorReq = tx.objectStore(s).openCursor();
+            cursorReq.onsuccess = (ev) => {
+              const cursor = ev.target.result;
+              if (!cursor) return;
+              if (cursor.key in (tracked[s] ?? {}))
+                tx.objectStore(mirrorStoreName(s)).put(cursor.value, cursor.key);
+              cursor.continue();
+            };
+          }
+        };
+      }
+      if (e.oldVersion > 0 && e.oldVersion < 5 && db.objectStoreNames.contains('Images')) {
+        const cursorReq = tx.objectStore('Images').openCursor();
+        cursorReq.onsuccess = (ev) => {
+          const cursor = ev.target.result;
+          if (!cursor) return;
+          tx.objectStore('MirrorImages').put(cursor.value, cursor.key);
+          cursor.continue();
+        };
+      }
+    };
+  });
+}
 
 // Every imgref:<id> sentinel reachable in `value` (the mirror image of
 // collectImageUrls, which finds data URLs). Lazy image loading leaves
@@ -130,14 +174,27 @@ class AbstractStorage extends EventTarget {
   // the entity never references a missing image), then the entity itself.
   // New ids join this.images only after their row landed — a flush retry
   // re-extracts cleanly (dedupe via known is idempotent).
-  async persistEntity(store, key, value) {
-    if (!this.imagesEnabled) { await this.persistPut(store, key, value); return; }
-    const { entity, images } = extractImages(value, this.images);
-    for (const [id, dataUrl] of images) {
-      await this.persistImage(id, dataUrl);
-      this.images.set(id, dataUrl);
+  async persistEntity(store, key, value, opts) {
+    let result;
+    if (!this.imagesEnabled) result = await this.persistPut(store, key, value, opts);
+    else {
+      const { entity, images } = extractImages(value, this.images);
+      for (const [id, dataUrl] of images) {
+        await this.persistImage(id, dataUrl);
+        this.images.set(id, dataUrl);
+      }
+      result = await this.persistPut(store, key, entity, opts);
     }
-    await this.persistPut(store, key, entity);
+    // The entity can win a race with server-side GC. Restore any rows it
+    // reports missing while their payloads are still held locally. A failed
+    // re-upload rejects the whole put so the normal flush retry re-runs it.
+    if (Array.isArray(result?.missingImages)) {
+      for (const id of new Set(result.missingImages)) {
+        const dataUrl = this.images.get(id);
+        if (dataUrl !== undefined) await this.persistImage(id, dataUrl);
+      }
+    }
+    return result;
   }
   // Image GC: a reference scan, never refcounting. Debounced behind deletes
   // and reference-dropping overwrites (and after the flush that lands them):
@@ -173,13 +230,13 @@ class AbstractStorage extends EventTarget {
     return referenced;
   }
   async collectImages() {
-    const referenced = this.referencedImageUrls();
-    for (const [id, dataUrl] of [...this.images]) {
-      if (referenced.has(dataUrl)) continue;
+    const referenced = this.referencedImageIds();
+    for (const [id] of [...this.images]) {
+      if (referenced.has(id)) continue;
       // The snapshot above predates the async delete loop: re-check against
-      // the CURRENT cache before each delete, so an entity saved mid-sweep
-      // can't lose an image it just started referencing (GC-vs-persist race).
-      if (this.referencedImageUrls().has(dataUrl)) continue;
+      // the CURRENT cache before each delete, including unresolved sentinels,
+      // so an entity saved mid-sweep can't lose its newly referenced image.
+      if (this.referencedImageIds().has(id)) continue;
       try {
         await this.persistDeleteImage(id);
         this.images.delete(id);
@@ -201,12 +258,26 @@ class AbstractStorage extends EventTarget {
     this._streamKey = null;
     this.flush();
   }
-  // Lazy-image hydration — base adapters are eager (boot rehydrates
-  // everything), so all of these are no-ops here. ServerDBAdapter overrides.
-  async hydrate() {}
-  async hydrateAll() {}
+  // Eager adapters have nothing to fetch, but a missing/corrupt Images row
+  // must still fail the export guard rather than serialize a sentinel.
+  async hydrate(store, key) {
+    const value = this.cache[store]?.[key];
+    return value === undefined || !collectImgrefIds(value).size;
+  }
+  async hydrateAll() {
+    const failures = [];
+    for (const s of STORES)
+      for (const [key, value] of Object.entries(this.cache[s]))
+        if (collectImgrefIds(value).size) failures.push({ store: s, key });
+    if (failures.length) {
+      const err = new Error(`Images are unavailable for ${failures.length} ${failures.length === 1 ? 'entity' : 'entities'}; export cancelled.`);
+      err.failures = failures;
+      throw err;
+    }
+    return true;
+  }
   hydrationFailed() { return false; }
-  retryHydration() {}
+  retryHydration(store, key) { return this.hydrate(store, key); }
   // Distinct image ids referenced anywhere in the live cache right now, in
   // EITHER form: unresolved imgref sentinels (lazy mode) count directly,
   // data URLs count via the in-memory id → url map.
@@ -245,6 +316,10 @@ class AbstractStorage extends EventTarget {
         // A delete conflict carries the entity's last-known name (its cache
         // entry is already gone) so the modal can label the row.
         if (e?.conflict) {
+          // A set() during the failed request may already have queued a newer
+          // snapshot. Drop it with the refused write: Keep mine reads the live
+          // cache, and no queued value may flush after conflict resolution.
+          this.saveQueue.delete(`${item.store}/${item.key}`);
           this._addConflict({ ...e.conflict, name: item.name ?? this.cache[item.store]?.[item.key]?.name });
           continue;
         }
@@ -311,39 +386,42 @@ class AbstractStorage extends EventTarget {
 }
 
 class IndexedDBAdapter extends AbstractStorage {
-  constructor(dbName = 'FictionPad') {
+  constructor(dbName = 'FictionPad', { importMirror = false } = {}) {
     super();
     this.dbName = dbName;
     this.db = null;
+    this.importMirror = importMirror;
     this.imagesEnabled = true;
   }
   async init() {
-    this.db = await new Promise((resolve, reject) => {
-      // v2 added the Characters store, v3 the Images store (out-of-band image
-      // payloads), v4 the Mirror store (ServerDBAdapter's local snapshot —
-      // unused here); onupgradeneeded creates any missing store idempotently,
-      // so old databases upgrade cleanly.
-      const req = indexedDB.open(this.dbName, 4);
-      req.onerror = () => reject(req.error);
-      req.onsuccess = () => resolve(req.result);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        for (const s of [...STORES, 'Images', 'Mirror'])
-          if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
-      };
-    });
-    // Local-mode writes share the physical database with the server adapter's
-    // mirror. Using browser storage invalidates the mirror's rev snapshot —
-    // the next server boot must do a full fetch, not a delta against revs
-    // that no longer match these rows.
+    this.db = await openFictionPadDB(this.dbName);
+    // Images first: entities are rehydrated from them (imgref: → data URL).
+    this.images = new Map(Object.entries(await this.#readAll('Images')));
+    if (this.importMirror) {
+      // Explicit ServerGate fallback only: preserve both worlds by importing
+      // just absent local keys. Same-id local edits always win. Copy every
+      // absent image payload too, including those referenced by a local row.
+      const mirrorImages = await this.#readAll('MirrorImages');
+      for (const [id, dataUrl] of Object.entries(mirrorImages)) {
+        if (this.images.has(id)) continue;
+        await this.persistImage(id, dataUrl);
+        this.images.set(id, dataUrl);
+      }
+      for (const s of STORES) {
+        const local = await this.#readAll(s);
+        const mirrored = await this.#readAll(mirrorStoreName(s));
+        for (const [key, value] of Object.entries(mirrored))
+          if (!(key in local)) await this.persistPut(s, key, value);
+      }
+    }
+    // A normal local boot never merges the mirror. Any local boot invalidates
+    // its rev trust marker, forcing the next server boot to take a full fetch.
     try {
       await new Promise((resolve, reject) => {
         const r = this.db.transaction('Mirror', 'readwrite').objectStore('Mirror').delete('revs');
         r.onsuccess = () => resolve(); r.onerror = () => reject(r.error);
       });
     } catch {}
-    // Images first: entities are rehydrated from them (imgref: → data URL).
-    this.images = new Map(Object.entries(await this.#readAll('Images')));
     for (const s of STORES) {
       const all = await this.#readAll(s);
       for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);

@@ -19,13 +19,11 @@ class ServerDBAdapter extends AbstractStorage {
     // over a threshold go out gzipped; responses are handled transparently
     // by fetch.
     this.gzipEnabled = false;
-    // Local mirror: the same 'FictionPad' IndexedDB database the IndexedDB
-    // adapter uses (schema v4 adds the Mirror store for the rev snapshot).
-    // Entities land here in their raw (sentinel) form on every boot/pull/
-    // save, images write through on persist — boot then reads locally and
-    // delta-syncs against the server instead of downloading everything, and
-    // the browser-storage fallback boots from a complete recent copy.
+    // Local mirror: separate Mirror<Store>/MirrorImages stores in the same
+    // database as browser storage. Mirror/revs alone trusts the snapshot.
     this.mdb = null;
+    this._mirrorNeedsFullBoot = true;
+    this._mirrorFailure = 0;
     this._imgInflight = new Map();      // image id → in-flight load promise
     this._hydrateInflight = new Map();  // store/key → in-flight hydrate promise
     // Hydration failures remembered per store/key for the session: an entity
@@ -81,41 +79,48 @@ class ServerDBAdapter extends AbstractStorage {
   }
 
   // ---- IndexedDB mirror ----
-  async #mirrorOpen() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('FictionPad', 4);
-      req.onerror = () => reject(req.error);
-      req.onsuccess = () => resolve(req.result);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        for (const s of [...STORES, 'Images', 'Mirror'])
-          if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
-      };
-    });
-  }
+  #mirrorOpen() { return openFictionPadDB('FictionPad'); }
   #mReq(req) {
     return new Promise((resolve, reject) => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
   }
+  #mPhysical(store) { return store === 'Mirror' ? store : mirrorStoreName(store); }
   #mGet(store, key) {
     if (!this.mdb) return Promise.resolve(undefined);
-    return this.#mReq(this.mdb.transaction(store, 'readonly').objectStore(store).get(key));
+    const physical = this.#mPhysical(store);
+    return this.#mReq(this.mdb.transaction(physical, 'readonly').objectStore(physical).get(key));
   }
-  #mPut(store, key, value) {
-    if (!this.mdb) return Promise.resolve();
-    return this.#mReq(this.mdb.transaction(store, 'readwrite').objectStore(store).put(value, key));
+  async #mPut(store, key, value) {
+    if (!this.mdb) return true;
+    try {
+      const physical = this.#mPhysical(store);
+      await this.#mReq(this.mdb.transaction(physical, 'readwrite').objectStore(physical).put(value, key));
+      return true;
+    } catch (e) {
+      console.warn('FictionPad: mirror write failed', e);
+      if (store === 'Mirror' || STORES.includes(store)) await this.#invalidateMirror();
+      return false;
+    }
   }
-  #mDel(store, key) {
-    if (!this.mdb) return Promise.resolve();
-    return this.#mReq(this.mdb.transaction(store, 'readwrite').objectStore(store).delete(key));
+  async #mDel(store, key) {
+    if (!this.mdb) return true;
+    try {
+      const physical = this.#mPhysical(store);
+      await this.#mReq(this.mdb.transaction(physical, 'readwrite').objectStore(physical).delete(key));
+      return true;
+    } catch (e) {
+      console.warn('FictionPad: mirror write failed', e);
+      if (store === 'Mirror' || STORES.includes(store)) await this.#invalidateMirror();
+      return false;
+    }
   }
   #mAll(store) {
     if (!this.mdb) return Promise.resolve({});
     return new Promise((resolve, reject) => {
-      const out = {};
-      const req = this.mdb.transaction(store, 'readonly').objectStore(store).openCursor();
+      const out = {}, physical = this.#mPhysical(store);
+      const req = this.mdb.transaction(physical, 'readonly').objectStore(physical).openCursor();
       req.onsuccess = (e) => {
         const cursor = e.target.result;
         if (cursor) { out[cursor.key] = cursor.value; cursor.continue(); }
@@ -126,20 +131,29 @@ class ServerDBAdapter extends AbstractStorage {
   }
   #mAllKeys(store) {
     if (!this.mdb) return Promise.resolve([]);
-    return this.#mReq(this.mdb.transaction(store, 'readonly').objectStore(store).getAllKeys());
+    const physical = this.#mPhysical(store);
+    return this.#mReq(this.mdb.transaction(physical, 'readonly').objectStore(physical).getAllKeys());
   }
-  // Mirror writes never block persistence — a mirror failure degrades the
-  // next boot to a full fetch, nothing more.
-  #mFire(p) { p?.catch?.(e => console.warn('FictionPad: mirror write failed', e)); }
-  // The rev snapshot is the mirror's trust marker: it exists only after a
-  // completed server-mode boot, and local-mode boots delete it. Debounced —
-  // a lost trailing second just makes the next delta boot over-fetch.
-  #saveMirrorRevs() {
-    if (!this.mdb || !this.revEnabled) return;
+  async #invalidateMirror() {
+    this._mirrorNeedsFullBoot = true;
+    this._mirrorFailure++;
     clearTimeout(this._revTimer);
-    this._revTimer = setTimeout(() => {
-      this.#mFire(this.#mPut('Mirror', 'revs', { revs: this.revs }));
-    }, 1000);
+    if (!this.mdb) return;
+    try {
+      await this.#mReq(this.mdb.transaction('Mirror', 'readwrite').objectStore('Mirror').delete('revs'));
+    } catch (e) { console.warn('FictionPad: could not invalidate mirror revs', e); }
+  }
+  // Rev writes are allowed only while every mirrored entity write is known to
+  // have landed. Any failure deletes trust and blocks later debounced writes
+  // until a complete reseed succeeds.
+  #saveMirrorRevs() {
+    clearTimeout(this._revTimer);
+    if (!this.mdb || !this.revEnabled || this._mirrorNeedsFullBoot) return;
+    this._revTimer = setTimeout(() => { this.#writeMirrorRevs(); }, 1000);
+  }
+  #writeMirrorRevs() {
+    if (!this.mdb || !this.revEnabled || this._mirrorNeedsFullBoot) return Promise.resolve(false);
+    return this.#mPut('Mirror', 'revs', { revs: this.revs });
   }
 
   async init() {
@@ -171,29 +185,28 @@ class ServerDBAdapter extends AbstractStorage {
     this.lazyImages = this.imagesEnabled;
     this.images = new Map();
     await mirrorP;
-    // Trusted mirror snapshot? The revs record is the trust marker — and the
-    // boundary between the two worlds sharing these object stores: rows whose
-    // key is in the snapshot are mirror-tracked (server state, reseeded and
-    // pruned freely); rows that are not are LOCAL-MODE data (this is the same
-    // database IndexedDBAdapter uses) and must survive every server boot
-    // untouched — dormant, invisible to server mode, there again when the
-    // user next boots browser storage.
-    let snap = null, prevRevs = null;
+    if (this.mdb && !this.revEnabled) await this.#invalidateMirror();
+    // Mirror/revs is the only trust marker. All entity rows come from the
+    // separate mirror stores, so local same-id data can never leak into a
+    // server boot or be pruned by a full reseed.
+    let snap = null;
     if (this.mdb && this.revEnabled) {
       try {
         const rec = await this.#mGet('Mirror', 'revs');
         if (rec?.revs) {
-          prevRevs = rec.revs;
           snap = { revs: rec.revs, stores: {} };
           for (const s of STORES) snap.stores[s] = await this.#mAll(s);
+          this._mirrorNeedsFullBoot = false;
         }
-      } catch (e) { console.warn('FictionPad: mirror read failed, doing a full boot:', e?.message || e); snap = null; }
+      } catch (e) {
+        console.warn('FictionPad: mirror read failed, doing a full boot:', e?.message || e);
+        snap = null;
+        await this.#invalidateMirror();
+      }
     }
+    const bootFailure = this._mirrorFailure;
     if (snap) {
-      // Delta boot: seed from the mirror-TRACKED rows of the local snapshot
-      // (dormant local-mode rows never enter the server-mode cache), then
-      // pull only what the server says changed (one cheap /all per store, in
-      // parallel).
+      // Delta boot: seed from the trusted mirror, then pull only changed rows.
       this.revs = snap.revs;
       await Promise.all(STORES.map(async (s) => {
         const local = snap.stores[s] ?? {};
@@ -204,14 +217,14 @@ class ServerDBAdapter extends AbstractStorage {
         this.revs[s] = { ...(res2.revs ?? this.revs[s] ?? {}) };
         for (const k of Object.keys(entries)) {
           out[k] = rehydrateImages(entries[k], this.images);
-          this.#mFire(this.#mPut(s, k, entries[k])); // mirror keeps the raw form
+          await this.#mPut(s, k, entries[k]); // mirror keeps the raw form
         }
         // A server that predates delta sync ignores `known` and returns
         // every entry with no `deleted` field — then absence from entries
         // IS the deletion signal.
         const gone = res2.deleted ? new Set(res2.deleted)
           : new Set(Object.keys(out).filter(k => !(k in entries)));
-        for (const k of gone) { delete out[k]; this.#mFire(this.#mDel(s, k)); }
+        for (const k of gone) { delete out[k]; await this.#mDel(s, k); }
         this.cache[s] = out;
       }));
     } else {
@@ -223,18 +236,22 @@ class ServerDBAdapter extends AbstractStorage {
         const out = {};
         for (const k of Object.keys(all)) out[k] = rehydrateImages(all[k], this.images);
         this.cache[s] = out;
-        if (this.mdb) this.#mFire((async () => {
-          // Reseed: overlay server state. Only mirror-TRACKED rows are
-          // deleted when missing from the server — untracked rows are
-          // dormant local-mode data, never the mirror's to touch.
-          const tracked = prevRevs?.[s] ?? {};
+        if (this.mdb) try {
           const existing = await this.#mAllKeys(s);
-          for (const k of existing) if (!(k in all) && k in tracked) await this.#mDel(s, k);
+          for (const k of existing) if (!(k in all)) await this.#mDel(s, k);
           for (const k of Object.keys(all)) await this.#mPut(s, k, all[k]);
-        })());
+        } catch (e) {
+          console.warn('FictionPad: mirror reseed failed', e);
+          await this.#invalidateMirror();
+        }
       }));
     }
-    this.#saveMirrorRevs();
+    if (this.mdb && this.revEnabled) {
+      // A full reseed re-enables trust only if every entity write completed.
+      // Delta boots keep their existing trust unless a write invalidated it.
+      if (!snap && this._mirrorFailure === bootFailure) this._mirrorNeedsFullBoot = false;
+      await this.#writeMirrorRevs();
+    }
     this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   // Guarded write: the baseRev is the rev our copy is based on (0 = "must not
@@ -242,19 +259,20 @@ class ServerDBAdapter extends AbstractStorage {
   // write from another device. Images rows stay blind — content-addressed
   // (same id = same bytes), a guard would only add round-trips. Every landed
   // write is mirrored locally (raw form) for the next delta boot.
-  async persistPut(store, key, value) {
+  async persistPut(store, key, value, opts) {
     if (!this.revEnabled || store === 'Images') {
       const r = await this.#post('/save', { store, key, data: value });
-      this.#mFire(this.#mPut(store, key, value));
+      await this.#mPut(store, key, value);
       return r;
     }
     try {
-      const res = await this.#post('/save', { store, key, data: value, baseRev: this.revs[store]?.[key] ?? 0 });
+      const baseRev = opts?.baseRev ?? this.revs[store]?.[key] ?? 0;
+      const res = await this.#post('/save', { store, key, data: value, baseRev });
       if (Number.isInteger(res?.rev)) {
         (this.revs[store] ??= {})[key] = res.rev;
         this.#saveMirrorRevs();
       }
-      this.#mFire(this.#mPut(store, key, value));
+      await this.#mPut(store, key, value);
       return res;
     } catch (e) {
       if (e?.status === 409) {
@@ -283,50 +301,59 @@ class ServerDBAdapter extends AbstractStorage {
       throw e;
     }
     if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-    this.#mFire(this.#mDel(store, key));
+    await this.#mDel(store, key);
   }
-  // Images write through to the mirror, so the browser-storage fallback
-  // always boots from a complete copy and hydrate() can serve repeats
-  // locally.
-  persistImage(id, dataUrl) {
-    this.#mFire(this.#mPut('Images', id, dataUrl));
-    return this.#post('/save', { store: 'Images', key: id, data: dataUrl });
+  // Images write through to MirrorImages after the server row lands, so the
+  // explicit browser-storage fallback can import every available payload.
+  async persistImage(id, dataUrl) {
+    const result = await this.#post('/save', { store: 'Images', key: id, data: dataUrl });
+    await this.#mPut('Images', id, dataUrl);
+    return result;
   }
-  persistDeleteImage(id) {
-    this.#mFire(this.#mDel('Images', id));
-    return this.#post('/delete', { store: 'Images', key: id });
+  async persistDeleteImage(id) {
+    await this.#post('/delete', { store: 'Images', key: id });
+    await this.#mDel('Images', id);
   }
-  // With the gc capability the sweep runs server-side (one POST, covers every
-  // device's entities); the local cache-scan stays the fallback for older
-  // servers. Afterwards prune the in-memory map AND the mirror by the same
-  // sentinel-aware reference scan, so a later save can't reference a row the
-  // server just dropped and the mirror doesn't accumulate orphans.
+  // Server GC can race a just-saved or newly pulled reference. Restore every
+  // deleted row still referenced by the CURRENT cache when its payload is in
+  // memory, then prune only unreferenced local copies. Re-upload failures keep
+  // the payload in memory/mirror and are retried by a later GC pass.
   async collectImages() {
-    if (!this.gcEnabled) { await super.collectImages(); this.#pruneLocalImages(); return; }
     try {
-      await this.#post('/gc-images', {});
-    } catch (e) { console.error('FictionPad: image GC failed', e); return; }
-    this.#pruneLocalImages();
-  }
-  #pruneLocalImages() {
-    const ids = this.referencedImageIds();
-    for (const [id] of [...this.images]) if (!ids.has(id)) this.images.delete(id);
-    this.#mFire((async () => {
-      // The object stores also hold DORMANT local-mode entities (untracked
-      // by the rev snapshot) — scanning only the server-mode cache would
-      // delete images a dormant entity still references, breaking the
-      // browser-storage world. Scan the stores themselves; a legacy inline
-      // entity references by data URL, so rows are kept on either match.
-      const refIds = new Set(), refUrls = new Set();
-      for (const s of STORES)
-        for (const v of Object.values(await this.#mAll(s))) {
-          collectImageUrls(v, refUrls);
-          collectImgrefIds(v, refIds);
+      if (!this.gcEnabled) {
+        await super.collectImages();
+        await this.#pruneLocalImages();
+        return;
+      }
+      const result = await this.#post('/gc-images', {});
+      const deletedIds = Array.isArray(result?.deletedIds) ? new Set(result.deletedIds) : null;
+      if (deletedIds) {
+        for (const id of deletedIds) {
+          const dataUrl = this.images.get(id);
+          if (dataUrl !== undefined && this.referencedImageIds().has(id))
+            await this.persistImage(id, dataUrl);
         }
-      const rows = await this.#mAll('Images');
-      for (const [k, url] of Object.entries(rows))
-        if (!refIds.has(k) && !refUrls.has(url)) await this.#mDel('Images', k);
-    })());
+      }
+      await this.#pruneLocalImages(deletedIds);
+    } catch (e) { console.error('FictionPad: image GC failed', e); }
+  }
+  async #pruneLocalImages(deletedIds = null) {
+    const refIds = new Set(), refUrls = new Set();
+    for (const s of STORES)
+      for (const v of Object.values(await this.#mAll(s))) {
+        collectImageUrls(v, refUrls);
+        collectImgrefIds(v, refIds);
+      }
+    const rows = await this.#mAll('Images');
+    const ids = new Set([...this.images.keys(), ...Object.keys(rows)]);
+    for (const id of ids) {
+      if (deletedIds && !deletedIds.has(id)) continue;
+      const url = this.images.get(id) ?? rows[id];
+      if (refIds.has(id) || refUrls.has(url)) continue;
+      if (this.referencedImageIds().has(id) || this.referencedImageUrls().has(url)) continue;
+      this.images.delete(id);
+      if (id in rows) await this.#mDel('Images', id);
+    }
   }
   // Used by the settings migration helpers. No refs hint: the server
   // rehydrates, so pulled entities always travel self-contained (inline).
@@ -341,7 +368,7 @@ class ServerDBAdapter extends AbstractStorage {
       (this.revs[store] ??= {})[key] = rev;
       this.#saveMirrorRevs();
     }
-    this.#mFire(this.#mPut(store, key, raw));
+    await this.#mPut(store, key, raw);
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   // On-demand image fetch: memory → mirror → server. Server hits are cached
@@ -357,7 +384,7 @@ class ServerDBAdapter extends AbstractStorage {
         const res = await this.#post('/load', { store: 'Images', key: id });
         if (typeof res?.data === 'string') {
           this.images.set(id, res.data);
-          this.#mFire(this.#mPut('Images', id, res.data));
+          await this.#mPut('Images', id, res.data);
           return res.data;
         }
       } catch (e) { console.warn('FictionPad: image pull failed', e); }
@@ -366,38 +393,38 @@ class ServerDBAdapter extends AbstractStorage {
     this._imgInflight.set(id, p);
     try { return await p; } finally { this._imgInflight.delete(id); }
   }
-  // Lazy-image hydration: fetch every image an entity references that isn't
-  // loaded yet, then rehydrate the CURRENT cache value (it may have been
-  // rewritten while fetches were in flight) and notify. In-flight deduped
-  // per entity; no-op for eager adapters (base class) and inline mode.
-  // A key whose referenced rows can't be pulled parks in _hydrateFailed and
-  // later requests return early — surfaces query hydrationFailed() to render
-  // a failed placeholder instead of re-firing the doomed fetch on every
-  // mount; the storechange on failure flips them from loading to failed.
+  // Resolve to true only when the CURRENT entity has no unresolved sentinel.
+  // The per-key in-flight promise keeps checking current refs after every
+  // await, so a remote pull or local edit during hydration is included. A
+  // failure parks only the exact entity copy whose refs were just attempted;
+  // a changed copy gets its own fetch round before it can be marked failed.
   async hydrate(store, key) {
-    if (!this.lazyImages) return;
+    if (!this.lazyImages) return true;
     const id = `${store}/${key}`;
-    if (this._hydrateFailed.has(id)) return;
+    if (this._hydrateFailed.has(id)) return false;
     if (this._hydrateInflight.has(id)) return this._hydrateInflight.get(id);
     const p = (async () => {
-      const entity = this.cache[store]?.[key];
-      if (!entity) return;
-      const missing = collectImgrefIds(entity);
-      for (const loaded of this.images.keys()) missing.delete(loaded);
-      if (!missing.size) { this._hydrateFailed.delete(id); return; }
-      let any = false;
-      for (const imgId of missing) if (await this.#loadImage(imgId)) any = true;
-      let failed = false;
-      for (const imgId of missing) if (!this.images.has(imgId)) failed = true;
-      if (failed) this._hydrateFailed.add(id); else this._hydrateFailed.delete(id);
-      if (any) {
+      for (;;) {
+        const entity = this.cache[store]?.[key];
+        if (!entity) { this._hydrateFailed.delete(id); return true; }
+        const missing = collectImgrefIds(entity);
+        for (const loaded of this.images.keys()) missing.delete(loaded);
+        for (const imgId of missing) await this.#loadImage(imgId);
         const cur = this.cache[store]?.[key];
-        if (cur) this.cache[store][key] = rehydrateImages(cur, this.images);
-      }
-      // Notify on either outcome: loaded images swap into the cache value, a
-      // failure leaves the sentinels but flips surfaces to the failed state.
-      if (any || failed)
+        if (!cur) { this._hydrateFailed.delete(id); return true; }
+        const hydrated = rehydrateImages(cur, this.images);
+        const changed = hydrated !== cur;
+        if (changed) this.cache[store][key] = hydrated;
+        if (!collectImgrefIds(hydrated).size) {
+          this._hydrateFailed.delete(id);
+          if (changed) this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+          return true;
+        }
+        if (cur !== entity) continue;
+        this._hydrateFailed.add(id);
         this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+        return false;
+      }
     })();
     this._hydrateInflight.set(id, p);
     try { return await p; } finally { this._hydrateInflight.delete(id); }
@@ -412,14 +439,31 @@ class ServerDBAdapter extends AbstractStorage {
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
     return this.hydrate(store, key);
   }
-  // Full hydration for whole-library exports — resolves every sentinel in
-  // every store. Genuinely fetches the world; call only when the user asked
-  // for a complete export.
+  // Whole-library export contract: true means every current entity is fully
+  // rehydrated. Otherwise throw one Error with `failures: [{ store, key }]`;
+  // callers must not serialize the cache after that rejection.
   async hydrateAll() {
-    if (!this.lazyImages) return;
+    if (!this.lazyImages) return true;
+    const failures = [], failedIds = new Set();
     for (const s of STORES)
-      for (const k of Object.keys(this.cache[s]))
-        await this.hydrate(s, k);
+      for (const k of Object.keys(this.cache[s])) {
+        if (await this.hydrate(s, k)) continue;
+        failures.push({ store: s, key: k });
+        failedIds.add(`${s}/${k}`);
+      }
+    // Include entities/refs that arrived during the fetch rounds. Reporting
+    // success with any sentinel left would make a full backup silently lossy.
+    for (const s of STORES)
+      for (const [k, value] of Object.entries(this.cache[s])) {
+        if (!collectImgrefIds(value).size || failedIds.has(`${s}/${k}`)) continue;
+        failures.push({ store: s, key: k });
+      }
+    if (failures.length) {
+      const err = new Error(`Could not load images for ${failures.length} ${failures.length === 1 ? 'entity' : 'entities'}; export cancelled.`);
+      err.failures = failures;
+      throw err;
+    }
+    return true;
   }
   // User picked a winner for a 409'd key:
   //   theirs — pull the server version over the local cache (local edits
@@ -444,7 +488,7 @@ class ServerDBAdapter extends AbstractStorage {
           throw e;
         }
         if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-        this.#mFire(this.#mDel(store, key));
+        await this.#mDel(store, key);
         await super.resolveConflict(store, key);
         return;
       }
@@ -473,24 +517,12 @@ class ServerDBAdapter extends AbstractStorage {
       if (value === undefined) { await super.resolveConflict(store, key); return; }
       const baseRev = this.conflicts.get(`${store}/${key}`)?.rev ?? 0;
       try {
-        let entity = value;
-        if (this.imagesEnabled) {
-          const out = extractImages(value, this.images);
-          entity = out.entity;
-          for (const [id, dataUrl] of out.images) {
-            await this.persistImage(id, dataUrl);
-            this.images.set(id, dataUrl);
-          }
-        }
-        const res = await this.#post('/save', { store, key, data: entity, baseRev });
-        if (Number.isInteger(res?.rev)) {
-          (this.revs[store] ??= {})[key] = res.rev;
-          this.#saveMirrorRevs();
-        }
-        this.#mFire(this.#mPut(store, key, entity));
+        // The shared put path also answers missingImages before completion;
+        // a failed re-upload keeps this conflict open for an explicit retry.
+        await this.persistEntity(store, key, value, { baseRev });
       } catch (e) {
-        if (e?.status === 409) { // the server moved again — refresh the conflict
-          this._addConflict({ store, key, rev: e.body?.rev ?? null });
+        if (e?.conflict) { // the server moved again — refresh the conflict
+          this._addConflict({ ...e.conflict, name: conflict?.name });
           return;
         }
         throw e;
@@ -506,7 +538,7 @@ class ServerDBAdapter extends AbstractStorage {
       if (e?.status === 404) { // deleted server-side in the meantime
         delete this.cache[store][key];
         if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-        this.#mFire(this.#mDel(store, key));
+        await this.#mDel(store, key);
         await super.resolveConflict(store, key);
         this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
         return;
@@ -562,7 +594,7 @@ class ServerDBAdapter extends AbstractStorage {
           // never reach this branch).
           delete this.cache[store][key];
           if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-          this.#mFire(this.#mDel(store, key));
+          await this.#mDel(store, key);
           removed++;
           this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
         }
@@ -605,7 +637,7 @@ class ServerDBAdapter extends AbstractStorage {
         || this.saveQueue.has(id) || this.conflicts.has(id)) return 'fresh';
       delete this.cache[store][key];
       if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-      this.#mFire(this.#mDel(store, key));
+      await this.#mDel(store, key);
       this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
       return 'removed';
     }

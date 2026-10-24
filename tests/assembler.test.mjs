@@ -24,7 +24,7 @@ const src = match[1] + `
 export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY,
   LAYER_CAPS, LENGTH_PRESETS, estimateTokens, uid, deepClone, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, pieceVisibleAt,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, editLorePiece, pieceVisibleAt,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
@@ -41,7 +41,7 @@ const core = await import('data:text/javascript;charset=utf-8,' + encodeURICompo
 const {
   MEMORY_CAP, LINK_BOOST, LAYER_CAPS, estimateTokens, subUser,
   activeText, getActivePath, appendMessage, applyUsedSwipes, pruneInterrupted, deleteSubtree, rewindChat, branchChat,
-  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, pieceVisibleAt,
+  normalizeBranchSwipes, childrenOf, activateBranch, pathIdSet, pieceAtPath, editLorePiece, pieceVisibleAt,
   keyMatches, scanLore, selectLore, mergedLorePieces, resolveCharacters, addMemory, assemblePrompt,
   parseToolCalls, stripToolBlocks, stripToolBlocksMapped, applyToolCalls, TOOL_CALL_CAP, splitSpeakerSegments,
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
@@ -146,6 +146,14 @@ section('message tree');
     'fork hides memories stamped past the fork point');
   ok(c2.memoryStore.memories.length === 2 && c2.memoryStore.cursor === 3,
     'fork leaves the source chat untouched');
+  const uncovered = { ...c2, emergentCursor: 1,
+    memoryStore: { ...c2.memoryStore, cursor: 1 } };
+  const forwardRewind = rewindChat(uncovered, r.id);
+  ok(forwardRewind.memoryStore.cursor === 1 && forwardRewind.emergentCursor === 1,
+    'rewind to a longer path never advances uncovered cursors');
+  const uncoveredFork = branchChat(uncovered, r.id);
+  ok(uncoveredFork.memoryStore.cursor === 1 && uncoveredFork.emergentCursor === 1,
+    'fork preserves uncovered suffix instead of advancing cursors to its path length');
 }
 
 // ---- lore engine ----
@@ -179,25 +187,33 @@ section('lore engine');
   const optScan = scanLore([lore({ id: 'ww', keys: ['cat'], wholeWord: true })], 'the cathedral bells');
   ok(!optScan.has('ww'), 'piece wholeWord flag respected by scanLore');
 
-  // weight ordering under budget pressure: budget fits exactly one piece
-  // (per-piece cost includes the rendered `[title]\n` header)
+  // weight ordering under budget pressure: budget fits exactly one rendered block
   const sel = selectLore([
     lore({ id: 'low', pinned: true, weight: 1, content: 'x'.repeat(30) }),
     lore({ id: 'high', keys: ['aa'], weight: 9, content: 'x'.repeat(30) }),
-  ], 'aa', estimateTokens('x'.repeat(36)));
+  ], 'aa', estimateTokens(`[World Info]\n[Hit]\n${'x'.repeat(30)}`));
   ok(sel.length === 1 && sel[0].id === 'high', 'higher weight wins under budget pressure');
 
   // link boost: T (w5, triggered, links L) boosts L (w4) past U (w7, triggered)? no —
   // eff: U=7, L=4+2=6, T=5 → with budget for 2: U + L (link-boosted), T dropped
+  const boostedBlock = `[World Info]\n[U]\n${'u'.repeat(30)}\n\n[L]\n${'l'.repeat(30)}`;
   const boosted = selectLore([
     lore({ id: 'T', keys: ['go'], weight: 5, links: ['L'], content: 't'.repeat(30) }),
     lore({ id: 'L', weight: 4, content: 'l'.repeat(30) }),
     lore({ id: 'U', keys: ['go'], weight: 7, content: 'u'.repeat(30) }),
-  ], 'go', estimateTokens('x'.repeat(72))); // budget fits exactly 2 pieces
+  ], 'go', estimateTokens(boostedBlock)); // budget fits exactly 2 pieces
   const ids = boosted.map(s => s.id);
   ok(ids.includes('U') && ids.includes('L') && !ids.includes('T'),
     'link boost raises effective weight for budget contention');
   ok(boosted.find(s => s.id === 'L')?.reason === 'link-boosted', 'link-boosted reason recorded');
+
+  const exactPieces = [lore({ id: 'A', title: 'A', pinned: true, content: 'aa' }),
+    lore({ id: 'B', title: 'B', pinned: true, content: 'bb' })];
+  const exactBlock = '[World Info]\n[A]\naa\n\n[B]\nbb';
+  ok(selectLore(exactPieces, '', estimateTokens(exactBlock)).length === 2,
+    'lore exact-fit budget includes block header and newline separator');
+  ok(selectLore(exactPieces, '', estimateTokens(exactBlock) - 1).length === 1,
+    'one token below lore exact fit drops the second piece');
 
   // no boost when the linker is inactive
   const noBoost = scanLore([
@@ -696,7 +712,7 @@ section('vars, notes, queue');
   }
   // rewind resets the extraction cursor alongside memory
   {
-    const chat = { ...baseChat, emergentCursor: 99 };
+    const chat = { ...baseChat, emergentCursor: 99, memoryStore: { memories: [], cursor: 99 } };
     const rw = rewindChat(chat, 'root');
     ok(rw.emergentCursor === rw.memoryStore.cursor, 'rewind rolls back emergentCursor');
   }
@@ -729,7 +745,7 @@ section('rewind');
   let chat = baseChat;
   let r = appendMessage(chat, 'root', 'user', 'first', null); chat = r.chat;
   const leafId = r.id;
-  const store = addMemory(chat.memoryStore, 'recent event', Date.now(), MEMORY_CAP, 2, leafId);
+  const store = { ...addMemory(chat.memoryStore, 'recent event', Date.now(), MEMORY_CAP, 2, leafId), cursor: 2 };
   chat = { ...chat, memoryStore: store };
   const rewound = rewindChat(chat, 'root');
   ok(rewound.activeLeafId === 'root', 'rewind sets active leaf');
@@ -980,10 +996,11 @@ section('semantic (preActivated) lore');
   const sem = scanLore(pieces, 'clouds everywhere', new Set(['sem1']));
   ok(sem.get('sem1')?.reason === 'semantic', 'preActivated id activates with reason semantic');
   // semantic pieces compete on weight/budget like triggered ones
-  const sel = selectLore(pieces, 'clouds everywhere', estimateTokens('x'.repeat(33)), new Set(['sem1']));
+  const semanticBudget = estimateTokens('[World Info]\n[Semantic]\nsemantic content');
+  const sel = selectLore(pieces, 'clouds everywhere', semanticBudget, new Set(['sem1']));
   ok(sel.length === 1 && sel[0].id === 'sem1' && sel[0].reason === 'semantic',
     'semantic piece wins budget contention on weight');
-  const selKw = selectLore(pieces, 'clouds everywhere', estimateTokens('x'.repeat(33)));
+  const selKw = selectLore(pieces, 'clouds everywhere', semanticBudget);
   ok(selKw.length === 1 && selKw[0].id === 'kw1', 'without preActivated the keyword piece wins instead');
   // semantic pieces boost their links like any active piece
   const linked = scanLore([
@@ -1161,7 +1178,7 @@ section('rewind derivation');
       m1,
       m2: node('m2', 'm1', 'assistant', 'there', 9500),
     },
-    activeLeafId: 'm2',
+    activeLeafId: 'm2', emergentCursor: 3,
     memoryStore: { memories: [
       { id: 'memOld', text: 'old', pinned: false, createdAt: 9500, atLen: 2 },
       { id: 'memNew', text: 'new', pinned: false, createdAt: 8000, atLen: 3, atMsg: 'm2' },
@@ -1366,6 +1383,21 @@ section('update_character revisions');
     { nodeId: 'N3', now: 3000, atLen: 9, queueLore: true });
   ok(rq.results[0].ok && !(rq.chat.loreQueue ?? []).length && rq.chat.lorePieces[0].content === 'q card',
     'queue mode applies updates directly (not queued)');
+
+  const hiddenRaw = { ...lore({ id: 'hidden', title: 'Vex', type: 'character', content: 'other take', keys: ['hidden'] }),
+    revisions: [
+      { content: 'current card', keys: ['current'], atLen: null, createdAt: null, createdBy: null },
+      { content: 'other take', keys: ['hidden'], atLen: 2, createdAt: 10, createdBy: 'A', createdSwipe: 0 },
+    ] };
+  const hiddenView = pieceAtPath(hiddenRaw, new Set(['root']), baseChat.messages);
+  const hiddenUpdate = applyToolCalls({ ...baseChat, lorePieces: [hiddenRaw] },
+    [{ name: 'update_character', args: { name: 'Vex', content: 'current update' } }],
+    { nodeId: 'B', now: 20 }, [hiddenView]).chat.lorePieces[0];
+  ok(hiddenUpdate.keys.join() === 'current' && hiddenUpdate.revisions[2].keys.join() === 'current',
+    'omitted keys come from the branch-current allPieces view, not hidden raw top-level keys');
+  ok(hiddenUpdate.revisions.length === 3 && hiddenUpdate.revisions[0] === hiddenRaw.revisions[0]
+    && hiddenUpdate.revisions[1] === hiddenRaw.revisions[1],
+    'branch-current key update preserves the raw revision log');
 }
 
 // ---- update_character cross-origin shadow ----
@@ -1457,6 +1489,43 @@ section('revision derivation');
     'rewind keeps the full revision log and content — views derive per assembly');
 }
 
+section('direct lore edits');
+{
+  const plain = lore({ id: 'plain', title: 'Plain', content: 'old', keys: ['old'], weight: 4 });
+  const plainEdited = editLorePiece(plain, { title: 'Renamed', content: 'new', weight: 7 });
+  ok(plainEdited.title === 'Renamed' && plainEdited.content === 'new' && plainEdited.weight === 7
+    && plainEdited.id === 'plain' && plainEdited.revisions === undefined,
+    'unrevisioned direct edit merges fields without creating history');
+
+  const originalRevisions = [
+    { content: 'original', keys: ['old'], atLen: null, createdAt: null, createdBy: null, createdSwipe: null },
+    { content: 'branch tool', keys: ['tool'], atLen: 2, createdAt: 10, createdBy: 'A', createdSwipe: 0 },
+  ];
+  const revisioned = { ...plain, content: 'branch tool', keys: ['tool'], revisions: originalRevisions };
+  const edited = editLorePiece(revisioned,
+    { content: 'global edit', keys: ['global'], title: 'Edited', revisions: [] }, 999);
+  ok(edited.content === 'global edit' && edited.keys.join() === 'global'
+    && edited.title === 'Edited' && edited.weight === 4 && edited.revisions.length === 3
+    && edited.revisions[0] === originalRevisions[0] && edited.revisions[1] === originalRevisions[1],
+    'revisioned direct edit preserves live fields and appends to the raw log');
+  const globalRev = edited.revisions[2];
+  ok(globalRev.createdBy === null && globalRev.createdAt === null && globalRev.atLen === null
+    && globalRev.createdSwipe === null,
+    'direct content/keys edit appends a global null-stamped revision');
+  const unchanged = editLorePiece(edited, { content: 'global edit', keys: ['global'], weight: 8 });
+  ok(unchanged.weight === 8 && unchanged.revisions === edited.revisions,
+    'non-content direct edit avoids an unnecessary revision');
+  const messages = { root: baseChat.messages.root, A: node('A', 'root', 'assistant', 'tool take') };
+  ok(pieceAtPath(edited, new Set(['root']), messages).content === 'global edit'
+    && pieceAtPath(edited, new Set(['root', 'A']), messages).content === 'global edit',
+    'a direct edit supersedes older revisions on every branch');
+  const laterTool = { ...edited, content: 'later tool', keys: ['later'], revisions: [...edited.revisions,
+    { content: 'later tool', keys: ['later'], atLen: 2, createdAt: 11, createdBy: 'A', createdSwipe: 0 }] };
+  ok(pieceAtPath(laterTool, new Set(['root']), messages).content === 'global edit'
+    && pieceAtPath(laterTool, new Set(['root', 'A']), messages).content === 'later tool',
+    'only tool revisions written after the direct edit stay branch-scoped');
+}
+
 // ---- swipe-scoped world state in the assembler ----
 section('swipe-scoped lore derivation');
 {
@@ -1513,6 +1582,23 @@ section('memory render order');
     'selected memories render oldest→newest regardless of pin/fill priority');
   ok(manifest.layers.memory.memories.map(m => m.id).join(',') === 'mOld,mPin,mNew',
     'manifest memory list matches render order');
+}
+
+section('memory selection overhead');
+{
+  const exactBlock = '[Memories]\n- old\n- new';
+  const memoryChat = { ...baseChat, memoryStore: { memories: [
+    { id: 'old', text: 'old', pinned: false, createdAt: 1 },
+    { id: 'new', text: 'new', pinned: false, createdAt: 2 },
+  ], cursor: 0 } };
+  const memoryAt = (cap) => assemblePrompt({ scenario: baseScenario, persona, chat: memoryChat,
+    settings: { contextLength: 1024 + cap, maxTokens: 1024,
+      layerCaps: { static: 0, lore: 0, memory: 1 } }, platformPrompt: '' }).manifest.layers.memory;
+  const exactTokens = estimateTokens(exactBlock);
+  ok(memoryAt(exactTokens).memories.length === 2 && memoryAt(exactTokens).tokens === exactTokens,
+    'memory exact-fit budget includes block header and newline separator');
+  ok(memoryAt(exactTokens - 1).memories.length === 1,
+    'one token below memory exact fit drops a memory');
 }
 
 // ---- static layer cap warning ----
@@ -1722,6 +1808,9 @@ section('character card import');
   ok(cc.name === 'Mia Voss' && cc.greeting === cardJson.data.first_mes && cc.keys.length === 0,
     'character: name/greeting set, keys blank (name is the default key)');
   ok(cc.content.includes('A smuggler. Mia Voss is quick-witted.'), '{{char}} binds to the card name');
+  const dollarCard = parseCharacterCard({ name: '$& $$ $\' $`', description: '{{char}} arrives.' });
+  ok(dollarCard.character.content === '$& $$ $\' $` arrives.',
+    'card-name replacement preserves dollar replacement patterns literally');
   ok(cc.content.includes('Personality: bold, sardonic') && cc.content.includes('Example dialogue:\nMia Voss: "Example line."'),
     'personality + mes_example folded into character content');
   ok(cs.backstory === 'The docks of Veyra.' && cs.greeting === cardJson.data.first_mes,
@@ -2070,7 +2159,7 @@ section('in-chat branching');
   }
   // usedSwipe snap: a node whose viewed swipe has no continuation follows the recorded one
   {
-    const chat = branchChatFx();
+    const chat = { ...branchChatFx(), emergentCursor: 2, memoryStore: { memories: [], cursor: 2 } };
     chat.messages.u1 = { ...chat.messages.u1, activeSwipe: 0, usedSwipe: 0,
       swipes: [...chat.messages.u1.swipes, { text: 'draft', createdAt: 7, modelId: null }] };
     chat.messages.u1.activeSwipe = 1; // browsing an un-continued swipe
@@ -2078,6 +2167,8 @@ section('in-chat branching');
     const jumped = activateBranch(chat, 'u1');
     ok(jumped.messages.u1.activeSwipe === 0, 'no continuation under viewed swipe → snaps to usedSwipe');
     ok(jumped.activeLeafId === 'a1', 'and follows the recorded continuation down');
+    ok(jumped.memoryStore.cursor === 1 && jumped.emergentCursor === 1,
+      'same-node take change resets coverage at the changed swipe');
   }
   // descend:false aligns the path without moving the leaf (chat open)
   {
@@ -2295,6 +2386,36 @@ section('per-branch supersede');
   ok(supPointsOf({ supAtMsg: 'x' }).join() === 'x' && supPointsOf({ supAtMsgs: ['a', 'b'] }).length === 2
     && supPointsOf({}).length === 0, 'supPointsOf migrates scalar and tolerates bare cards');
 }
+section('swipe-scoped memories');
+{
+  const A = { ...node('A', 'root', 'assistant', 'take zero'),
+    swipes: [{ text: 'take zero' }, { text: 'take one' }], activeSwipe: 0 };
+  const chat = { ...baseChat, messages: { root: baseChat.messages.root, A }, activeLeafId: 'A' };
+  let store = addMemory({ memories: [], cursor: 0 }, 'take one note', 1, MEMORY_CAP, 2, 'A', 1);
+  store = addMemory(store, 'legacy node note', 2, MEMORY_CAP, 2, 'A');
+  const memAt = (swipe, memoryStore = store) => assemblePrompt({ scenario: baseScenario, persona,
+    chat: { ...chat, memoryStore, messages: { ...chat.messages, A: { ...A, activeSwipe: swipe } } },
+    settings }).manifest.layers.memory;
+  ok(memAt(1).memories.some(m => m.text === 'take one note')
+    && !memAt(0).memories.some(m => m.text === 'take one note'),
+    'atSwipe memory appears only on its stamped take');
+  ok(memAt(0).memories.some(m => m.text === 'legacy node note')
+    && memAt(1).memories.some(m => m.text === 'legacy node note'),
+    'legacy memory without atSwipe remains node-scoped');
+
+  let revised = addMemory({ memories: [], cursor: 0 }, 'old global note', 1);
+  const oldId = revised.memories[0].id;
+  revised = supersedeMemory(revised, oldId, 'take one revision', 2, MEMORY_CAP, 2, 'A', null, 1);
+  ok(revised.memories.find(m => m.id === oldId).supAtSwipes?.[0] === 1
+    && revised.memories.find(m => m.id !== oldId).atSwipe === 1,
+    'supersede records matching take stamps on old and replacement cards');
+  ok(memAt(0, revised).memories.some(m => m.text === 'old global note')
+    && !memAt(0, revised).memories.some(m => m.text === 'take one revision'),
+    'other take keeps the pre-supersede memory');
+  ok(memAt(1, revised).memories.some(m => m.text === 'take one revision')
+    && memAt(1, revised).inactive.some(m => m.id === oldId && m.reason === 'superseded'),
+    'stamped take sees the revision and swipe-scoped supersede');
+}
 section('parseLorePassOutput');
 {
   const p = parseLorePassOutput('prefix {"new": [{"title":"Tavern","content":"A warm place","keys":["tavern"]}],'
@@ -2354,13 +2475,14 @@ section('queue accept: updates + memory revisions');
     { id: 'm1', text: 'old note', pinned: false, createdAt: 1, atMsg: 'root' }], cursor: 0 } };
   mc = queueLorePiece(mc, { kind: 'memory', title: '(memory note)', content: 'revised note',
     note: 'went stale', memoryId: 'm1', oldContent: 'old note', source: 'extract', atLen: 1 });
-  const m2 = acceptQueuedMemory(mc, mc.loreQueue[0].id, { atLen: 1, atMsg: 'root', now: 500 });
+  const m2 = acceptQueuedMemory(mc, mc.loreQueue[0].id, { atLen: 1, atMsg: 'root', atSwipe: 0, now: 500 });
   ok(m2.loreQueue.length === 0 && m2.memoryStore.memories.length === 2,
     'memory accept supersedes instead of rewriting');
-  ok(m2.memoryStore.memories.find(m => m.id === 'm1').supAtMsgs?.join() === 'root',
-    'stale card marked at the accept point');
-  ok(m2.memoryStore.memories.some(m => m.text === 'revised note' && m.atMsg === 'root'),
-    'revised note lands as a fresh stamped card');
+  ok(m2.memoryStore.memories.find(m => m.id === 'm1').supAtMsgs?.join() === 'root'
+    && m2.memoryStore.memories.find(m => m.id === 'm1').supAtSwipes?.[0] === 0,
+    'stale card marked at the accept point and take');
+  ok(m2.memoryStore.memories.some(m => m.text === 'revised note' && m.atMsg === 'root' && m.atSwipe === 0),
+    'revised note lands as a fresh node/take-stamped card');
   // vanished target: entry drops, chat otherwise untouched
   const m3 = acceptQueuedMemory(mc, 'nope', { atLen: 1, atMsg: 'root' });
   ok(m3 === mc, 'unknown queue id is a no-op');

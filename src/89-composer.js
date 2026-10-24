@@ -17,7 +17,8 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
   const [text, setTextRaw] = useState(() => initialText ?? '');
-  const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
+  const textRef = useRef(text);
+  const setText = (v) => { textRef.current = v; setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
   // Command feedback ("Theme set to Darker.", usage errors) auto-dismisses
   // after a few seconds instead of lingering under the composer.
@@ -31,7 +32,11 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     // Async injects (e.g. /improve) resolve seconds later; if the user
     // switched chats meanwhile, the text belongs to the other chat.
     if (inject.chatId && chatId && inject.chatId !== chatId) return;
-    if ('text' in inject) setText(inject.text ?? '');
+    // baseText is the draft snapshot the async operation started from. Its
+    // presence makes replacement conditional: newer typing wins over a stale
+    // result, while hint-only and unconditional suggestion injects stay as-is.
+    if ('text' in inject && (!('baseText' in inject) || textRef.current === inject.baseText))
+      setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
     // Consumed: Main clears the inject, or a remount on chat-switch-back
     // would re-apply it over the edited draft (the effect runs per mount).
@@ -46,13 +51,17 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // double-Enter while that await is in flight (the text is still in the box).
   const [sending, setSending] = useState(false);
   const send = async () => {
-    const t = text.trim();
+    const submitted = textRef.current;
+    const t = submitted.trim();
     if (!t || sending) return;
     setSending(true);
     try {
       const res = await onSubmit(t);
       if (typeof res === 'string') setHint(res);
-      else if (res !== false) { setText(''); setHint(null); }
+      else if (res !== false) {
+        if (textRef.current === submitted) setText('');
+        setHint(null);
+      }
     } finally { setSending(false); }
   };
   // Touch devices (coarse pointer) have no Shift on the soft keyboard, so
@@ -126,6 +135,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
           placeholder="Type a message or /"
           onInput=${(e) => { setText(e.target.value); setHi(0); setEsc(false); }}
           onKeyDown=${(e) => {
+            if (e.isComposing || e.keyCode === 229) return;
             if (hintItems.length) {
               const n = hintItems.length;
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

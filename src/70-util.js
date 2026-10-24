@@ -380,7 +380,7 @@ function ListSamplerInput({ values, onChange, numeric = false }) {
       <textarea rows=${10} value=${text}
         placeholder=${numeric ? '128009\n128001' : 'one per line (commas also split)'}
         onInput=${(e) => setText(e.target.value)} />
-      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''} — Done applies; ✕/Escape discard.</div>
+      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''}</div>
     <//></span>`}
   `;
 }
@@ -424,7 +424,7 @@ function JsonSamplerInput({ value, onChange }) {
       <textarea rows=${8} value=${text} placeholder='{"key": "value"}' onInput=${handle}
         style=${{ fontFamily: 'monospace', ...(bad ? { borderColor: 'var(--c-danger)' } : {}) }} />
       <div class="hint" style=${{ marginTop: '6px', ...(bad ? { color: 'var(--c-danger)' } : {}) }}>
-        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing. Done applies; ✕/Escape discard.'}</div>
+        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing.'}</div>
     <//></span>`}
   `;
 }

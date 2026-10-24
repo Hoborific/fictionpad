@@ -858,7 +858,7 @@ trial('openaiChatStream: content/lp split + request body', async () => {
     // real vLLM stop emission: finish_reason set, empty delta, EOS in logprobs
     'data: {"choices":[{"finish_reason":"stop","delta":{},"logprobs":{"content":[{"token":"<turn|>","logprob":-0.01,"top_logprobs":[]}]}}]}',
     'data: [DONE]', '',
-  ].join('\n');
+  ].join('\n\n');
   let sentBody = null;
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
@@ -893,7 +893,7 @@ trial('openaiChatStream: reasoning_content captured as { think }', async () => {
     'data: {"choices":[{"delta":{"content":"Answer."}}]}',
     'data: {"choices":[{"finish_reason":"stop","delta":{}}]}',
     'data: [DONE]', '',
-  ].join('\n');
+  ].join('\n\n');
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   try {
@@ -918,7 +918,7 @@ trial('openaiChatStream + alignTokensToSpans: off-by-one middleware shape', asyn
     'data: {"choices":[{"delta":{"content":"*Wipin"},"logprobs":{"content":[{"token":"iping","logprob":-0.5,"top_logprobs":[{"token":"iping","logprob":-0.5}]}]}}]}',
     'data: {"choices":[{"delta":{"content":"g down"},"logprobs":{"content":[{"token":" down","logprob":-0.3,"top_logprobs":[]}]}}]}',
     'data: [DONE]', '',
-  ].join('\n');
+  ].join('\n\n');
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   try {
@@ -951,7 +951,7 @@ trial('openaiChatStream: choices-less chunks are skipped', async () => {
     'data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}',
     'data: {"choices":[{"finish_reason":"stop","delta":{}}]}',
     'data: [DONE]', '',
-  ].join('\n');
+  ].join('\n\n');
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   try {
@@ -1172,7 +1172,7 @@ trial('authHeaders: proxy vs direct credential mapping', async () => {
   const oldFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     seen.push({ url, headers: opts.headers });
-    return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\ndata: [DONE]\n', { status: 200 });
+    return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
   };
   try {
     for await (const _ of fp.openaiChatStream({ endpoint: 'http://llm.local/v1', apiKey: 'k1', model: 'm', messages: [] })) {}
@@ -1192,6 +1192,13 @@ trial('effectiveEndpoint rewriting', () => {
   if (fp.effectiveEndpoint(s({ routeViaServer: false }), true) !== 'http://llm.local:8080') throw new Error('toggle off → raw');
   if (fp.effectiveEndpoint(s({}), false) !== 'http://llm.local:8080') throw new Error('server inactive → raw despite toggle');
   if (fp.effectiveEndpoint(s({ endpoint: '/proxy/http://x' }), true) !== '/proxy/http://x') throw new Error('already /proxy/ unchanged (no double-proxy)');
+  const oldLocation = globalThis.location;
+  globalThis.location = new URL('https://app.example/');
+  try {
+    const absolute = 'https://app.example/proxy/http://x';
+    if (fp.effectiveEndpoint(s({ endpoint: absolute }), true) !== absolute)
+      throw new Error('absolute same-origin proxy was wrapped twice');
+  } finally { globalThis.location = oldLocation; }
   if (fp.effectiveEndpoint(s({ endpoint: '' }), true) !== '') throw new Error('empty unchanged');
 });
 
@@ -1668,28 +1675,128 @@ trial('storage: local ↔ server transitions preserve both worlds (mock server)'
       throw new Error('dormant local row leaked into the delta-boot cache');
     if (!st2.get('Chats', 'serverChat')) throw new Error('delta boot lost the server row');
 
-    // 4. Back to browser storage: local row intact, and the mirror makes the
-    // server world visible too (the safety net).
-    const local2 = watch(new IndexedDBAdapter());
+    // 4. Explicit ServerGate fallback imports the mirror without touching
+    // local rows. Ordinary local boots do not merge the server world.
+    const local2 = watch(new IndexedDBAdapter('FictionPad', { importMirror: true }));
     await local2.init();
     if (local2.get('Chats', 'localChat')?.name !== 'local')
       throw new Error('server boot wiped the dormant local row');
     if (!local2.get('Chats', 'serverChat'))
-      throw new Error('local boot did not see the mirrored server row');
+      throw new Error('explicit local fallback did not see the mirrored server row');
+    local2.set('Chats', 'serverChat', { ...local2.get('Chats', 'serverChat'), name: 'local edit' });
+    await local2.flush();
 
     // 5. The local boot invalidated the revs record, so the next server boot
-    // is a full fetch again — and STILL must not wipe the local row.
+    // is a full fetch again. Separate mirror/local stores preserve a divergent
+    // same-id edit on both sides instead of overwriting either copy.
     const st3 = watch(new ServerDBAdapter(''));
     await st3.init();
+    if (st3.get('Chats', 'serverChat')?.name !== 'server')
+      throw new Error('local same-id edit leaked into server mode');
     const local3 = watch(new IndexedDBAdapter(''));
     await local3.init();
     if (local3.get('Chats', 'localChat')?.name !== 'local')
       throw new Error('full-boot reseed wiped the dormant local row');
+    if (local3.get('Chats', 'serverChat')?.name !== 'local edit')
+      throw new Error('full-boot reseed wiped a divergent same-id local edit');
   } finally {
     for (const a of timers) { clearTimeout(a.gcTimer); clearTimeout(a._revTimer); }
     globalThis.fetch = oldFetch;
     globalThis.indexedDB = oldIdb;
   }
+});
+
+trial('openaiChatStream: embedded/split stops cut text and tape cleanly', async () => {
+  const events = [
+    { choices: [{ delta: { content: 'before ST' }, logprobs: { content: [
+      { token: 'before ', logprob: -0.1, top_logprobs: [] }, { token: 'ST', logprob: -0.2, top_logprobs: [] },
+    ] } }] },
+    { choices: [{ delta: { content: 'OP after' }, logprobs: { content: [
+      { token: 'OP', logprob: -0.2, top_logprobs: [] }, { token: ' after', logprob: -0.3, top_logprobs: [] },
+    ] } }] },
+    { choices: [{ delta: { content: 'unreachable' } }] },
+  ];
+  const body = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(body, { status: 200 });
+  try {
+    const chunks = [];
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x', model: 'm', messages: [], stop: ['STOP'], tokenProbs: true })) chunks.push(c);
+    const text = chunks.filter(c => c.content != null).map(c => c.content).join('');
+    if (text !== 'before ') throw new Error('embedded split stop leaked: ' + JSON.stringify(chunks));
+    if (!chunks.some(c => c.done && c.finishReason === 'stop')) throw new Error('fallback stop was not a clean finish');
+    const tape = chunks.filter(c => c.lp).flatMap(c => c.lp).map(t => t.token).join('');
+    if (tape.includes('STOP') || tape.includes('after') || tape.includes('unreachable'))
+      throw new Error('stop/post-stop tape leaked: ' + tape);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+trial('openaiChatStream: multiline SSE data event', async () => {
+  const payload = JSON.stringify({ choices: [{ delta: { content: 'multiline' } }] }, null, 2);
+  const body = payload.split('\n').map(l => `data: ${l}`).join('\n') + '\n\n';
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(body, { status: 200 });
+  try {
+    let text = '';
+    for await (const c of fp.openaiChatStream({ endpoint: 'http://x', model: 'm', messages: [] })) text += c.content ?? '';
+    if (text !== 'multiline') throw new Error('multiline event did not parse: ' + text);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+trial('storage: conflict parks without leaving an older queued snapshot', async () => {
+  const st = new fp.ServerDBAdapter('');
+  let release;
+  const gate = new Promise(r => { release = r; });
+  st.persistPut = async () => {
+    await gate;
+    const err = new Error('conflict');
+    err.conflict = { store: 'Chats', key: 'x', rev: 7 };
+    throw err;
+  };
+  st.set('Chats', 'x', { id: 'x', v: 1 });
+  const flushing = st.flush();
+  st.set('Chats', 'x', { id: 'x', v: 2 });
+  release();
+  await flushing;
+  if (st.saveQueue.has('Chats/x')) throw new Error('queued pre-resolution snapshot survived');
+  if (!st.conflicts.has('Chats/x') || st.get('Chats', 'x').v !== 2)
+    throw new Error('current cache edit was not preserved for Keep mine');
+  clearTimeout(st.saveTimer); clearTimeout(st.retryTimer); clearTimeout(st.gcTimer);
+});
+
+trial('storage: missing image rows are re-uploaded before save completes', async () => {
+  const st = new fp.ServerDBAdapter('');
+  const dataUrl = 'data:image/webp;base64,AAAA';
+  const id = fp.hashImageId(dataUrl);
+  st.imagesEnabled = true;
+  st.images.set(id, dataUrl);
+  st.persistPut = async () => ({ ok: true, missingImages: [id] });
+  let uploads = 0;
+  st.persistImage = async (imageId, payload) => {
+    if (imageId !== id || payload !== dataUrl) throw new Error('wrong image repair payload');
+    uploads++;
+  };
+  await st.persistEntity('Chats', 'x', { id: 'x', avatar: dataUrl });
+  if (uploads !== 1) throw new Error('missing image was not repaired');
+});
+
+trial('storage: unresolved sentinels survive fallback GC and fail export hydration', async () => {
+  const st = new fp.ServerDBAdapter('');
+  const id = '0123456789abcdef';
+  st.lazyImages = true;
+  st.gcEnabled = false;
+  st.images.set(id, 'data:image/webp;base64,AAAA');
+  st.cache.Chats.x = { id: 'x', avatar: `imgref:${id}` };
+  st.persistDeleteImage = async () => { throw new Error('sentinel-referenced image was collected'); };
+  await st.collectImages();
+  st.images.delete(id); // lazy cache miss: the server fetch below now fails
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{}', { status: 404 });
+  try {
+    let failed = false;
+    try { await st.hydrateAll(); } catch { failed = true; }
+    if (!failed) throw new Error('hydrateAll reported success with an unresolved sentinel');
+  } finally { globalThis.fetch = oldFetch; }
 });
 
 // delta.content is the text authority: misaligned logprobs must not lose text.

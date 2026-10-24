@@ -39,6 +39,7 @@ function App() {
   const [storageFailed, setStorageFailed] = useState(false);
   const [gate, setGate] = useState(null); // { error } — server storage expected but unreachable
   const [bootNonce, setBootNonce] = useState(0);
+  const [importMirror, setImportMirror] = useState(false);
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -63,7 +64,7 @@ function App() {
         }
       }
       if (!adapter) {
-        adapter = new IndexedDBAdapter();
+        adapter = new IndexedDBAdapter('FictionPad', { importMirror });
         try { await adapter.init(); }
         catch (e) { console.error(e); if (alive) setStorageFailed(true); }
       }
@@ -101,12 +102,15 @@ function App() {
         s.serverToken = token;
         localStorage.setItem('fictionpad.settings', JSON.stringify(s));
       } catch {}
+      setImportMirror(false);
       setGate(null);
       setBootNonce(n => n + 1);
     }}
     onUseLocal=${() => {
-      // Explicit opt-out: forget the server flag and boot browser storage.
+      // Explicit opt-out preserves both worlds: seed only missing local rows
+      // from the separate server mirror, never normal browser-storage boots.
       try { localStorage.removeItem(SERVER_FLAG_KEY); } catch {}
+      setImportMirror(true);
       setGate(null);
       setBootNonce(n => n + 1);
     }} />`;

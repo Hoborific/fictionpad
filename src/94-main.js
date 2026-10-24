@@ -149,6 +149,13 @@ function Main({ storage, storageKind, storageFailed }) {
   const lastMessages = manifests[ui.chatId]?.lastMessages ?? null; // chat-completions array behind manifest
   const [realCounts, setRealCounts] = useState(null); // /tokenize counts {static,lore,memory,total} | null
   const [modal, setModal] = useState(null);
+  const [recapQueue, setRecapQueue] = useState([]);
+  const queueRecap = (chatId, text) => setRecapQueue(q => [...q, { kind: 'recap', chatId, text }]);
+  useEffect(() => {
+    if (modal || !recapQueue.length) return;
+    setModal(recapQueue[0]);
+    setRecapQueue(q => q.slice(1));
+  }, [modal, recapQueue]);
   // Unsaved Settings draft, handed up when the modal detours into the logit-
   // bias editor — closing that editor returns to Settings with the draft
   // restored instead of silently losing it.
@@ -162,7 +169,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
-  const genRef = useRef(null); // { abort, chatId } — chatId lets background writers (image jobs) defer instead of being clobbered
+  const genRef = useRef(null); // { abort, chatId, completion } — background writers defer; conflict resolution can await the captured completion
   const guardPendingRef = useRef(false); // a genGuard freshness check is in flight — blocks a second generation entry until genRef can be claimed
   const summarizeGuardRef = useRef(false); // one summarizeNow pass at a time (manual click + generation-end cadence must not double-record a window)
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
@@ -510,8 +517,14 @@ function Main({ storage, storageKind, storageFailed }) {
     return `${label} "${map[c.key]?.name ?? c.name ?? '…'}"`;
   };
   const onResolveConflict = async (c, mode) => {
-    try { await storage.resolveConflict(c.store, c.key, mode); }
-    catch (e) { setError(`Could not resolve the sync conflict: ${e?.message ?? e}`); }
+    const generation = c.store === 'Chats' && genRef.current?.chatId === c.key ? genRef.current : null;
+    try {
+      if (generation && (mode === 'theirs' || mode === 'copy')) {
+        generation.abort.abort();
+        await generation.completion;
+      }
+      await storage.resolveConflict(c.store, c.key, mode);
+    } catch (e) { setError(`Could not resolve the sync conflict: ${e?.message ?? e}`); }
   };
 
   // ---- side-pane sizing (auto slack-fill + drag-to-resize) ----
@@ -740,8 +753,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const pathIds = new Set(path.map(n => n.id));
     const priorTexts = (chatObj.memoryStore?.memories ?? [])
       .filter(m => m && (m.text ?? '').trim()
-        && !(m.atMsg != null && !pathIds.has(m.atMsg))
-        && !supPointsOf(m).some(id => pathIds.has(id)))
+        && !(m.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatObj.messages))
+        && !supPointsOf(m).some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatObj.messages)))
       .slice(-MEM_PRIOR_MAX).map(m => m.text);
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
@@ -757,13 +770,14 @@ function Main({ storage, storageKind, storageFailed }) {
     }, chatObj.id);
     return { text: out.slice(0, maxChars) || null, from, to, advance };
   }
-  // Append a memory to a chat's store, stamped with atLen (the chat's current
-  // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat), and with atMsg (the active leaf) so the
-  // assembler scopes it to this branch. Stamped at creation (see addMemory).
+  const activePathSignature = (c) => getActivePath(c?.messages ?? {}, c?.activeLeafId)
+    .map(n => `${n.id}:${n.activeSwipe ?? 0}`).join('|');
+  // Append a memory to a chat's store, stamped with its current path position,
+  // leaf, and viewed swipe so rewind and take switches derive its visibility.
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
-      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
+      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId,
+      c.messages?.[c.activeLeafId]?.activeSwipe ?? null);
   // A failed summary/lore pass still skips its window (no re-banner loop),
   // but the failure rides the memory store as lastError — the Memory tab
   // shows it as a dismissible warning row. Cleared on the next success of
@@ -778,16 +792,14 @@ function Main({ storage, storageKind, storageFailed }) {
     if (summarizeGuardRef.current) return; // a second pass over the same window would double-record it
     summarizeGuardRef.current = true;
     setSummarizing(true);
+    const requestSig = activePathSignature(chatObj);
     try {
       const r = await generateMemory(chatObj);
       if (r?.text) {
-        // Merge-on-write: the chat may have changed (or been deleted) during
-        // the aux call — re-read it and overwrite only memoryStore. The cursor
-        // advances by exactly the covered chunk (clamped to the live path in
-        // case it shrank mid-call); a manual re-run (advance false) leaves it.
-        // touch:false — a background pass must not re-sort the sidebar.
+        // Merge metadata edits onto the live chat, but never apply a result
+        // requested for another branch or take (nor advance its cursor).
         const cur = ref.current.chats[chatObj.id];
-        if (cur)
+        if (cur && activePathSignature(cur) === requestSig)
           saveChat({ ...cur, memoryStore: { ...clearStoreError(pushMemory(cur, r.text), 'summary'),
             cursor: r.advance
               ? Math.min(r.to, getActivePath(cur.messages, cur.activeLeafId).length)
@@ -801,7 +813,7 @@ function Main({ storage, storageKind, storageFailed }) {
       // until dismissed or the next successful summary.
       console.warn('Memory summarization failed:', e);
       const cur = ref.current.chats[chatObj.id];
-      if (cur) {
+      if (cur && activePathSignature(cur) === requestSig) {
         const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
         const store = cur.memoryStore ?? { memories: [], cursor: 0 };
         const pathLen = getActivePath(cur.messages, cur.activeLeafId).length;
@@ -851,17 +863,13 @@ function Main({ storage, storageKind, storageFailed }) {
   // head of the piece (prompt text — stays dash-free).
   const PASS_TRUNC_NOTE = '\n[…truncated; propose updates for this piece only if the change falls within the visible portion]';
   async function maybeExtractLore(chatObj, force = false) {
-    // Merge-on-write: re-read the chat at save time (a generation may have
-    // advanced it during the aux call) and apply the lore changes to the
-    // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
-    // are overwritten. Chat deleted mid-call → drop the write. The cursor is
-    // derived from the live re-read chat (summarizeNow's rule), not the
-    // pre-call snapshot. touch:false — a background pass must not re-sort
-    // the sidebar.
+    const requestSig = activePathSignature(chatObj);
+    // Merge metadata edits onto the live chat, but drop results, errors, and
+    // cursor movement when the active path or a viewed take changed mid-call.
     // ok=true marks a successful pass: clear a recorded lore failure.
     const advance = (fn, ok = false) => {
       const cur = ref.current.chats[chatObj.id];
-      if (!cur) return;
+      if (!cur || activePathSignature(cur) !== requestSig) return;
       // Advance by exactly the covered chunk (never a blind jump to pathLen —
       // a backlog is worked off in chunks, nothing gets skipped), clamped to
       // the live path; a forced re-run on a covered chat leaves the cursor.
@@ -933,10 +941,10 @@ function Main({ storage, storageKind, storageFailed }) {
         loreLines.unshift(entry); loreChars += entry.length;
       }
       // Memory digest (ids included so the pass can target revisions): visible
-      // cards only — off-branch and already-superseded ones are out of scope.
+      // cards only — off-branch/take and already-superseded ones are out of scope.
       const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
-        && !(m.atMsg != null && !pathIds.has(m.atMsg))
-        && !supPointsOf(m).some(id => pathIds.has(id)));
+        && !(m.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatObj.messages))
+        && !supPointsOf(m).some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatObj.messages)));
       const memLines = [];
       let memChars = 0;
       for (const m of [...memVisible].reverse()) {
@@ -1064,7 +1072,7 @@ function Main({ storage, storageKind, storageFailed }) {
             for (const u of memsOk)
               if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
                 work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note) };
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note, st2.createdSwipe) };
           } else {
             for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
             for (const u of updatesOk)
@@ -1108,8 +1116,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const path = getActivePath(work.messages ?? {}, work.activeLeafId);
     if (q.kind === 'memory')
       return acceptQueuedMemory(work, q.id, { atLen: path.length,
-        atMsg: work.activeLeafId ?? null, cap: settings.memoryCap ?? MEMORY_CAP,
-        maxChars: settings.memoryMaxChars ?? 5000 });
+        atMsg: work.activeLeafId ?? null, atSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null,
+        cap: settings.memoryCap ?? MEMORY_CAP, maxChars: settings.memoryMaxChars ?? 5000 });
     if (q.updateOf) {
       const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
       const view = mergedLorePieces(chatScenario, work, ref.current.characters)
@@ -1224,48 +1232,44 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- image generation (/image command, v4.10 phase 3) ----
-  // One job fills one swipe's pending images entry, merge-on-write: the chat,
-  // node or swipe may have vanished (rewind, delete, regenerate) while the
-  // backend worked — then the write is dropped. Errors land on the entry as
-  // { error: <message> } (healImageEntry's reload debris stays { error: true })
-  // AND raise the sticky error toast — the bubble's failure note alone read as
-  // a silent failure (the reason used to die in console.warn).
-  // The pending entry is matched by `slot` (its placement id): two jobs on
-  // DIFFERENT slots of the same swipe may run concurrently and must not
-  // cross-patch.
+  // One job fills the original pending entry and any same-slot copies already
+  // made by forking, merge-on-write per chat. A vanished target is skipped.
+  // Errors land as { error: <message> } (reload debris stays { error: true })
+  // AND raise the sticky error toast. Matching by node, swipe, AND slot keeps
+  // concurrent jobs and unrelated pending entries from cross-patching.
   async function runImageJob(chatId, nodeId, swipeIdx, { prompt, caption = '', slot }) {
     const st = ref.current.settings;
     const { endpoint: ep, apiKey: key } = roleApi(st, 'image');
     const ctl = new AbortController();
     imgCtls.current.add(ctl);
-    // patch: rebuild the chat with the pending entry at (nodeId, swipeIdx)
-    // replaced by `entry`; returns false when the target vanished.
     const patch = async (makeEntry) => {
-      // A live generation owns this chat's message tree: its per-token
-      // applyText and the finally's commit() rebuild `messages` from a
-      // start-of-generation snapshot and would silently revert this write on
-      // the next token (the rule regenImage/swipeImage/onEdit refuse on).
-      // The image result is already in hand and the merge below re-reads
-      // ref.current, so waiting out the stream costs nothing. Capped: if the
-      // generation's finally ever wedges, warn and patch anyway (the merge is
-      // safe) rather than park the completed image forever.
+      const pendingIn = (c) => c?.messages?.[nodeId]?.swipes?.[swipeIdx]?.images
+        ?.some(e => e?.pending && e.slot === slot);
+      const chatIds = [...new Set([chatId,
+        ...Object.values(storage.getAll('Chats')).filter(pendingIn).map(c => c.id)])];
       const deferDeadline = Date.now() + 10 * 60 * 1000;
-      while (genRef.current?.chatId === chatId) {
-        if (Date.now() > deferDeadline) {
-          console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
-          break;
+      let patched = false;
+      for (const id of chatIds) {
+        // Each generation owns its chat's message tree. Wait for that specific
+        // chat, then re-read and merge so forks and unrelated edits survive.
+        while (genRef.current?.chatId === id) {
+          if (Date.now() > deferDeadline) {
+            console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
+            break;
+          }
+          await new Promise(r => setTimeout(r, 250));
         }
-        await new Promise(r => setTimeout(r, 250));
+        const cur = storage.get('Chats', id) ?? ref.current.chats[id];
+        const node = cur?.messages?.[nodeId];
+        const swipe = node?.swipes?.[swipeIdx];
+        const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
+        if (!cur || !node || !swipe || !entry) continue;
+        const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
+        const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
+        saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
+        patched = true;
       }
-      const cur = ref.current.chats[chatId];
-      const node = cur?.messages?.[nodeId];
-      const swipe = node?.swipes?.[swipeIdx];
-      const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
-      if (!cur || !node || !swipe || !entry) return false;
-      const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
-      const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
-      saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
-      return true;
+      return patched;
     };
     try {
       const src = await generateImage({ endpoint: ep, apiKey: key, serverToken: st.serverToken,
@@ -1341,7 +1345,23 @@ function Main({ storage, storageKind, storageFailed }) {
   // firing (regenerate, regen-from-token). discardEmptySwipe may only pop a
   // swipe when this holds — a bare continuation appends nothing, so popping
   // there would destroy a real take.
-  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}) {
+  async function runGeneration(chatObj, nodeId, options = {}) {
+    let resolveCompletion;
+    const completion = new Promise(resolve => { resolveCompletion = resolve; });
+    try {
+      await runGenerationInner(chatObj, nodeId, options, completion);
+    } finally {
+      // Also covers unexpected prep/finalization throws and every early return.
+      // A conflict resolver may hold this generation object after genRef clears.
+      if (genRef.current?.completion === completion) {
+        storage.endStream();
+        genRef.current = null;
+        setGenerating(null);
+      }
+      resolveCompletion();
+    }
+  }
+  async function runGenerationInner(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}, completion) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
@@ -1362,13 +1382,13 @@ function Main({ storage, storageKind, storageFailed }) {
     // derivation (the prompt excludes the node entirely, and afterwards the
     // node is viewed at the NEW swipe), so the new take starts clean while
     // the old take keeps its world state. No prune/restore machinery.
-    // Claim the generation slot before anything async (the prep below —
-    // semantic embeddings, exact token count — can take a long time on a slow
-    // backend, and the UI keys off this).
+    // Claim the generation slot and slow persistence BEFORE async prep so Stop
+    // works immediately and focus sync treats the appended swipe as dirty.
     const abort = new AbortController();
-    genRef.current = { abort, chatId: chatObj.id };
+    genRef.current = { abort, chatId: chatObj.id, completion };
     setError(null); // a fresh generation supersedes the last error toast
     setGenerating({ chatId: chatObj.id, nodeId });
+    storage.beginStream('Chats', chatObj.id);
     // The node being generated is excluded from the prompt unless continuing it.
     // NB: not `??` — the root's parentId is null, and null MUST survive: for a
     // greeting regenerate the path is empty (system prompt only), so the model
@@ -1515,39 +1535,32 @@ function Main({ storage, storageKind, storageFailed }) {
     // assistant message would steer the model off the text being continued.
     if (continuation) delete effSamplers.prefill;
     let work = ref.current.chats[chatObj.id] ?? chatObj;
-    // ^ Re-base on the stored chat, not the caller's snapshot: a background
-    // merge-on-write (an image job's patch, enrichment) may have landed
-    // between the caller's read and the stream start. Callers saveChat the
-    // chat carrying the new empty swipe before firing (ref-synced), so the
-    // stored copy always includes our node — never reintroduce a bare
-    // upsertChat append upstream of fireGeneration.
-    // Coalesce persistence while streaming: applyText writes per token, and
-    // the storage layer stretches this key's flush debounce to 3 s until
-    // endStream (the finally) — the whole-chat row would otherwise re-upload
-    // twice a second for the stream's duration.
-    storage.beginStream('Chats', work.id);
+    // Re-base after prep on the stored chat. Continuation state comes from
+    // that copy too, not the request-start snapshot the async prep may stale.
+    const workNode = work.messages[nodeId] ?? node;
+    const baseSwipe = continuation ? workNode?.swipes?.[workNode.activeSwipe] : null;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
     // them off by one), so alignment happens once, globally, at the end.
-    const baseText = continuation ? activeText(node) : '';
+    const baseText = continuation ? activeText(workNode) : '';
     const baseSpans = continuation
-      ? (node?.swipes?.[node.activeSwipe]?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
+      ? (baseSwipe?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
       : [];
     let acc = baseText;
     // Reasoning channel (delta.reasoning_content) accumulates separately and
     // lands on the swipe as `think` — displayed collapsibly, never prompted.
     // Continuations prepend the base swipe's reasoning like its text.
-    let thinkAcc = continuation ? (node?.swipes?.[node.activeSwipe]?.think ?? '') : '';
+    let thinkAcc = continuation ? (baseSwipe?.think ?? '') : '';
     // Thinking wall time (first think chunk to the first content chunk —
     // prefill excluded) lands on the swipe as thinkMs; continuations add to
     // the base swipe's window.
-    const baseThinkMs = continuation ? (node?.swipes?.[node.activeSwipe]?.thinkMs ?? 0) : 0;
+    const baseThinkMs = continuation ? (baseSwipe?.thinkMs ?? 0) : 0;
     let thinkStartAt = null, thinkStopAt = null;
     // Backend-reported token counts (stream_options include_usage) land on
     // the swipe as usage.completion; on continuation the count adds the base
     // swipe's, so the ribbon total covers the whole reply.
-    const baseUsageTok = continuation ? (node?.swipes?.[node.activeSwipe]?.usage?.completion ?? 0) : 0;
+    const baseUsageTok = continuation ? (baseSwipe?.usage?.completion ?? 0) : 0;
     let usageRec = null;
     const lpTape = [];
     // Tool replies: the RAW accumulated text and its raw→stripped char map
@@ -1775,7 +1788,9 @@ function Main({ storage, storageKind, storageFailed }) {
           if (!acc.trim()) acc = '';
           if (parsed.text || !acc) applyText(acc);
         }
-        if (parsed.calls.length) {
+        // Abort still strips any partial protocol text and aligns its probs,
+        // but never executes tools or starts their follow-up jobs.
+        if (parsed.calls.length && !abort.signal.aborted) {
           toolCallsRan = true;
           const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
           // generate_image calls ride the tool machinery (a tools-disabled
@@ -1929,7 +1944,10 @@ function Main({ storage, storageKind, storageFailed }) {
             // completion covers the reasoning tokens too on thinking models.
             ...(usageRec?.completion != null
               ? { usage: { ...usageRec, completion: usageRec.completion + baseUsageTok } } : {}),
-            ...(interrupted ? { interrupted: true } : {}),
+            // Only a clean continuation clears the base take's old flag; an
+            // aborted continuation keeps it, and a new drop marks it again.
+            ...(interrupted ? { interrupted: true }
+              : continuation && sawDone && !abort.signal.aborted ? { interrupted: false } : {}),
             // Persisted on the swipe (full args) so the gear popover can show
             // them after the fact — the popover truncates for display only.
             ...(toolResults ? { toolCalls: toolResults.map(({ name, ok, note, args }) => ({
@@ -1944,29 +1962,22 @@ function Main({ storage, storageKind, storageFailed }) {
             work = { ...work, messages }; // deleted mid-generation — local only
           }
         }
-        maybeSummarize(work);
-        maybeExtractLore(work);
-        // Enrichment (settings.toolsEnrich): flesh out characters this
-        // generation registered, via the ✦ generator. Fire-and-forget like
-        // the passes above; merge-on-write at save time.
-        if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
-        // Same for their avatars (also needs Image generation on): one
-        // fire-and-forget portrait render per newly registered character.
-        if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
-        // Response suggestions: only after a full generation/regeneration —
-        // never mid-stream, never after /continue, never for OOC exchanges.
-        if (!continuation && st.suggestions) {
-          const parent = work.messages[node?.parentId];
-          const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
-          if (!parentIsOOC) fetchSuggestions(work, nodeId);
+        if (!abort.signal.aborted) {
+          maybeSummarize(work);
+          maybeExtractLore(work);
+          if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
+          if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
+          // Suggestions only follow a full, non-continuation generation.
+          if (!continuation && st.suggestions) {
+            const parent = work.messages[node?.parentId];
+            const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
+            if (!parentIsOOC) fetchSuggestions(work, nodeId);
+          }
         }
       }
       storage.flush();
-      // Fire the image job only now, after the finally's state has settled —
-      // the pending entry is already on the swipe. runImageJob patches it
-      // merge-on-write when the backend answers and handles its own errors;
-      // it never blocks the composer (imgCtls, not auxBusy). Not awaited.
-      if (imageQueued)
+      // Fire the image job only after a non-aborted generation has settled.
+      if (imageQueued && !abort.signal.aborted)
         runImageJob(work.id, nodeId, imageQueued.swipeIdx,
           { prompt: imageQueued.prompt, caption: imageQueued.caption, slot: imageQueued.slot }).catch(() => {});
     }
@@ -2145,8 +2156,8 @@ function Main({ storage, storageKind, storageFailed }) {
       }
       if (cmd === '/improve') {
         if (!arg) return 'Usage: /improve <draft text>';
-        improveDraft(c, arg);
-        return null;
+        improveDraft(c, arg, raw);
+        return 'Improving draft…';
       }
       if (cmd === '/image') {
         const st = ref.current.settings;
@@ -2167,7 +2178,7 @@ function Main({ storage, storageKind, storageFailed }) {
           runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
         });
       }
-      if (cmd === '/impersonate') { onImpersonate(); return null; }
+      if (cmd === '/impersonate') return onImpersonate(raw) ? 'Drafting your reply…' : false;
       if (cmd === '/export') {
         const fmt = (arg || 'png').toLowerCase();
         if (fmt === 'png') { onExportChatPNG(c); return null; }
@@ -2208,7 +2219,7 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- aux slash commands ----
-  async function improveDraft(c, draft) {
+  async function improveDraft(c, draft, baseText) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     const conn = roleApi(st, 'aux');
@@ -2227,7 +2238,7 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: st.improveMaxTokens ?? 1500, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
+      setComposerInject({ chatId: c.id, text: out, baseText, hint: null, nonce: Date.now() });
     } catch (e) {
       setError(`/improve failed: ${e.message ?? e}`);
     }
@@ -2237,7 +2248,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // composer as an editable draft — never sent automatically. Rides auxLogged,
   // so the composer's Stop aborts it and the call lands in the Inspector's
   // aux log like every background call.
-  async function impersonateDraft(c) {
+  async function impersonateDraft(c, baseText) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     const conn = roleApi(st, 'aux');
@@ -2255,15 +2266,19 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: 400, temperature: st.suggestionsTemp ?? 0.7, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
+      setComposerInject({ chatId: c.id, text: out, baseText, hint: null, nonce: Date.now() });
     } catch (e) {
       setError(`Impersonate failed: ${e.message ?? e}`);
     }
   }
-  const onImpersonate = () => {
+  const onImpersonate = (baseText) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
-    impersonateDraft(c);
+    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return false;
+    // The chip passes its click event rather than a draft; its live textarea
+    // is authoritative. The slash path passes the full raw command explicitly.
+    impersonateDraft(c, typeof baseText === 'string'
+      ? baseText : (document.querySelector('.composer textarea')?.value ?? ''));
+    return true;
   };
 
   async function recapChat(c, n) {
@@ -2284,13 +2299,14 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: st.recapMaxTokens ?? 1500, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setModal({ kind: 'recap', text: out });
+      queueRecap(c.id, out);
     } catch (e) {
       setError(`/recap failed: ${e.message ?? e}`);
     }
   }
 
   async function memoryCommand(c, n) {
+    const requestSig = activePathSignature(c);
     setComposerInject({ chatId: c.id, hint: 'Generating memory…', nonce: Date.now() });
     try {
       // Explicit span (last N messages, default one cadence window) — a manual
@@ -2299,10 +2315,12 @@ function Main({ storage, storageKind, storageFailed }) {
       const pathLen = getActivePath(c.messages, c.activeLeafId).length;
       const r = await generateMemory(c, { from: Math.max(0, pathLen - (n ?? every)), to: pathLen });
       if (!r?.text) { setComposerInject({ chatId: c.id, hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
-      // Merge-on-write: re-read the chat after the aux call and overwrite
-      // only memoryStore (manual /memory: cursor untouched).
+      // Drop a result requested for a path/take that is no longer active.
       const cur = ref.current.chats[c.id];
-      if (!cur) { setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() }); return; }
+      if (!cur || activePathSignature(cur) !== requestSig) {
+        setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
+        return;
+      }
       const store = pushMemory(cur, r.text);
       saveChat({ ...cur, memoryStore: { ...clearStoreError(store, 'summary'), cursor: cur.memoryStore?.cursor ?? 0 } });
       setComposerInject({ chatId: c.id, hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
@@ -2333,9 +2351,13 @@ function Main({ storage, storageKind, storageFailed }) {
       const bn = base.messages[nodeId];
       if (!bn) return; // a freshness pull may have changed the viewed branch
       const swipes = [...bn.swipes, { text: '', createdAt: Date.now(), modelId: null }];
+      const parentLen = getActivePath(base.messages, bn.parentId).length;
+      const memoryStore = { ...(base.memoryStore ?? { memories: [], cursor: 0 }),
+        cursor: Math.min(base.memoryStore?.cursor ?? 0, parentLen) };
       // The regenerated node becomes the tip: the previous continuation is kept
       // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
-      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId,
+        memoryStore, emergentCursor: Math.min(base.emergentCursor ?? 0, parentLen), updatedAt: Date.now() };
       saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
       fireGeneration(c1, nodeId);
     });
@@ -2356,7 +2378,11 @@ function Main({ storage, storageKind, storageFailed }) {
       const prefix = keep.map(t => t.text).join('') + (alt ?? '');
       const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
       const swipes = [...bn.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
-      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      const parentLen = getActivePath(base.messages, bn.parentId).length;
+      const memoryStore = { ...(base.memoryStore ?? { memories: [], cursor: 0 }),
+        cursor: Math.min(base.memoryStore?.cursor ?? 0, parentLen) };
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId,
+        memoryStore, emergentCursor: Math.min(base.emergentCursor ?? 0, parentLen), updatedAt: Date.now() };
       saveChat(c1);
       // continuation drives the prefill mechanics, but the caller DID append a
       // swipe — an abort may discard it (appendedSwipe).
@@ -2596,18 +2622,25 @@ function Main({ storage, storageKind, storageFailed }) {
   };
 
   // ---- export / import ----
+  const hydrateForExport = async (store, key, label) => {
+    try {
+      if (await storage.hydrate(store, key)) return true;
+      setError(`Export cancelled: images for ${label} are unavailable.`);
+    } catch (e) {
+      setError(`Export cancelled: could not load images for ${label} (${e?.message ?? e}).`);
+    }
+    return false;
+  };
   // A scenario export is a BUNDLE: the scenario plus its linked global
   // characters (scenario.characterIds), so the file works standalone on
   // import. The legacy single-scenario type stays importable (below).
   const onExportScenario = async (id) => {
-    // Hydrate first (lazy images): an export must never carry imgref
-    // sentinels. Reads below take the fresh post-hydration cache copy.
-    await storage.hydrate('Scenarios', id);
+    if (!await hydrateForExport('Scenarios', id, 'this scenario')) return;
     const s0 = storage.get('Scenarios', id) ?? scenarios[id];
     if (!s0) return;
     const chars = [];
     for (const cid of s0.characterIds ?? []) {
-      await storage.hydrate('Characters', cid);
+      if (!await hydrateForExport('Characters', cid, 'a linked character')) return;
       const c = storage.get('Characters', cid) ?? characters[cid];
       if (c) chars.push(c);
     }
@@ -2617,7 +2650,7 @@ function Main({ storage, storageKind, storageFailed }) {
     });
   };
   const onExportChat = async (c) => {
-    await storage.hydrate('Chats', c.id);
+    if (!await hydrateForExport('Chats', c.id, 'this chat')) return;
     const fresh = storage.get('Chats', c.id) ?? c;
     downloadJSON(`fictionpad-chat-${fresh.name}.json`, { type: 'fictionpad-chat', version: 1, data: fresh });
   };
@@ -2625,8 +2658,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // zero-dep SVG-foreignObject snapshot in 70-util) and a Markdown transcript
   // of the active branch. Both are read-only — no genGuard needed.
   const onExportChatPNG = async (c) => {
+    if (!await hydrateForExport('Chats', c.id, 'this chat')) return;
+    const fresh = storage.get('Chats', c.id) ?? c;
     try {
-      await snapshotChatLogPNG(`fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
+      await snapshotChatLogPNG(`fictionpad-chat-${(fresh.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
     } catch (e) { setError(`PNG export failed: ${e?.message ?? e}`); }
   };
   const onExportChatMarkdown = (c) => {
@@ -2639,9 +2674,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // lack fields the editors and message UI assume (the draft.lorePieces crash
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = async (id) => {
-    await storage.hydrate('Characters', id);
+    if (!await hydrateForExport('Characters', id, 'this character')) return;
     const c = storage.get('Characters', id) ?? characters[id];
-    downloadJSON(`fictionpad-character-${c?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: c });
+    if (!c) return;
+    downloadJSON(`fictionpad-character-${c.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: c });
   };
   // Duplicate in place: deep clone with a fresh id and a " (copy)" name
   // suffix — the export → edit-the-id → reimport roundtrip as one click. A
@@ -2677,16 +2713,21 @@ function Main({ storage, storageKind, storageFailed }) {
   // a global character card: pure-core mapping, fresh id, provenance stripped.
   // The new card just appears in the sidebar Characters section.
   const onExportPieceToCharacter = async (piece) => {
-    // The piece may hold unresolved imgref avatars (lazy images): hydrate the
-    // likely owners and re-resolve the piece fresh before mapping it.
+    // Resolve the actual owner (including a scenario editor for a non-active
+    // chat), hydrate it, then map the fresh piece rather than a stale prop.
+    const chatOwner = Object.values(ref.current.chats)
+      .find(c => (c.lorePieces ?? []).some(q => q.id === piece.id));
+    const scenarioOwner = chatOwner ? null : Object.values(ref.current.scenarios)
+      .find(s => (s.lorePieces ?? []).some(q => q.id === piece.id));
+    const owner = chatOwner ? { store: 'Chats', value: chatOwner }
+      : scenarioOwner ? { store: 'Scenarios', value: scenarioOwner } : null;
     let p = piece;
-    if (chat?.id) {
-      await storage.hydrate('Chats', chat.id);
-      if (chatScenario?.id) await storage.hydrate('Scenarios', chatScenario.id);
-      p = (storage.get('Chats', chat.id)?.lorePieces ?? []).find(q => q.id === piece.id)
-        ?? (chatScenario?.id ? (storage.get('Scenarios', chatScenario.id)?.lorePieces ?? []).find(q => q.id === piece.id) : null)
-        ?? piece;
+    if (owner) {
+      if (!await hydrateForExport(owner.store, owner.value.id, 'this lore piece')) return;
+      p = (storage.get(owner.store, owner.value.id)?.lorePieces ?? []).find(q => q.id === piece.id) ?? piece;
     }
+    if (collectImgrefIds(p).size)
+      return setError('Export cancelled: images for this lore piece are unavailable.');
     const c = normalizeCharacter(characterFromPiece(p));
     if (!c.name.trim()) return setError('Give the piece a title first — it becomes the character name.');
     upsertCharacter(c.id, c);
@@ -2697,7 +2738,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // linked scenario when one exists — buildCharacterCard tolerates null)
   // embedded as a tEXt chunk (pure core). Importable by SillyTavern-style tools.
   const onExportCharacterPng = async (character0) => {
-    await storage.hydrate('Characters', character0?.id);
+    if (!await hydrateForExport('Characters', character0?.id, 'this character')) return;
     const character = storage.get('Characters', character0?.id) ?? character0;
     if (!character?.avatar)
       return setError('Set an avatar first — the avatar becomes the card image.');
@@ -2711,8 +2752,13 @@ function Main({ storage, storageKind, storageFailed }) {
       const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
       if (!blob) throw new Error('the browser refused to encode the PNG');
       const u8 = new Uint8Array(await blob.arrayBuffer());
-      const scenario = Object.values(scenarios ?? {})
+      const scenario0 = Object.values(ref.current.scenarios ?? {})
         .find(s => (s.characterIds ?? []).includes(character.id)) ?? null;
+      let scenario = null;
+      if (scenario0) {
+        if (!await hydrateForExport('Scenarios', scenario0.id, 'the linked scenario')) return;
+        scenario = storage.get('Scenarios', scenario0.id) ?? scenario0;
+      }
       downloadBlob(new Blob([embedPngCardJson(u8, JSON.stringify(buildCharacterCard(scenario, character)))],
         { type: 'image/png' }), `${character.name}.png`);
     } catch (e) { setError(`PNG card export failed: ${e?.message ?? e}`); }
@@ -2793,18 +2839,22 @@ function Main({ storage, storageKind, storageFailed }) {
   // serverToken is per-device and NEVER leaves the machine — stripped here on
   // export and ignored on import (same rule as the Meta/app.settings sync).
   const onExportAll = async () => {
-    // A full backup must be complete: resolve every lazy imgref sentinel
-    // first, then read the stores fresh (state maps may lag the hydration).
-    await storage.hydrateAll();
-    const { serverToken, ...rest } = settingsRaw ?? {};
-    downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
-      type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
-      data: {
-        scenarios: storage.getAll('Scenarios'), chats: storage.getAll('Chats'),
-        personas: storage.getAll('Personas'), characters: storage.getAll('Characters'),
-        settings: rest,
-      },
-    });
+    try {
+      // A full backup must be complete: resolve every lazy imgref sentinel
+      // first, then read the stores fresh (state maps may lag the hydration).
+      await storage.hydrateAll();
+      const { serverToken, ...rest } = settingsRaw ?? {};
+      downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
+        type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
+        data: {
+          scenarios: storage.getAll('Scenarios'), chats: storage.getAll('Chats'),
+          personas: storage.getAll('Personas'), characters: storage.getAll('Characters'),
+          settings: rest,
+        },
+      });
+    } catch (e) {
+      setError(`Backup export failed: ${e?.message ?? e}`);
+    }
   };
   // Upserts everything by id (last write wins — entities absent from the file
   // are kept). Returns { note, settings } for the Settings modal, null when
@@ -2830,6 +2880,9 @@ function Main({ storage, storageKind, storageFailed }) {
     let applied = null;
     if (d.settings && typeof d.settings === 'object') {
       const { serverToken, ...rest } = d.settings; // any serverToken in the file is dropped
+      for (const key of ['profiles', 'customSamplers'])
+        rest[key] = Array.isArray(rest[key])
+          ? rest[key].filter(v => v && typeof v === 'object' && !Array.isArray(v)) : [];
       applied = rest;
       // One setSettings commit → the settings-sync effect uploads it once.
       setSettings(prev => ({ ...rest, serverToken: prev?.serverToken ?? '' }));
@@ -3073,17 +3126,17 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
         allPieces=${mergedLorePieces(chatScenario, chat, characters)}
         onSave=${(draft, mountPiece) => {
-          // Merge the draft over the LIVE piece list (re-read — a generation
-          // may have streamed mid-edit): the revision log and an
-          // enrichment-written avatar pair always survive Save; the draft owns
-          // the avatar only when the user actually changed those fields.
-          const merge = (list) => (list ?? []).map(q => q.id !== draft.id ? q : {
-            ...draft,
-            ...(q.revisions ? { revisions: q.revisions } : {}),
-            ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
-              .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
-            ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
-              ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}),
+          // Merge over the LIVE piece, then let the shared editor helper record
+          // content/key edits without dropping revisions or provenance.
+          const merge = (list) => (list ?? []).map(q => {
+            if (q.id !== draft.id) return q;
+            const mergedDraft = { ...draft,
+              ...(q.revisions ? { revisions: q.revisions } : {}),
+              ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+                .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
+              ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+                ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}) };
+            return editLorePiece(q, mergedDraft);
           });
           if (modal.source === 'chat') {
             const live = ref.current.chats[chat.id];
@@ -3139,7 +3192,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modal?.kind === 'recap' && html`
       <${ErrorBoundary} name="recap"><${RecapModal} text=${modal.text} onClose=${() => setModal(null)}
         onSaveMemory=${() => {
-          const c = ref.current.chats[ui.chatId];
+          const c = ref.current.chats[modal.chatId];
           if (c) {
             const store = pushMemory(c, modal.text);
             saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });

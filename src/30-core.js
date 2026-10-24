@@ -203,16 +203,18 @@ function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapSt
   }
   if (messages === msgs && tip === chat.activeLeafId) return chat;
   // Re-base the cadence cursors on the new path: they are position counts, and
-  // coverage honestly holds only over the shared id-prefix of the old and new
-  // paths — passes that ran past the divergence wrote cards stamped with
-  // off-branch leaves, which hide on this path anyway. Clamping (never
-  // deleting) keeps a switched-to shorter branch from reading a stale cursor
-  // as "covered" — the memory cap's floor and the pass cadence both derive
-  // from this. rewindChat sets the same cursors explicitly.
+  // coverage honestly holds only over the shared node/swipe prefix of the old
+  // and new paths — passes that ran past the divergence wrote cards stamped
+  // with off-branch views, which hide on this path anyway. Clamping (never
+  // deleting) keeps a switched-to shorter branch or changed take from reading
+  // a stale cursor as "covered" — the memory cap's floor and the pass cadence
+  // both derive from this. rewindChat sets the same cursors explicitly.
   const oldPath = getActivePath(msgs, chat.activeLeafId);
   const newPath = getActivePath(messages, tip);
   let shared = 0;
-  while (shared < oldPath.length && shared < newPath.length && oldPath[shared].id === newPath[shared].id) shared++;
+  while (shared < oldPath.length && shared < newPath.length
+      && oldPath[shared].id === newPath[shared].id
+      && (oldPath[shared].activeSwipe ?? 0) === (newPath[shared].activeSwipe ?? 0)) shared++;
   const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
   return { ...chat, messages, activeLeafId: tip,
     memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, shared) },
@@ -234,9 +236,10 @@ const stampOnView = (createdBy, createdSwipe, pathIds, messages) => {
 };
 
 // Branch view of a revision-tracked piece: effective content/keys come from
-// the last revision whose origin is global (null createdBy) or on view. The
-// stored log is never touched — switching branches/swipes re-derives the
-// view. Identity return when the latest revision is visible.
+// the last revision visible on this branch/take, in log order. A later global
+// user edit supersedes older scoped views everywhere; a still-later tool
+// revision supersedes it only on that revision's branch/take. The stored log
+// is never touched — switching branches/swipes re-derives the view.
 function pieceAtPath(piece, pathIds, messages = null) {
   const revs = piece?.revisions;
   if (!Array.isArray(revs) || revs.length < 2 || !pathIds) return piece;
@@ -245,6 +248,24 @@ function pieceAtPath(piece, pathIds, messages = null) {
     if (r?.createdBy == null || stampOnView(r.createdBy, r.createdSwipe, pathIds, messages)) vis = r;
   if (!vis || vis === revs[revs.length - 1]) return piece;
   return { ...piece, content: vis.content, keys: vis.keys ?? [] };
+}
+
+// Direct user edits are global, present-tense changes. Revisioned pieces keep
+// their live log and append a null-stamped content/keys view only when those
+// fields changed; pieceAtPath then falls back to this edit off later tool
+// branches. Unrevisioned pieces need no synthetic history.
+function editLorePiece(piece, draft) {
+  const merged = { ...piece, ...draft };
+  const revisions = piece?.revisions;
+  if (!Array.isArray(revisions) || !revisions.length) return merged;
+  const content = draft?.content ?? piece.content ?? '';
+  const keys = Array.isArray(draft?.keys) ? draft.keys : (Array.isArray(piece.keys) ? piece.keys : []);
+  const unchanged = content === (piece.content ?? '')
+    && keys.length === (Array.isArray(piece.keys) ? piece.keys : []).length
+    && keys.every((key, i) => key === piece.keys[i]);
+  if (unchanged) return { ...merged, revisions };
+  const revision = { content, keys, atLen: null, createdAt: null, createdBy: null, createdSwipe: null };
+  return { ...merged, content, keys, revisions: [...revisions, revision] };
 }
 
 // Piece-level branch visibility: a piece belongs on this branch when its own
@@ -411,15 +432,17 @@ function deleteSubtree(messages, nodeId) {
 // loreQueue entries stay in the chat — whatever belonged to the rewound-away
 // tail hides by branch/swipe derivation in the assembler (pieceVisibleAt,
 // memory atMsg scope) and re-emerges if that branch is revisited. Only the
-// summary/extraction cadence cursors roll back, so those passes re-fire from
-// the rewind point. Rewind-EXEMPT as before: chat.vars and chat.authorsNote.
+// summary/extraction cadence cursors roll back (but never forward), so those
+// passes re-fire from the rewind point. Rewind-EXEMPT as before: chat.vars and
+// chat.authorsNote.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
   const pathLen = getActivePath(chat.messages, nodeId).length;
+  const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
   return { ...chat, activeLeafId: nodeId,
-    memoryStore: { ...(chat.memoryStore ?? { memories: [], cursor: 0 }), cursor: pathLen },
-    emergentCursor: pathLen };
+    memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, pathLen) },
+    emergentCursor: Math.min(chat.emergentCursor ?? 0, pathLen) };
 }
 
 // Fork the chat at nodeId into a NEW self-contained chat. Only the fork
@@ -613,11 +636,11 @@ function scanLore(lorePieces, conversationText, preActivated = null,
 
 // Sort candidates by effective weight desc and fill the lore budget.
 // opts.scanned: a precomputed scanLore result (assemblePrompt scans once and
-// passes it in) — omitted, selectLore scans itself. Per-piece cost includes
-// the `[title]\n` header exactly as rendered into the World Info block.
-// opts.sub: macro substitution applied at render time ({{user}}, {{var:}}) —
-// budget against the RENDERED text, or macro expansion silently inflates the
-// layer past budgetTokens. Defaults to identity.
+// passes it in) — omitted, selectLore scans itself. Selection budgets the full
+// rendered block, including the World Info header and separators. opts.sub:
+// macro substitution applied at render time ({{user}}, {{var:}}) — budget
+// against the RENDERED text, or macro expansion silently inflates the layer
+// past budgetTokens. Defaults to identity.
 function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
   const scan = opts.scanned ?? scanLore(lorePieces, conversationText, preActivated, opts);
   const subFn = typeof opts.sub === 'function' ? opts.sub : (t) => t;
@@ -633,11 +656,13 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
-  let used = 0;
+  let block = '';
   for (const c of candidates) {
-    if (used + c.tokens > budgetTokens) continue; // a smaller piece may still fit
+    const entry = `[${c.title}]\n${subFn(c.content)}`;
+    const nextBlock = block ? `${block}\n\n${entry}` : `[World Info]\n${entry}`;
+    if (estimateTokens(nextBlock, opts.chars) > budgetTokens) continue; // a smaller piece may still fit
     selected.push(c);
-    used += c.tokens;
+    block = nextBlock;
   }
   return selected;
 }
@@ -702,13 +727,14 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, atSwipe = null) {
   // atLen is stamped at creation, before eviction: in an all-pinned full store
   // the incoming entry is the one dropped, and stamping after the fact would
   // mis-tag an unrelated old memory's rewind position. atMsg (active leaf at
-  // creation) scopes the memory to its branch in assemblePrompt.
+  // creation) and optional atSwipe scope the memory to its view in assemblePrompt.
   const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) }];
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
+    ...(Number.isInteger(atSwipe) ? { atSwipe } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -720,19 +746,20 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 // Revise a memory without rewriting it: the stale card stays in the store,
 // marked with supersede point(s) and a link to its replacement; the revised
 // text lands as a FRESH card stamped like any new memory. The assembler hides
-// a card with ANY supersede point on the active path, so the branch that
-// superseded sees only the new text while a stale-leaf branch (or a rewind)
-// keeps the old card — derivation, never deletion, same rule as lore
-// revisions.
-// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch
+// a card with ANY supersede point on the active view, so the branch/take that
+// superseded sees only the new text while a stale view (or a rewind) keeps the
+// old card — derivation, never deletion, same rule as lore revisions.
+// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch or take
 // re-superseding the same card appends its own point instead of overwriting,
-// so each branch hides the stale card from its own supersede on (a single
-// scalar point would resurrect the stale card on the first branch). supBy is
-// only the LATEST replacement id (Memory-tab badge/click-through). Legacy
-// scalar supAtMsg data reads as a one-element list via supPointsOf.
+// so each view hides the stale card from its own supersede on (a single scalar
+// point would resurrect the stale card on the first branch). Optional parallel
+// supAtSwipes entries scope individual points to takes; absent entries retain
+// legacy node scope. supBy is only the LATEST replacement id (Memory-tab
+// badge/click-through). Legacy scalar supAtMsg data reads as a one-element
+// list via supPointsOf.
 const supPointsOf = (m) => Array.isArray(m?.supAtMsgs) ? m.supAtMsgs
   : (m?.supAtMsg != null ? [m.supAtMsg] : []);
-function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null) {
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null, atSwipe = null) {
   const cur = store?.memories ?? [];
   const old = cur.find(m => m?.id === id);
   if (!old) return store; // unknown id — never invent a revision for nothing
@@ -740,14 +767,20 @@ function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, at
   const note = String(revNote ?? '').trim().slice(0, 300) || null;
   // The pin TRANSFERS to the replacement: the superseded original stays only
   // as rollback history and rejoins the eviction pool.
-  const points = supPointsOf(old);
-  const marked = { ...old, pinned: false, supBy: newId,
-    supAtMsgs: (atMsg && !points.includes(atMsg)) ? [...points, atMsg] : points };
+  const points = [...supPointsOf(old)];
+  const pointSwipes = points.map((_, i) => Number.isInteger(old.supAtSwipes?.[i]) ? old.supAtSwipes[i] : null);
+  const swipe = Number.isInteger(atSwipe) ? atSwipe : null;
+  if (atMsg && !points.some((point, i) => point === atMsg && pointSwipes[i] === swipe)) {
+    points.push(atMsg);
+    pointSwipes.push(swipe);
+  }
+  const marked = { ...old, pinned: false, supBy: newId, supAtMsgs: points,
+    ...((Array.isArray(old.supAtSwipes) || swipe != null) ? { supAtSwipes: pointSwipes } : {}) };
   delete marked.supAtMsg; // migrated into the list
   const memories = [...cur.map(m => (m && m.id === id) ? marked : m),
     { id: newId, text, pinned: !!old.pinned, createdAt: now,
       ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
-      ...(note ? { revNote: note } : {}) }];
+      ...(Number.isInteger(atSwipe) ? { atSwipe } : {}), ...(note ? { revNote: note } : {}) }];
   while (memories.length > cap) {
     // Evict the oldest unpinned NON-superseded card first; a superseded card
     // (rollback history) goes only when nothing else can. The fresh revision
@@ -981,16 +1014,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    (createdAt asc) so the model reads the memory block forwards in time.
   //    Per-memory cost counts the `- ` prefix exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
-  // Branch visibility (same rule as the lore layer): a memory stamped with
-  // atMsg (the leaf it was summarized under) injects only while that node is
-  // on the active path; unstamped memories are global. A card superseded by
-  // the lore pass hides when ANY of its supAtMsgs points is on path (one
-  // point per branch that superseded it — sibling branches supersede the
-  // same card independently) — its replacement rides the same stamps, so
-  // each branch sees the newest revision it reached.
+  // Branch/swipe visibility (same rule as the lore layer): a memory stamped
+  // with atMsg and optional atSwipe injects only while that view is active;
+  // unstamped memories are global and legacy swipe-less stamps stay node-scoped.
+  // A card superseded by the lore pass hides when ANY supersede point is on
+  // view; its replacement rides the same stamps, so each branch/take sees the
+  // newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
-  const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
-  const memSuped = (m) => !memGone(m) && supPointsOf(m).some(id => pathIds.has(id));
+  const memGone = (m) => m?.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatMsgs);
+  const memSuped = (m) => !memGone(m) && supPointsOf(m)
+    .some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatMsgs));
   const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
   const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
@@ -1010,12 +1043,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     memReason = (m) => m.pinned ? 'pinned' : 'recent';
   }
   const memSel = [];
-  let memUsed = 0;
+  let memBlock = '';
   for (const m of memOrdered) {
-    const cost = est(`- ${m.text}`);
-    if (memUsed + cost > memCap) continue;
+    const entry = `- ${m.text}`;
+    const nextBlock = memBlock ? `${memBlock}\n${entry}` : `[Memories]\n${entry}`;
+    if (est(nextBlock) > memCap) continue;
     memSel.push(m);
-    memUsed += cost;
+    memBlock = nextBlock;
   }
   const memSelIds = new Set(memSel.map(m => m.id));
   const memRender = [...memSel].sort((a, b) => a.createdAt - b.createdAt);
@@ -1384,7 +1418,7 @@ function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, cr
 // marked superseded (see supersedeMemory); the entry's change note rides the
 // new card as revNote for the Memory tab. A vanished target (evicted/
 // user-deleted) just drops the entry.
-function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, atSwipe = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
   const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
   if (!q) return chat;
   const store = chat.memoryStore ?? { memories: [], cursor: 0 };
@@ -1394,7 +1428,7 @@ function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = D
     memoryStore: exists
       ? supersedeMemory(store, q.memoryId,
           (Number.isFinite(maxChars) && maxChars > 0) ? text.slice(0, maxChars) : text,
-          now, cap, atLen, atMsg, q.note)
+          now, cap, atLen, atMsg, q.note, atSwipe)
       : store,
     loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
@@ -1444,13 +1478,15 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
     createdBy: p.createdBy ?? null,
     createdSwipe: Number.isInteger(p.createdSwipe) ? p.createdSwipe : null });
-  // p = piece to write (already provenance-stamped for shadows); seed = the
-  // piece rev 0 is taken from when no log exists yet; keys null = keep current.
-  const withRevision = (p, seed, content, keys) => ({
-    ...p, content, ...(keys ? { keys } : {}),
-    revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
-      { content, keys: keys ?? p.keys ?? [], ...provenance, ...(revNote ? { note: revNote } : {}) }],
-  });
+  // p = raw piece to write; seed = branch-current content/keys source. The raw
+  // revision log stays intact even when its top-level keys belong to a hidden take.
+  const branchPiece = (p) => (Array.isArray(allPieces) ? allPieces.find(q => q.id === p.id) : null) ?? p;
+  const withRevision = (p, seed, content, keys) => {
+    const nextKeys = keys ?? seed.keys ?? p.keys ?? [];
+    return { ...p, content, keys: nextKeys,
+      revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
+        { content, keys: nextKeys, ...provenance, ...(revNote ? { note: revNote } : {}) }] };
+  };
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
     const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
@@ -1464,7 +1500,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = dedupe(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, desc, null) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), desc, null) : p),
         `updated character "${cname}"`);
     if (existing)
       // Match lives outside the chat overlay (scenario/global): shadow it via
@@ -1492,7 +1528,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!existing)
       return fail(`update_character: no character named "${cname}" — register it first`);
     if (pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), content, keys) : p),
         `updated character "${cname}"`);
     // Match lives outside the chat overlay (scenario/global): shadow it — the
     // original entity never mutates. rev 0 is seeded from the UNPROVENANCED
@@ -1518,7 +1554,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = dedupe(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), content, keys) : p),
         `updated lore "${title}"`);
     if (existing)
       // Match lives outside the chat overlay: shadow it via an overlay copy
@@ -1908,7 +1944,7 @@ function normalizeChat(c) {
 const escapeRxKey = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Cards use {{char}}; FictionPad has {{user}} only (multi-character scenarios
 // make {{char}} ambiguous) — bind it to the card's own name at import time.
-const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, name);
+const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, () => name);
 // Bytes → ASCII without spreading (a large tEXt chunk would overflow the
 // argument limit of a single String.fromCharCode(...bytes) call).
 const u8ToAscii = (bytes) => {

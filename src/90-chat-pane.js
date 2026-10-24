@@ -145,7 +145,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
         skipLeafScrollRef.current = true; // the seenLeaf effect must not bottom-scroll after us
         pinnedRef.current = false;
         setPinned(false);
-        const nodeEl = el.querySelector(`[data-mid="${tgt.nodeId}"]`);
+        const nodeEl = el.querySelector(`[data-mid="${CSS.escape(tgt.nodeId)}"]`);
         if (nodeEl) {
           const r = nodeEl.getBoundingClientRect();
           const lr = el.getBoundingClientRect();
@@ -197,7 +197,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   useEffect(() => {
     if (!selId) return;
     const el = logRef.current;
-    const nodeEl = el?.querySelector(`[data-mid="${selId}"]`);
+    const nodeEl = el?.querySelector(`[data-mid="${CSS.escape(selId)}"]`);
     if (!el || !nodeEl) return;
     const r = nodeEl.getBoundingClientRect();
     const lr = el.getBoundingClientRect();

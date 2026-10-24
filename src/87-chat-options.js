@@ -147,12 +147,13 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
             // A piece deleted meanwhile drops the save.
             const live = pieces.find(q => q.id === draft.id);
             if (!live) { setEditing(null); return; }
-            const merged = { ...draft,
+            const mergedDraft = { ...draft,
               ...(live.revisions ? { revisions: live.revisions } : {}),
               ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
                 .filter(k => live[k] !== undefined).map(k => [k, live[k]])),
               ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
                 ? { avatar: live.avatar ?? '', avatarFull: live.avatarFull ?? '' } : {}) };
+            const merged = editLorePiece(live, mergedDraft);
             setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}
