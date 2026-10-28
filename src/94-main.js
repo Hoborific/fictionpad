@@ -1482,7 +1482,8 @@ function Main({ storage, storageKind, storageFailed }) {
     {
       const nSys = messages.filter(m => m.role === 'system').length;
       const hasGreeting = (man.layers.greeting?.tokens ?? 0) > 0;
-      const head = messages.slice(0, nSys + (hasGreeting ? 1 : 0));
+      const greetingAt = hasGreeting ? messages.findIndex((m, i) => i >= nSys && m.role === 'assistant') : -1;
+      const head = messages.slice(0, greetingAt === -1 ? nSys : greetingAt + 1);
       const hist = messages.slice(head.length);
       const headTok = hist.length
         ? await getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -1682,7 +1683,7 @@ function Main({ storage, storageKind, storageFailed }) {
             samplers: effSamplers,
             maxTokens: st.maxTokens, signal: abort.signal,
             tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: stopList,
-            usageStats: wantUsage,
+            usageStats: wantUsage, strictUserAssistant: !!st.strictUserAssistant,
           })) {
             if (chunk.done) {
               sawDone = true;

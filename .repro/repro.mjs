@@ -884,6 +884,26 @@ trial('openaiChatStream: content/lp split + request body', async () => {
   } finally { globalThis.fetch = oldFetch; }
 });
 
+trial('openaiChatStream: strict user/assistant compatibility covers greeting and prefill', async () => {
+  const oldFetch = globalThis.fetch;
+  let sentBody = null;
+  globalThis.fetch = async (url, opts) => {
+    sentBody = JSON.parse(opts.body);
+    return new Response('data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  const input = [{ role: 'system', content: 'rules' }, { role: 'assistant', content: 'greeting' }];
+  try {
+    for await (const _ of fp.openaiChatStream({ endpoint: 'http://x', model: 'm', messages: input,
+      samplers: { prefill: 'Continue' }, strictUserAssistant: true })) {}
+    const roles = sentBody.messages.map(m => m.role).join(',');
+    if (roles !== 'system,user,assistant,user,assistant') throw new Error('bad strict-role shape: ' + roles);
+    if (sentBody.messages[1].content !== ' ' || sentBody.messages[3].content !== ' ')
+      throw new Error('synthetic user turns are not blank');
+    if (input.map(m => m.role).join(',') !== 'system,assistant') throw new Error('input messages were mutated');
+  } finally { globalThis.fetch = oldFetch; }
+});
+
 // Reasoning channel: delta.reasoning_content (vLLM/DeepSeek) and
 // delta.reasoning (OpenRouter) yield { think } records, kept out of content.
 trial('openaiChatStream: reasoning_content captured as { think }', async () => {

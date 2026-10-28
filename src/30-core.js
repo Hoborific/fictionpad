@@ -87,6 +87,22 @@ function expandSamplerParams(samplers) {
   return out;
 }
 
+// Compatibility for backends that require a user turn before every assistant
+// turn. System messages do not affect the conversational role sequence. A
+// trailing assistant remains trailing so continuations and prefill still work.
+function strictUserAssistantMessages(messages) {
+  const out = [];
+  let lastRole = null;
+  for (const m of messages ?? []) {
+    if (m.role === 'system') { out.push(m); continue; }
+    if (m.role === 'assistant' && lastRole !== 'user') out.push({ role: 'user', content: ' ' });
+    out.push(m);
+    lastRole = m.role;
+  }
+  if (lastRole == null) out.push({ role: 'user', content: ' ' });
+  return out;
+}
+
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
 
@@ -1093,12 +1109,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, total: histTotal, keptIds: kept.map(n => n.id) };
 
   // 6. chat-completions message array
-  const messages = [{ role: 'system', content: staticText }];
-  if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
-  if (memText) messages.push({ role: 'system', content: memText });
-  if (greetingNode) messages.push({ role: 'assistant', content: histText(greetingNode) });
+  const rawMessages = [{ role: 'system', content: staticText }];
+  if (loreText) rawMessages.push({ role: 'system', content: `[World Info]\n${loreText}` });
+  if (memText) rawMessages.push({ role: 'system', content: memText });
+  if (greetingNode) rawMessages.push({ role: 'assistant', content: histText(greetingNode) });
   for (const n of kept)
-    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
+    rawMessages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
+  const messages = settings.strictUserAssistant ? strictUserAssistantMessages(rawMessages) : rawMessages;
 
   manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
@@ -2256,7 +2273,7 @@ function collectImageUrls(value, into = new Set()) {
 // ways (draft → profile on save, profile → draft on apply), so unrelated
 // settings never hitchhike and serverToken (per-device) is never stored.
 const PROFILE_FIELDS = [
-  'endpoint', 'apiKey',
+  'endpoint', 'apiKey', 'strictUserAssistant',
   'auxEndpoint', 'auxApiKey', 'genEndpoint', 'genApiKey',
   'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey',
   'model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel',

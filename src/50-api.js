@@ -202,13 +202,14 @@ async function* parseEventStream(body) {
 //                  when the backend doesn't report usage
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true, strictUserAssistant = false }) {
   // `prefill` is intercepted here instead of going out as a request param: a
   // non-empty value rides as a trailing assistant message the model continues
   // from (the classic "put words in its mouth" trick — e.g. forcing a
   // reasoning tag open on backends whose template omits it).
   const { prefill, ...restSamplers } = samplers;
-  const msgs = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
+  const prefilled = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
+  const msgs = strictUserAssistant ? strictUserAssistantMessages(prefilled) : prefilled;
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   // Client-side stop filter (fallback — backends normally strip server-side).
   // A stop string split across chunks must not leak into the display text or

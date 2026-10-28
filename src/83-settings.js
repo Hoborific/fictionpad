@@ -106,6 +106,7 @@ const DEFAULT_SETTINGS = {
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
+  strictUserAssistant: false, // inject blank user turns before assistant greetings/adjacent assistant turns
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
   logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
   layerCaps: { ...LAYER_CAPS }, // fraction of context budget per layer; history = remainder
@@ -478,6 +479,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
               Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
             </label>`}
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.strictUserAssistant} onChange=${(e) => set({ strictUserAssistant: e.target.checked })} />
+            Inject blank user turns for strict user/assistant backends
+          </label>
+          <div class="hint" style=${{ margin: '-4px 0 10px' }}>Adds a blank user turn before an assistant greeting or adjacent assistant turn (including prefill), or when the prompt has no user turn. Continuations still end with the assistant text being continued.</div>
           <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
             <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
               ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>

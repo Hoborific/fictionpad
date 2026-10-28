@@ -30,7 +30,7 @@ export { TOKEN_CHARS, DEFAULT_SEARCH_DEPTH, LINK_BOOST, MEMORY_CAP, MEMORY_EVERY
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize, comfyHistoryResult,
   resolveLimits, autoReserve, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_TOKENS,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams, strictUserAssistantMessages,
   supersedeMemory, supPointsOf, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
@@ -47,7 +47,7 @@ const {
   dedupeSpeakerPrefixes, splitImageCalls, imagePromptWithPrefix, IMAGE_CALL_CAP, DEFAULT_IMAGE_PROMPT, DEFAULT_AVATAR_GEN_PROMPT,
   healImageEntry, groupImageSlots, substituteComfyWorkflow, parseImageSize, comfyHistoryResult,
   resolveLimits, autoReserve,
-  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams,
+  subVars, queueLorePiece, acceptQueuedLore, dismissQueuedLore, queuePillOf, expandSamplerParams, strictUserAssistantMessages,
   supersedeMemory, supPointsOf, parseLorePassOutput, acceptQueuedUpdate, acceptQueuedMemory,
   normalizeScenario, normalizeCharacter, normalizeChat, normalizeLorePiece, characterFromPiece,
   parseCharacterCard, extractPngCardJson, buildCharacterCard, embedPngCardJson, pngCrc32,
@@ -107,6 +107,36 @@ ok(subUser('no macro', 'Ari') === 'no macro', 'no-op without macro');
     'assembler substitutes {{user}} in backstory');
   ok(messages.some(m => m.role === 'assistant' && m.content === 'Welcome to Veyra, Ari.'),
     'assembler substitutes {{user}} in greeting');
+}
+
+// ---- strict user/assistant compatibility ----
+section('strict user/assistant compatibility');
+{
+  const sys = { role: 'system', content: 'rules' };
+  const greeting = { role: 'assistant', content: 'hello' };
+  const input = [sys, greeting];
+  const normalized = strictUserAssistantMessages(input);
+  ok(normalized.map(m => m.role).join(',') === 'system,user,assistant',
+    'blank user turn injected before an assistant greeting');
+  ok(normalized[1].content === ' ' && input.length === 2 && input[1] === greeting,
+    'synthetic turn is blank and input is not mutated');
+  ok(strictUserAssistantMessages(normalized).map(m => m.role).join(',') === 'system,user,assistant',
+    'normalization is idempotent');
+  const adjacent = strictUserAssistantMessages([sys, greeting, { role: 'assistant', content: 'prefill' }]);
+  ok(adjacent.map(m => m.role).join(',') === 'system,user,assistant,user,assistant',
+    'adjacent assistant turns gain a separating user turn');
+  const trailing = strictUserAssistantMessages([sys, { role: 'user', content: 'go' }, greeting]);
+  ok(trailing.map(m => m.role).join(',') === 'system,user,assistant',
+    'a trailing assistant continuation stays trailing');
+  const systemOnly = strictUserAssistantMessages([sys]);
+  ok(systemOnly.length === 2 && systemOnly[1].role === 'user' && systemOnly[1].content === ' ',
+    'system-only prompt gains a user turn');
+  const ordinary = strictUserAssistantMessages([sys, { role: 'user', content: 'go' }]);
+  ok(ordinary.map(m => m.role).join(',') === 'system,user', 'an ordinary user prompt gains nothing');
+  const assembled = assemblePrompt({ scenario: baseScenario, persona, chat: baseChat,
+    settings: { ...settings, strictUserAssistant: true }, platformPrompt: '' }).messages;
+  ok(assembled.map(m => m.role).join(',') === 'system,user,assistant',
+    'assembler applies strict-role normalization only when enabled');
 }
 
 // ---- message tree ----
@@ -2706,13 +2736,14 @@ section('splitImageCalls');
 section('connection profiles');
 {
   const st = {
-    endpoint: 'http://a:1', apiKey: 'k1', model: 'm1', auxModel: 'm2',
+    endpoint: 'http://a:1', apiKey: 'k1', model: 'm1', auxModel: 'm2', strictUserAssistant: true,
     samplers: { temperature: 0.7 }, disabledSamplers: ['top_k'], customSamplers: [{ id: 'x', key: 'k' }],
     serverToken: 'secret', contextLength: 4096, platformPrompt: 'pp', memoryPrompt: 'mp',
   };
   const fields = profileFromSettings(st);
-  ok(fields.endpoint === 'http://a:1' && fields.model === 'm1' && fields.samplers.temperature === 0.7,
-    'profile snapshot carries connection, model and sampler fields');
+  ok(fields.endpoint === 'http://a:1' && fields.model === 'm1' && fields.samplers.temperature === 0.7
+    && fields.strictUserAssistant === true,
+    'profile snapshot carries connection, model, compatibility and sampler fields');
   ok(fields.platformPrompt === 'pp' && fields.memoryPrompt === 'mp',
     'profile snapshot carries prompt fields');
   ok(!('serverToken' in fields) && !('contextLength' in fields)
