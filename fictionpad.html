@@ -1011,7 +1011,7 @@ marked.use({
 
 // App version, shown in the sidebar foot. Placeholder — vendor.mjs substitutes
 // the newest CHANGELOG.md version heading at assemble time ('dev' fallback).
-const APP_VERSION = '4.12.6';
+const APP_VERSION = '4.12.7';
 // ============================================================================
 // THEMES — variable→value maps applied to documentElement (mikupad-style
 // dynamic theming). Every theme sets the same keys; derived vars (--c-dim,
@@ -1371,6 +1371,22 @@ function expandSamplerParams(samplers) {
   return out;
 }
 
+// Compatibility for backends that require a user turn before every assistant
+// turn. System messages do not affect the conversational role sequence. A
+// trailing assistant remains trailing so continuations and prefill still work.
+function strictUserAssistantMessages(messages) {
+  const out = [];
+  let lastRole = null;
+  for (const m of messages ?? []) {
+    if (m.role === 'system') { out.push(m); continue; }
+    if (m.role === 'assistant' && lastRole !== 'user') out.push({ role: 'user', content: ' ' });
+    out.push(m);
+    lastRole = m.role;
+  }
+  if (lastRole == null) out.push({ role: 'user', content: ' ' });
+  return out;
+}
+
 // ---- message tree -------------------------------------------------------
 const activeText = (node) => node?.swipes?.[node.activeSwipe]?.text ?? '';
 
@@ -1487,16 +1503,18 @@ function activateBranch(chat, nodeId, { keepPath = false, descend = true, snapSt
   }
   if (messages === msgs && tip === chat.activeLeafId) return chat;
   // Re-base the cadence cursors on the new path: they are position counts, and
-  // coverage honestly holds only over the shared id-prefix of the old and new
-  // paths — passes that ran past the divergence wrote cards stamped with
-  // off-branch leaves, which hide on this path anyway. Clamping (never
-  // deleting) keeps a switched-to shorter branch from reading a stale cursor
-  // as "covered" — the memory cap's floor and the pass cadence both derive
-  // from this. rewindChat sets the same cursors explicitly.
+  // coverage honestly holds only over the shared node/swipe prefix of the old
+  // and new paths — passes that ran past the divergence wrote cards stamped
+  // with off-branch views, which hide on this path anyway. Clamping (never
+  // deleting) keeps a switched-to shorter branch or changed take from reading
+  // a stale cursor as "covered" — the memory cap's floor and the pass cadence
+  // both derive from this. rewindChat sets the same cursors explicitly.
   const oldPath = getActivePath(msgs, chat.activeLeafId);
   const newPath = getActivePath(messages, tip);
   let shared = 0;
-  while (shared < oldPath.length && shared < newPath.length && oldPath[shared].id === newPath[shared].id) shared++;
+  while (shared < oldPath.length && shared < newPath.length
+      && oldPath[shared].id === newPath[shared].id
+      && (oldPath[shared].activeSwipe ?? 0) === (newPath[shared].activeSwipe ?? 0)) shared++;
   const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
   return { ...chat, messages, activeLeafId: tip,
     memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, shared) },
@@ -1518,9 +1536,10 @@ const stampOnView = (createdBy, createdSwipe, pathIds, messages) => {
 };
 
 // Branch view of a revision-tracked piece: effective content/keys come from
-// the last revision whose origin is global (null createdBy) or on view. The
-// stored log is never touched — switching branches/swipes re-derives the
-// view. Identity return when the latest revision is visible.
+// the last revision visible on this branch/take, in log order. A later global
+// user edit supersedes older scoped views everywhere; a still-later tool
+// revision supersedes it only on that revision's branch/take. The stored log
+// is never touched — switching branches/swipes re-derives the view.
 function pieceAtPath(piece, pathIds, messages = null) {
   const revs = piece?.revisions;
   if (!Array.isArray(revs) || revs.length < 2 || !pathIds) return piece;
@@ -1529,6 +1548,24 @@ function pieceAtPath(piece, pathIds, messages = null) {
     if (r?.createdBy == null || stampOnView(r.createdBy, r.createdSwipe, pathIds, messages)) vis = r;
   if (!vis || vis === revs[revs.length - 1]) return piece;
   return { ...piece, content: vis.content, keys: vis.keys ?? [] };
+}
+
+// Direct user edits are global, present-tense changes. Revisioned pieces keep
+// their live log and append a null-stamped content/keys view only when those
+// fields changed; pieceAtPath then falls back to this edit off later tool
+// branches. Unrevisioned pieces need no synthetic history.
+function editLorePiece(piece, draft) {
+  const merged = { ...piece, ...draft };
+  const revisions = piece?.revisions;
+  if (!Array.isArray(revisions) || !revisions.length) return merged;
+  const content = draft?.content ?? piece.content ?? '';
+  const keys = Array.isArray(draft?.keys) ? draft.keys : (Array.isArray(piece.keys) ? piece.keys : []);
+  const unchanged = content === (piece.content ?? '')
+    && keys.length === (Array.isArray(piece.keys) ? piece.keys : []).length
+    && keys.every((key, i) => key === piece.keys[i]);
+  if (unchanged) return { ...merged, revisions };
+  const revision = { content, keys, atLen: null, createdAt: null, createdBy: null, createdSwipe: null };
+  return { ...merged, content, keys, revisions: [...revisions, revision] };
 }
 
 // Piece-level branch visibility: a piece belongs on this branch when its own
@@ -1695,15 +1732,17 @@ function deleteSubtree(messages, nodeId) {
 // loreQueue entries stay in the chat — whatever belonged to the rewound-away
 // tail hides by branch/swipe derivation in the assembler (pieceVisibleAt,
 // memory atMsg scope) and re-emerges if that branch is revisited. Only the
-// summary/extraction cadence cursors roll back, so those passes re-fire from
-// the rewind point. Rewind-EXEMPT as before: chat.vars and chat.authorsNote.
+// summary/extraction cadence cursors roll back (but never forward), so those
+// passes re-fire from the rewind point. Rewind-EXEMPT as before: chat.vars and
+// chat.authorsNote.
 function rewindChat(chat, nodeId) {
   const node = chat.messages[nodeId];
   if (!node) return chat;
   const pathLen = getActivePath(chat.messages, nodeId).length;
+  const memStore = chat.memoryStore ?? { memories: [], cursor: 0 };
   return { ...chat, activeLeafId: nodeId,
-    memoryStore: { ...(chat.memoryStore ?? { memories: [], cursor: 0 }), cursor: pathLen },
-    emergentCursor: pathLen };
+    memoryStore: { ...memStore, cursor: Math.min(memStore.cursor ?? 0, pathLen) },
+    emergentCursor: Math.min(chat.emergentCursor ?? 0, pathLen) };
 }
 
 // Fork the chat at nodeId into a NEW self-contained chat. Only the fork
@@ -1897,11 +1936,11 @@ function scanLore(lorePieces, conversationText, preActivated = null,
 
 // Sort candidates by effective weight desc and fill the lore budget.
 // opts.scanned: a precomputed scanLore result (assemblePrompt scans once and
-// passes it in) — omitted, selectLore scans itself. Per-piece cost includes
-// the `[title]\n` header exactly as rendered into the World Info block.
-// opts.sub: macro substitution applied at render time ({{user}}, {{var:}}) —
-// budget against the RENDERED text, or macro expansion silently inflates the
-// layer past budgetTokens. Defaults to identity.
+// passes it in) — omitted, selectLore scans itself. Selection budgets the full
+// rendered block, including the World Info header and separators. opts.sub:
+// macro substitution applied at render time ({{user}}, {{var:}}) — budget
+// against the RENDERED text, or macro expansion silently inflates the layer
+// past budgetTokens. Defaults to identity.
 function selectLore(lorePieces, conversationText, budgetTokens, preActivated = null, opts = {}) {
   const scan = opts.scanned ?? scanLore(lorePieces, conversationText, preActivated, opts);
   const subFn = typeof opts.sub === 'function' ? opts.sub : (t) => t;
@@ -1917,11 +1956,13 @@ function selectLore(lorePieces, conversationText, budgetTokens, preActivated = n
   }));
   candidates.sort((x, y) => y.effWeight - x.effWeight);
   const selected = [];
-  let used = 0;
+  let block = '';
   for (const c of candidates) {
-    if (used + c.tokens > budgetTokens) continue; // a smaller piece may still fit
+    const entry = `[${c.title}]\n${subFn(c.content)}`;
+    const nextBlock = block ? `${block}\n\n${entry}` : `[World Info]\n${entry}`;
+    if (estimateTokens(nextBlock, opts.chars) > budgetTokens) continue; // a smaller piece may still fit
     selected.push(c);
-    used += c.tokens;
+    block = nextBlock;
   }
   return selected;
 }
@@ -1986,13 +2027,14 @@ function mergedLorePieces(scenario, chat, charactersById = null) {
 // ---- memory store -------------------------------------------------------
 // Append a memory, then evict oldest unpinned entries until within cap.
 // Pinned entries always survive (store may exceed cap if everything is pinned).
-function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null) {
+function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, atSwipe = null) {
   // atLen is stamped at creation, before eviction: in an all-pinned full store
   // the incoming entry is the one dropped, and stamping after the fact would
   // mis-tag an unrelated old memory's rewind position. atMsg (active leaf at
-  // creation) scopes the memory to its branch in assemblePrompt.
+  // creation) and optional atSwipe scope the memory to its view in assemblePrompt.
   const memories = [...(store?.memories ?? []), { id: uid(), text, pinned: false, createdAt: now,
-    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}) }];
+    ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
+    ...(Number.isInteger(atSwipe) ? { atSwipe } : {}) }];
   while (memories.length > cap) {
     const idx = memories.findIndex(m => !m.pinned);
     if (idx === -1) break;
@@ -2004,19 +2046,20 @@ function addMemory(store, text, now = Date.now(), cap = MEMORY_CAP, atLen = null
 // Revise a memory without rewriting it: the stale card stays in the store,
 // marked with supersede point(s) and a link to its replacement; the revised
 // text lands as a FRESH card stamped like any new memory. The assembler hides
-// a card with ANY supersede point on the active path, so the branch that
-// superseded sees only the new text while a stale-leaf branch (or a rewind)
-// keeps the old card — derivation, never deletion, same rule as lore
-// revisions.
-// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch
+// a card with ANY supersede point on the active view, so the branch/take that
+// superseded sees only the new text while a stale view (or a rewind) keeps the
+// old card — derivation, never deletion, same rule as lore revisions.
+// Supersede marks: supAtMsgs is a LIST of leaf ids — a sibling branch or take
 // re-superseding the same card appends its own point instead of overwriting,
-// so each branch hides the stale card from its own supersede on (a single
-// scalar point would resurrect the stale card on the first branch). supBy is
-// only the LATEST replacement id (Memory-tab badge/click-through). Legacy
-// scalar supAtMsg data reads as a one-element list via supPointsOf.
+// so each view hides the stale card from its own supersede on (a single scalar
+// point would resurrect the stale card on the first branch). Optional parallel
+// supAtSwipes entries scope individual points to takes; absent entries retain
+// legacy node scope. supBy is only the LATEST replacement id (Memory-tab
+// badge/click-through). Legacy scalar supAtMsg data reads as a one-element
+// list via supPointsOf.
 const supPointsOf = (m) => Array.isArray(m?.supAtMsgs) ? m.supAtMsgs
   : (m?.supAtMsg != null ? [m.supAtMsg] : []);
-function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null) {
+function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, atLen = null, atMsg = null, revNote = null, atSwipe = null) {
   const cur = store?.memories ?? [];
   const old = cur.find(m => m?.id === id);
   if (!old) return store; // unknown id — never invent a revision for nothing
@@ -2024,14 +2067,20 @@ function supersedeMemory(store, id, text, now = Date.now(), cap = MEMORY_CAP, at
   const note = String(revNote ?? '').trim().slice(0, 300) || null;
   // The pin TRANSFERS to the replacement: the superseded original stays only
   // as rollback history and rejoins the eviction pool.
-  const points = supPointsOf(old);
-  const marked = { ...old, pinned: false, supBy: newId,
-    supAtMsgs: (atMsg && !points.includes(atMsg)) ? [...points, atMsg] : points };
+  const points = [...supPointsOf(old)];
+  const pointSwipes = points.map((_, i) => Number.isInteger(old.supAtSwipes?.[i]) ? old.supAtSwipes[i] : null);
+  const swipe = Number.isInteger(atSwipe) ? atSwipe : null;
+  if (atMsg && !points.some((point, i) => point === atMsg && pointSwipes[i] === swipe)) {
+    points.push(atMsg);
+    pointSwipes.push(swipe);
+  }
+  const marked = { ...old, pinned: false, supBy: newId, supAtMsgs: points,
+    ...((Array.isArray(old.supAtSwipes) || swipe != null) ? { supAtSwipes: pointSwipes } : {}) };
   delete marked.supAtMsg; // migrated into the list
   const memories = [...cur.map(m => (m && m.id === id) ? marked : m),
     { id: newId, text, pinned: !!old.pinned, createdAt: now,
       ...(Number.isFinite(atLen) ? { atLen } : {}), ...(atMsg ? { atMsg } : {}),
-      ...(note ? { revNote: note } : {}) }];
+      ...(Number.isInteger(atSwipe) ? { atSwipe } : {}), ...(note ? { revNote: note } : {}) }];
   while (memories.length > cap) {
     // Evict the oldest unpinned NON-superseded card first; a superseded card
     // (rollback history) goes only when nothing else can. The fresh revision
@@ -2265,16 +2314,16 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   //    (createdAt asc) so the model reads the memory block forwards in time.
   //    Per-memory cost counts the `- ` prefix exactly as rendered.
   const memCap = Math.floor(budget * caps.memory);
-  // Branch visibility (same rule as the lore layer): a memory stamped with
-  // atMsg (the leaf it was summarized under) injects only while that node is
-  // on the active path; unstamped memories are global. A card superseded by
-  // the lore pass hides when ANY of its supAtMsgs points is on path (one
-  // point per branch that superseded it — sibling branches supersede the
-  // same card independently) — its replacement rides the same stamps, so
-  // each branch sees the newest revision it reached.
+  // Branch/swipe visibility (same rule as the lore layer): a memory stamped
+  // with atMsg and optional atSwipe injects only while that view is active;
+  // unstamped memories are global and legacy swipe-less stamps stay node-scoped.
+  // A card superseded by the lore pass hides when ANY supersede point is on
+  // view; its replacement rides the same stamps, so each branch/take sees the
+  // newest revision it reached.
   const memStore = Array.isArray(chat?.memoryStore?.memories) ? chat.memoryStore.memories : [];
-  const memGone = (m) => m?.atMsg != null && !pathIds.has(m.atMsg);
-  const memSuped = (m) => !memGone(m) && supPointsOf(m).some(id => pathIds.has(id));
+  const memGone = (m) => m?.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatMsgs);
+  const memSuped = (m) => !memGone(m) && supPointsOf(m)
+    .some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatMsgs));
   const memHidden = memStore.filter(m => memGone(m) || memSuped(m));
   const memAll = memStore.filter(m => !memGone(m) && !memSuped(m));
   const smart = memScores instanceof Map;
@@ -2294,12 +2343,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
     memReason = (m) => m.pinned ? 'pinned' : 'recent';
   }
   const memSel = [];
-  let memUsed = 0;
+  let memBlock = '';
   for (const m of memOrdered) {
-    const cost = est(`- ${m.text}`);
-    if (memUsed + cost > memCap) continue;
+    const entry = `- ${m.text}`;
+    const nextBlock = memBlock ? `${memBlock}\n${entry}` : `[Memories]\n${entry}`;
+    if (est(nextBlock) > memCap) continue;
     memSel.push(m);
-    memUsed += cost;
+    memBlock = nextBlock;
   }
   const memSelIds = new Set(memSel.map(m => m.id));
   const memRender = [...memSel].sort((a, b) => a.createdAt - b.createdAt);
@@ -2343,12 +2393,13 @@ function assemblePrompt({ scenario, persona, chat, settings = {}, platformPrompt
   manifest.layers.history = { tokens: histUsed, cap: historyCap, kept: kept.length, dropped, total: histTotal, keptIds: kept.map(n => n.id) };
 
   // 6. chat-completions message array
-  const messages = [{ role: 'system', content: staticText }];
-  if (loreText) messages.push({ role: 'system', content: `[World Info]\n${loreText}` });
-  if (memText) messages.push({ role: 'system', content: memText });
-  if (greetingNode) messages.push({ role: 'assistant', content: histText(greetingNode) });
+  const rawMessages = [{ role: 'system', content: staticText }];
+  if (loreText) rawMessages.push({ role: 'system', content: `[World Info]\n${loreText}` });
+  if (memText) rawMessages.push({ role: 'system', content: memText });
+  if (greetingNode) rawMessages.push({ role: 'assistant', content: histText(greetingNode) });
   for (const n of kept)
-    messages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
+    rawMessages.push({ role: n.role === 'assistant' ? 'assistant' : 'user', content: histText(n) });
+  const messages = settings.strictUserAssistant ? strictUserAssistantMessages(rawMessages) : rawMessages;
 
   manifest.totalTokens = messages.reduce((t, m) => t + est(m.content), 0);
   return { messages, manifest };
@@ -2668,7 +2719,7 @@ function acceptQueuedUpdate(chat, queueId, { allPieces = null, nodeId = null, cr
 // marked superseded (see supersedeMemory); the entry's change note rides the
 // new card as revNote for the Memory tab. A vanished target (evicted/
 // user-deleted) just drops the entry.
-function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
+function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, atSwipe = null, now = Date.now(), cap = MEMORY_CAP, maxChars = null } = {}) {
   const q = (chat?.loreQueue ?? []).find(e => e.id === queueId);
   if (!q) return chat;
   const store = chat.memoryStore ?? { memories: [], cursor: 0 };
@@ -2678,7 +2729,7 @@ function acceptQueuedMemory(chat, queueId, { atLen = null, atMsg = null, now = D
     memoryStore: exists
       ? supersedeMemory(store, q.memoryId,
           (Number.isFinite(maxChars) && maxChars > 0) ? text.slice(0, maxChars) : text,
-          now, cap, atLen, atMsg, q.note)
+          now, cap, atLen, atMsg, q.note, atSwipe)
       : store,
     loreQueue: chat.loreQueue.filter(e => e.id !== queueId) };
 }
@@ -2728,13 +2779,15 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     createdAt: Number.isFinite(p.createdAt) ? p.createdAt : null,
     createdBy: p.createdBy ?? null,
     createdSwipe: Number.isInteger(p.createdSwipe) ? p.createdSwipe : null });
-  // p = piece to write (already provenance-stamped for shadows); seed = the
-  // piece rev 0 is taken from when no log exists yet; keys null = keep current.
-  const withRevision = (p, seed, content, keys) => ({
-    ...p, content, ...(keys ? { keys } : {}),
-    revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
-      { content, keys: keys ?? p.keys ?? [], ...provenance, ...(revNote ? { note: revNote } : {}) }],
-  });
+  // p = raw piece to write; seed = branch-current content/keys source. The raw
+  // revision log stays intact even when its top-level keys belong to a hidden take.
+  const branchPiece = (p) => (Array.isArray(allPieces) ? allPieces.find(q => q.id === p.id) : null) ?? p;
+  const withRevision = (p, seed, content, keys) => {
+    const nextKeys = keys ?? seed.keys ?? p.keys ?? [];
+    return { ...p, content, keys: nextKeys,
+      revisions: [...(Array.isArray(p.revisions) ? p.revisions : [revOf(seed)]),
+        { content, keys: nextKeys, ...provenance, ...(revNote ? { note: revNote } : {}) }] };
+  };
   if (call.name === 'register_character') {
     const cname = String(args.name ?? '').trim().slice(0, TOOL_NAME_MAX);
     const desc = String(args.description ?? args.content ?? '').trim().slice(0, TOOL_TEXT_MAX);
@@ -2748,7 +2801,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = dedupe(p => p.type === 'character'
       && (p.title ?? '').trim().toLowerCase() === cname.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, desc, null) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), desc, null) : p),
         `updated character "${cname}"`);
     if (existing)
       // Match lives outside the chat overlay (scenario/global): shadow it via
@@ -2776,7 +2829,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     if (!existing)
       return fail(`update_character: no character named "${cname}" — register it first`);
     if (pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), content, keys) : p),
         `updated character "${cname}"`);
     // Match lives outside the chat overlay (scenario/global): shadow it — the
     // original entity never mutates. rev 0 is seeded from the UNPROVENANCED
@@ -2802,7 +2855,7 @@ function applyToolCall(chat, call, { nodeId = null, now = Date.now(), queueLore 
     const existing = dedupe(p => (p.type ?? 'lore') === 'lore'
       && (p.title ?? '').trim().toLowerCase() === title.toLowerCase());
     if (existing && pieces.some(p => p.id === existing.id))
-      return save(pieces.map(p => p.id === existing.id ? withRevision(p, p, content, keys) : p),
+      return save(pieces.map(p => p.id === existing.id ? withRevision(p, branchPiece(p), content, keys) : p),
         `updated lore "${title}"`);
     if (existing)
       // Match lives outside the chat overlay: shadow it via an overlay copy
@@ -3192,7 +3245,7 @@ function normalizeChat(c) {
 const escapeRxKey = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Cards use {{char}}; FictionPad has {{user}} only (multi-character scenarios
 // make {{char}} ambiguous) — bind it to the card's own name at import time.
-const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, name);
+const subCardMacros = (text, name) => asStr(text).replace(/\{\{char\}\}/gi, () => name);
 // Bytes → ASCII without spreading (a large tEXt chunk would overflow the
 // argument limit of a single String.fromCharCode(...bytes) call).
 const u8ToAscii = (bytes) => {
@@ -3504,7 +3557,7 @@ function collectImageUrls(value, into = new Set()) {
 // ways (draft → profile on save, profile → draft on apply), so unrelated
 // settings never hitchhike and serverToken (per-device) is never stored.
 const PROFILE_FIELDS = [
-  'endpoint', 'apiKey',
+  'endpoint', 'apiKey', 'strictUserAssistant',
   'auxEndpoint', 'auxApiKey', 'genEndpoint', 'genApiKey',
   'embedEndpoint', 'embedApiKey', 'imageEndpoint', 'imageApiKey',
   'model', 'auxModel', 'genModel', 'imageModel', 'embeddingModel',
@@ -3668,6 +3721,50 @@ function alignStrippedToolSpans(rawText, lpTape, map, rawOffset, strippedText) {
 // keeps an in-memory cache that React reads synchronously.
 // ============================================================================
 const STORES = ['Scenarios', 'Personas', 'Chats', 'Meta', 'Characters'];
+const FICTIONPAD_DB_VERSION = 5;
+const mirrorStoreName = store => store === 'Images' ? 'MirrorImages' : `Mirror${store}`;
+
+// The local world and the server mirror share one database, never one object
+// store. v5 copies only v4 rows tracked by the old rev snapshot into the new
+// Mirror<Store> stores; untracked rows remain local-only. Images are copied so
+// either world can resolve the other's out-of-band references.
+function openFictionPadDB(dbName = 'FictionPad') {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(dbName, FICTIONPAD_DB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (e) => {
+      const db = req.result, tx = req.transaction;
+      for (const s of [...STORES, 'Images', 'Mirror', ...STORES.map(mirrorStoreName), 'MirrorImages'])
+        if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+      if (e.oldVersion >= 4 && e.oldVersion < 5) {
+        const revReq = tx.objectStore('Mirror').get('revs');
+        revReq.onsuccess = () => {
+          const tracked = revReq.result?.revs ?? {};
+          for (const s of STORES) {
+            const cursorReq = tx.objectStore(s).openCursor();
+            cursorReq.onsuccess = (ev) => {
+              const cursor = ev.target.result;
+              if (!cursor) return;
+              if (cursor.key in (tracked[s] ?? {}))
+                tx.objectStore(mirrorStoreName(s)).put(cursor.value, cursor.key);
+              cursor.continue();
+            };
+          }
+        };
+      }
+      if (e.oldVersion > 0 && e.oldVersion < 5 && db.objectStoreNames.contains('Images')) {
+        const cursorReq = tx.objectStore('Images').openCursor();
+        cursorReq.onsuccess = (ev) => {
+          const cursor = ev.target.result;
+          if (!cursor) return;
+          tx.objectStore('MirrorImages').put(cursor.value, cursor.key);
+          cursor.continue();
+        };
+      }
+    };
+  });
+}
 
 // Every imgref:<id> sentinel reachable in `value` (the mirror image of
 // collectImageUrls, which finds data URLs). Lazy image loading leaves
@@ -3794,14 +3891,27 @@ class AbstractStorage extends EventTarget {
   // the entity never references a missing image), then the entity itself.
   // New ids join this.images only after their row landed — a flush retry
   // re-extracts cleanly (dedupe via known is idempotent).
-  async persistEntity(store, key, value) {
-    if (!this.imagesEnabled) { await this.persistPut(store, key, value); return; }
-    const { entity, images } = extractImages(value, this.images);
-    for (const [id, dataUrl] of images) {
-      await this.persistImage(id, dataUrl);
-      this.images.set(id, dataUrl);
+  async persistEntity(store, key, value, opts) {
+    let result;
+    if (!this.imagesEnabled) result = await this.persistPut(store, key, value, opts);
+    else {
+      const { entity, images } = extractImages(value, this.images);
+      for (const [id, dataUrl] of images) {
+        await this.persistImage(id, dataUrl);
+        this.images.set(id, dataUrl);
+      }
+      result = await this.persistPut(store, key, entity, opts);
     }
-    await this.persistPut(store, key, entity);
+    // The entity can win a race with server-side GC. Restore any rows it
+    // reports missing while their payloads are still held locally. A failed
+    // re-upload rejects the whole put so the normal flush retry re-runs it.
+    if (Array.isArray(result?.missingImages)) {
+      for (const id of new Set(result.missingImages)) {
+        const dataUrl = this.images.get(id);
+        if (dataUrl !== undefined) await this.persistImage(id, dataUrl);
+      }
+    }
+    return result;
   }
   // Image GC: a reference scan, never refcounting. Debounced behind deletes
   // and reference-dropping overwrites (and after the flush that lands them):
@@ -3837,13 +3947,13 @@ class AbstractStorage extends EventTarget {
     return referenced;
   }
   async collectImages() {
-    const referenced = this.referencedImageUrls();
-    for (const [id, dataUrl] of [...this.images]) {
-      if (referenced.has(dataUrl)) continue;
+    const referenced = this.referencedImageIds();
+    for (const [id] of [...this.images]) {
+      if (referenced.has(id)) continue;
       // The snapshot above predates the async delete loop: re-check against
-      // the CURRENT cache before each delete, so an entity saved mid-sweep
-      // can't lose an image it just started referencing (GC-vs-persist race).
-      if (this.referencedImageUrls().has(dataUrl)) continue;
+      // the CURRENT cache before each delete, including unresolved sentinels,
+      // so an entity saved mid-sweep can't lose its newly referenced image.
+      if (this.referencedImageIds().has(id)) continue;
       try {
         await this.persistDeleteImage(id);
         this.images.delete(id);
@@ -3865,12 +3975,26 @@ class AbstractStorage extends EventTarget {
     this._streamKey = null;
     this.flush();
   }
-  // Lazy-image hydration — base adapters are eager (boot rehydrates
-  // everything), so all of these are no-ops here. ServerDBAdapter overrides.
-  async hydrate() {}
-  async hydrateAll() {}
+  // Eager adapters have nothing to fetch, but a missing/corrupt Images row
+  // must still fail the export guard rather than serialize a sentinel.
+  async hydrate(store, key) {
+    const value = this.cache[store]?.[key];
+    return value === undefined || !collectImgrefIds(value).size;
+  }
+  async hydrateAll() {
+    const failures = [];
+    for (const s of STORES)
+      for (const [key, value] of Object.entries(this.cache[s]))
+        if (collectImgrefIds(value).size) failures.push({ store: s, key });
+    if (failures.length) {
+      const err = new Error(`Images are unavailable for ${failures.length} ${failures.length === 1 ? 'entity' : 'entities'}; export cancelled.`);
+      err.failures = failures;
+      throw err;
+    }
+    return true;
+  }
   hydrationFailed() { return false; }
-  retryHydration() {}
+  retryHydration(store, key) { return this.hydrate(store, key); }
   // Distinct image ids referenced anywhere in the live cache right now, in
   // EITHER form: unresolved imgref sentinels (lazy mode) count directly,
   // data URLs count via the in-memory id → url map.
@@ -3909,6 +4033,10 @@ class AbstractStorage extends EventTarget {
         // A delete conflict carries the entity's last-known name (its cache
         // entry is already gone) so the modal can label the row.
         if (e?.conflict) {
+          // A set() during the failed request may already have queued a newer
+          // snapshot. Drop it with the refused write: Keep mine reads the live
+          // cache, and no queued value may flush after conflict resolution.
+          this.saveQueue.delete(`${item.store}/${item.key}`);
           this._addConflict({ ...e.conflict, name: item.name ?? this.cache[item.store]?.[item.key]?.name });
           continue;
         }
@@ -3975,39 +4103,42 @@ class AbstractStorage extends EventTarget {
 }
 
 class IndexedDBAdapter extends AbstractStorage {
-  constructor(dbName = 'FictionPad') {
+  constructor(dbName = 'FictionPad', { importMirror = false } = {}) {
     super();
     this.dbName = dbName;
     this.db = null;
+    this.importMirror = importMirror;
     this.imagesEnabled = true;
   }
   async init() {
-    this.db = await new Promise((resolve, reject) => {
-      // v2 added the Characters store, v3 the Images store (out-of-band image
-      // payloads), v4 the Mirror store (ServerDBAdapter's local snapshot —
-      // unused here); onupgradeneeded creates any missing store idempotently,
-      // so old databases upgrade cleanly.
-      const req = indexedDB.open(this.dbName, 4);
-      req.onerror = () => reject(req.error);
-      req.onsuccess = () => resolve(req.result);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        for (const s of [...STORES, 'Images', 'Mirror'])
-          if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
-      };
-    });
-    // Local-mode writes share the physical database with the server adapter's
-    // mirror. Using browser storage invalidates the mirror's rev snapshot —
-    // the next server boot must do a full fetch, not a delta against revs
-    // that no longer match these rows.
+    this.db = await openFictionPadDB(this.dbName);
+    // Images first: entities are rehydrated from them (imgref: → data URL).
+    this.images = new Map(Object.entries(await this.#readAll('Images')));
+    if (this.importMirror) {
+      // Explicit ServerGate fallback only: preserve both worlds by importing
+      // just absent local keys. Same-id local edits always win. Copy every
+      // absent image payload too, including those referenced by a local row.
+      const mirrorImages = await this.#readAll('MirrorImages');
+      for (const [id, dataUrl] of Object.entries(mirrorImages)) {
+        if (this.images.has(id)) continue;
+        await this.persistImage(id, dataUrl);
+        this.images.set(id, dataUrl);
+      }
+      for (const s of STORES) {
+        const local = await this.#readAll(s);
+        const mirrored = await this.#readAll(mirrorStoreName(s));
+        for (const [key, value] of Object.entries(mirrored))
+          if (!(key in local)) await this.persistPut(s, key, value);
+      }
+    }
+    // A normal local boot never merges the mirror. Any local boot invalidates
+    // its rev trust marker, forcing the next server boot to take a full fetch.
     try {
       await new Promise((resolve, reject) => {
         const r = this.db.transaction('Mirror', 'readwrite').objectStore('Mirror').delete('revs');
         r.onsuccess = () => resolve(); r.onerror = () => reject(r.error);
       });
     } catch {}
-    // Images first: entities are rehydrated from them (imgref: → data URL).
-    this.images = new Map(Object.entries(await this.#readAll('Images')));
     for (const s of STORES) {
       const all = await this.#readAll(s);
       for (const k of Object.keys(all)) all[k] = rehydrateImages(all[k], this.images);
@@ -4072,13 +4203,11 @@ class ServerDBAdapter extends AbstractStorage {
     // over a threshold go out gzipped; responses are handled transparently
     // by fetch.
     this.gzipEnabled = false;
-    // Local mirror: the same 'FictionPad' IndexedDB database the IndexedDB
-    // adapter uses (schema v4 adds the Mirror store for the rev snapshot).
-    // Entities land here in their raw (sentinel) form on every boot/pull/
-    // save, images write through on persist — boot then reads locally and
-    // delta-syncs against the server instead of downloading everything, and
-    // the browser-storage fallback boots from a complete recent copy.
+    // Local mirror: separate Mirror<Store>/MirrorImages stores in the same
+    // database as browser storage. Mirror/revs alone trusts the snapshot.
     this.mdb = null;
+    this._mirrorNeedsFullBoot = true;
+    this._mirrorFailure = 0;
     this._imgInflight = new Map();      // image id → in-flight load promise
     this._hydrateInflight = new Map();  // store/key → in-flight hydrate promise
     // Hydration failures remembered per store/key for the session: an entity
@@ -4134,41 +4263,48 @@ class ServerDBAdapter extends AbstractStorage {
   }
 
   // ---- IndexedDB mirror ----
-  async #mirrorOpen() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('FictionPad', 4);
-      req.onerror = () => reject(req.error);
-      req.onsuccess = () => resolve(req.result);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        for (const s of [...STORES, 'Images', 'Mirror'])
-          if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
-      };
-    });
-  }
+  #mirrorOpen() { return openFictionPadDB('FictionPad'); }
   #mReq(req) {
     return new Promise((resolve, reject) => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
   }
+  #mPhysical(store) { return store === 'Mirror' ? store : mirrorStoreName(store); }
   #mGet(store, key) {
     if (!this.mdb) return Promise.resolve(undefined);
-    return this.#mReq(this.mdb.transaction(store, 'readonly').objectStore(store).get(key));
+    const physical = this.#mPhysical(store);
+    return this.#mReq(this.mdb.transaction(physical, 'readonly').objectStore(physical).get(key));
   }
-  #mPut(store, key, value) {
-    if (!this.mdb) return Promise.resolve();
-    return this.#mReq(this.mdb.transaction(store, 'readwrite').objectStore(store).put(value, key));
+  async #mPut(store, key, value) {
+    if (!this.mdb) return true;
+    try {
+      const physical = this.#mPhysical(store);
+      await this.#mReq(this.mdb.transaction(physical, 'readwrite').objectStore(physical).put(value, key));
+      return true;
+    } catch (e) {
+      console.warn('FictionPad: mirror write failed', e);
+      if (store === 'Mirror' || STORES.includes(store)) await this.#invalidateMirror();
+      return false;
+    }
   }
-  #mDel(store, key) {
-    if (!this.mdb) return Promise.resolve();
-    return this.#mReq(this.mdb.transaction(store, 'readwrite').objectStore(store).delete(key));
+  async #mDel(store, key) {
+    if (!this.mdb) return true;
+    try {
+      const physical = this.#mPhysical(store);
+      await this.#mReq(this.mdb.transaction(physical, 'readwrite').objectStore(physical).delete(key));
+      return true;
+    } catch (e) {
+      console.warn('FictionPad: mirror write failed', e);
+      if (store === 'Mirror' || STORES.includes(store)) await this.#invalidateMirror();
+      return false;
+    }
   }
   #mAll(store) {
     if (!this.mdb) return Promise.resolve({});
     return new Promise((resolve, reject) => {
-      const out = {};
-      const req = this.mdb.transaction(store, 'readonly').objectStore(store).openCursor();
+      const out = {}, physical = this.#mPhysical(store);
+      const req = this.mdb.transaction(physical, 'readonly').objectStore(physical).openCursor();
       req.onsuccess = (e) => {
         const cursor = e.target.result;
         if (cursor) { out[cursor.key] = cursor.value; cursor.continue(); }
@@ -4179,20 +4315,29 @@ class ServerDBAdapter extends AbstractStorage {
   }
   #mAllKeys(store) {
     if (!this.mdb) return Promise.resolve([]);
-    return this.#mReq(this.mdb.transaction(store, 'readonly').objectStore(store).getAllKeys());
+    const physical = this.#mPhysical(store);
+    return this.#mReq(this.mdb.transaction(physical, 'readonly').objectStore(physical).getAllKeys());
   }
-  // Mirror writes never block persistence — a mirror failure degrades the
-  // next boot to a full fetch, nothing more.
-  #mFire(p) { p?.catch?.(e => console.warn('FictionPad: mirror write failed', e)); }
-  // The rev snapshot is the mirror's trust marker: it exists only after a
-  // completed server-mode boot, and local-mode boots delete it. Debounced —
-  // a lost trailing second just makes the next delta boot over-fetch.
-  #saveMirrorRevs() {
-    if (!this.mdb || !this.revEnabled) return;
+  async #invalidateMirror() {
+    this._mirrorNeedsFullBoot = true;
+    this._mirrorFailure++;
     clearTimeout(this._revTimer);
-    this._revTimer = setTimeout(() => {
-      this.#mFire(this.#mPut('Mirror', 'revs', { revs: this.revs }));
-    }, 1000);
+    if (!this.mdb) return;
+    try {
+      await this.#mReq(this.mdb.transaction('Mirror', 'readwrite').objectStore('Mirror').delete('revs'));
+    } catch (e) { console.warn('FictionPad: could not invalidate mirror revs', e); }
+  }
+  // Rev writes are allowed only while every mirrored entity write is known to
+  // have landed. Any failure deletes trust and blocks later debounced writes
+  // until a complete reseed succeeds.
+  #saveMirrorRevs() {
+    clearTimeout(this._revTimer);
+    if (!this.mdb || !this.revEnabled || this._mirrorNeedsFullBoot) return;
+    this._revTimer = setTimeout(() => { this.#writeMirrorRevs(); }, 1000);
+  }
+  #writeMirrorRevs() {
+    if (!this.mdb || !this.revEnabled || this._mirrorNeedsFullBoot) return Promise.resolve(false);
+    return this.#mPut('Mirror', 'revs', { revs: this.revs });
   }
 
   async init() {
@@ -4224,29 +4369,28 @@ class ServerDBAdapter extends AbstractStorage {
     this.lazyImages = this.imagesEnabled;
     this.images = new Map();
     await mirrorP;
-    // Trusted mirror snapshot? The revs record is the trust marker — and the
-    // boundary between the two worlds sharing these object stores: rows whose
-    // key is in the snapshot are mirror-tracked (server state, reseeded and
-    // pruned freely); rows that are not are LOCAL-MODE data (this is the same
-    // database IndexedDBAdapter uses) and must survive every server boot
-    // untouched — dormant, invisible to server mode, there again when the
-    // user next boots browser storage.
-    let snap = null, prevRevs = null;
+    if (this.mdb && !this.revEnabled) await this.#invalidateMirror();
+    // Mirror/revs is the only trust marker. All entity rows come from the
+    // separate mirror stores, so local same-id data can never leak into a
+    // server boot or be pruned by a full reseed.
+    let snap = null;
     if (this.mdb && this.revEnabled) {
       try {
         const rec = await this.#mGet('Mirror', 'revs');
         if (rec?.revs) {
-          prevRevs = rec.revs;
           snap = { revs: rec.revs, stores: {} };
           for (const s of STORES) snap.stores[s] = await this.#mAll(s);
+          this._mirrorNeedsFullBoot = false;
         }
-      } catch (e) { console.warn('FictionPad: mirror read failed, doing a full boot:', e?.message || e); snap = null; }
+      } catch (e) {
+        console.warn('FictionPad: mirror read failed, doing a full boot:', e?.message || e);
+        snap = null;
+        await this.#invalidateMirror();
+      }
     }
+    const bootFailure = this._mirrorFailure;
     if (snap) {
-      // Delta boot: seed from the mirror-TRACKED rows of the local snapshot
-      // (dormant local-mode rows never enter the server-mode cache), then
-      // pull only what the server says changed (one cheap /all per store, in
-      // parallel).
+      // Delta boot: seed from the trusted mirror, then pull only changed rows.
       this.revs = snap.revs;
       await Promise.all(STORES.map(async (s) => {
         const local = snap.stores[s] ?? {};
@@ -4257,14 +4401,14 @@ class ServerDBAdapter extends AbstractStorage {
         this.revs[s] = { ...(res2.revs ?? this.revs[s] ?? {}) };
         for (const k of Object.keys(entries)) {
           out[k] = rehydrateImages(entries[k], this.images);
-          this.#mFire(this.#mPut(s, k, entries[k])); // mirror keeps the raw form
+          await this.#mPut(s, k, entries[k]); // mirror keeps the raw form
         }
         // A server that predates delta sync ignores `known` and returns
         // every entry with no `deleted` field — then absence from entries
         // IS the deletion signal.
         const gone = res2.deleted ? new Set(res2.deleted)
           : new Set(Object.keys(out).filter(k => !(k in entries)));
-        for (const k of gone) { delete out[k]; this.#mFire(this.#mDel(s, k)); }
+        for (const k of gone) { delete out[k]; await this.#mDel(s, k); }
         this.cache[s] = out;
       }));
     } else {
@@ -4276,18 +4420,22 @@ class ServerDBAdapter extends AbstractStorage {
         const out = {};
         for (const k of Object.keys(all)) out[k] = rehydrateImages(all[k], this.images);
         this.cache[s] = out;
-        if (this.mdb) this.#mFire((async () => {
-          // Reseed: overlay server state. Only mirror-TRACKED rows are
-          // deleted when missing from the server — untracked rows are
-          // dormant local-mode data, never the mirror's to touch.
-          const tracked = prevRevs?.[s] ?? {};
+        if (this.mdb) try {
           const existing = await this.#mAllKeys(s);
-          for (const k of existing) if (!(k in all) && k in tracked) await this.#mDel(s, k);
+          for (const k of existing) if (!(k in all)) await this.#mDel(s, k);
           for (const k of Object.keys(all)) await this.#mPut(s, k, all[k]);
-        })());
+        } catch (e) {
+          console.warn('FictionPad: mirror reseed failed', e);
+          await this.#invalidateMirror();
+        }
       }));
     }
-    this.#saveMirrorRevs();
+    if (this.mdb && this.revEnabled) {
+      // A full reseed re-enables trust only if every entity write completed.
+      // Delta boots keep their existing trust unless a write invalidated it.
+      if (!snap && this._mirrorFailure === bootFailure) this._mirrorNeedsFullBoot = false;
+      await this.#writeMirrorRevs();
+    }
     this.scheduleBootImageGc(); // one sweep after rehydration bounds orphan growth
   }
   // Guarded write: the baseRev is the rev our copy is based on (0 = "must not
@@ -4295,19 +4443,20 @@ class ServerDBAdapter extends AbstractStorage {
   // write from another device. Images rows stay blind — content-addressed
   // (same id = same bytes), a guard would only add round-trips. Every landed
   // write is mirrored locally (raw form) for the next delta boot.
-  async persistPut(store, key, value) {
+  async persistPut(store, key, value, opts) {
     if (!this.revEnabled || store === 'Images') {
       const r = await this.#post('/save', { store, key, data: value });
-      this.#mFire(this.#mPut(store, key, value));
+      await this.#mPut(store, key, value);
       return r;
     }
     try {
-      const res = await this.#post('/save', { store, key, data: value, baseRev: this.revs[store]?.[key] ?? 0 });
+      const baseRev = opts?.baseRev ?? this.revs[store]?.[key] ?? 0;
+      const res = await this.#post('/save', { store, key, data: value, baseRev });
       if (Number.isInteger(res?.rev)) {
         (this.revs[store] ??= {})[key] = res.rev;
         this.#saveMirrorRevs();
       }
-      this.#mFire(this.#mPut(store, key, value));
+      await this.#mPut(store, key, value);
       return res;
     } catch (e) {
       if (e?.status === 409) {
@@ -4336,50 +4485,59 @@ class ServerDBAdapter extends AbstractStorage {
       throw e;
     }
     if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-    this.#mFire(this.#mDel(store, key));
+    await this.#mDel(store, key);
   }
-  // Images write through to the mirror, so the browser-storage fallback
-  // always boots from a complete copy and hydrate() can serve repeats
-  // locally.
-  persistImage(id, dataUrl) {
-    this.#mFire(this.#mPut('Images', id, dataUrl));
-    return this.#post('/save', { store: 'Images', key: id, data: dataUrl });
+  // Images write through to MirrorImages after the server row lands, so the
+  // explicit browser-storage fallback can import every available payload.
+  async persistImage(id, dataUrl) {
+    const result = await this.#post('/save', { store: 'Images', key: id, data: dataUrl });
+    await this.#mPut('Images', id, dataUrl);
+    return result;
   }
-  persistDeleteImage(id) {
-    this.#mFire(this.#mDel('Images', id));
-    return this.#post('/delete', { store: 'Images', key: id });
+  async persistDeleteImage(id) {
+    await this.#post('/delete', { store: 'Images', key: id });
+    await this.#mDel('Images', id);
   }
-  // With the gc capability the sweep runs server-side (one POST, covers every
-  // device's entities); the local cache-scan stays the fallback for older
-  // servers. Afterwards prune the in-memory map AND the mirror by the same
-  // sentinel-aware reference scan, so a later save can't reference a row the
-  // server just dropped and the mirror doesn't accumulate orphans.
+  // Server GC can race a just-saved or newly pulled reference. Restore every
+  // deleted row still referenced by the CURRENT cache when its payload is in
+  // memory, then prune only unreferenced local copies. Re-upload failures keep
+  // the payload in memory/mirror and are retried by a later GC pass.
   async collectImages() {
-    if (!this.gcEnabled) { await super.collectImages(); this.#pruneLocalImages(); return; }
     try {
-      await this.#post('/gc-images', {});
-    } catch (e) { console.error('FictionPad: image GC failed', e); return; }
-    this.#pruneLocalImages();
-  }
-  #pruneLocalImages() {
-    const ids = this.referencedImageIds();
-    for (const [id] of [...this.images]) if (!ids.has(id)) this.images.delete(id);
-    this.#mFire((async () => {
-      // The object stores also hold DORMANT local-mode entities (untracked
-      // by the rev snapshot) — scanning only the server-mode cache would
-      // delete images a dormant entity still references, breaking the
-      // browser-storage world. Scan the stores themselves; a legacy inline
-      // entity references by data URL, so rows are kept on either match.
-      const refIds = new Set(), refUrls = new Set();
-      for (const s of STORES)
-        for (const v of Object.values(await this.#mAll(s))) {
-          collectImageUrls(v, refUrls);
-          collectImgrefIds(v, refIds);
+      if (!this.gcEnabled) {
+        await super.collectImages();
+        await this.#pruneLocalImages();
+        return;
+      }
+      const result = await this.#post('/gc-images', {});
+      const deletedIds = Array.isArray(result?.deletedIds) ? new Set(result.deletedIds) : null;
+      if (deletedIds) {
+        for (const id of deletedIds) {
+          const dataUrl = this.images.get(id);
+          if (dataUrl !== undefined && this.referencedImageIds().has(id))
+            await this.persistImage(id, dataUrl);
         }
-      const rows = await this.#mAll('Images');
-      for (const [k, url] of Object.entries(rows))
-        if (!refIds.has(k) && !refUrls.has(url)) await this.#mDel('Images', k);
-    })());
+      }
+      await this.#pruneLocalImages(deletedIds);
+    } catch (e) { console.error('FictionPad: image GC failed', e); }
+  }
+  async #pruneLocalImages(deletedIds = null) {
+    const refIds = new Set(), refUrls = new Set();
+    for (const s of STORES)
+      for (const v of Object.values(await this.#mAll(s))) {
+        collectImageUrls(v, refUrls);
+        collectImgrefIds(v, refIds);
+      }
+    const rows = await this.#mAll('Images');
+    const ids = new Set([...this.images.keys(), ...Object.keys(rows)]);
+    for (const id of ids) {
+      if (deletedIds && !deletedIds.has(id)) continue;
+      const url = this.images.get(id) ?? rows[id];
+      if (refIds.has(id) || refUrls.has(url)) continue;
+      if (this.referencedImageIds().has(id) || this.referencedImageUrls().has(url)) continue;
+      this.images.delete(id);
+      if (id in rows) await this.#mDel('Images', id);
+    }
   }
   // Used by the settings migration helpers. No refs hint: the server
   // rehydrates, so pulled entities always travel self-contained (inline).
@@ -4394,7 +4552,7 @@ class ServerDBAdapter extends AbstractStorage {
       (this.revs[store] ??= {})[key] = rev;
       this.#saveMirrorRevs();
     }
-    this.#mFire(this.#mPut(store, key, raw));
+    await this.#mPut(store, key, raw);
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
   }
   // On-demand image fetch: memory → mirror → server. Server hits are cached
@@ -4410,7 +4568,7 @@ class ServerDBAdapter extends AbstractStorage {
         const res = await this.#post('/load', { store: 'Images', key: id });
         if (typeof res?.data === 'string') {
           this.images.set(id, res.data);
-          this.#mFire(this.#mPut('Images', id, res.data));
+          await this.#mPut('Images', id, res.data);
           return res.data;
         }
       } catch (e) { console.warn('FictionPad: image pull failed', e); }
@@ -4419,38 +4577,38 @@ class ServerDBAdapter extends AbstractStorage {
     this._imgInflight.set(id, p);
     try { return await p; } finally { this._imgInflight.delete(id); }
   }
-  // Lazy-image hydration: fetch every image an entity references that isn't
-  // loaded yet, then rehydrate the CURRENT cache value (it may have been
-  // rewritten while fetches were in flight) and notify. In-flight deduped
-  // per entity; no-op for eager adapters (base class) and inline mode.
-  // A key whose referenced rows can't be pulled parks in _hydrateFailed and
-  // later requests return early — surfaces query hydrationFailed() to render
-  // a failed placeholder instead of re-firing the doomed fetch on every
-  // mount; the storechange on failure flips them from loading to failed.
+  // Resolve to true only when the CURRENT entity has no unresolved sentinel.
+  // The per-key in-flight promise keeps checking current refs after every
+  // await, so a remote pull or local edit during hydration is included. A
+  // failure parks only the exact entity copy whose refs were just attempted;
+  // a changed copy gets its own fetch round before it can be marked failed.
   async hydrate(store, key) {
-    if (!this.lazyImages) return;
+    if (!this.lazyImages) return true;
     const id = `${store}/${key}`;
-    if (this._hydrateFailed.has(id)) return;
+    if (this._hydrateFailed.has(id)) return false;
     if (this._hydrateInflight.has(id)) return this._hydrateInflight.get(id);
     const p = (async () => {
-      const entity = this.cache[store]?.[key];
-      if (!entity) return;
-      const missing = collectImgrefIds(entity);
-      for (const loaded of this.images.keys()) missing.delete(loaded);
-      if (!missing.size) { this._hydrateFailed.delete(id); return; }
-      let any = false;
-      for (const imgId of missing) if (await this.#loadImage(imgId)) any = true;
-      let failed = false;
-      for (const imgId of missing) if (!this.images.has(imgId)) failed = true;
-      if (failed) this._hydrateFailed.add(id); else this._hydrateFailed.delete(id);
-      if (any) {
+      for (;;) {
+        const entity = this.cache[store]?.[key];
+        if (!entity) { this._hydrateFailed.delete(id); return true; }
+        const missing = collectImgrefIds(entity);
+        for (const loaded of this.images.keys()) missing.delete(loaded);
+        for (const imgId of missing) await this.#loadImage(imgId);
         const cur = this.cache[store]?.[key];
-        if (cur) this.cache[store][key] = rehydrateImages(cur, this.images);
-      }
-      // Notify on either outcome: loaded images swap into the cache value, a
-      // failure leaves the sentinels but flips surfaces to the failed state.
-      if (any || failed)
+        if (!cur) { this._hydrateFailed.delete(id); return true; }
+        const hydrated = rehydrateImages(cur, this.images);
+        const changed = hydrated !== cur;
+        if (changed) this.cache[store][key] = hydrated;
+        if (!collectImgrefIds(hydrated).size) {
+          this._hydrateFailed.delete(id);
+          if (changed) this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+          return true;
+        }
+        if (cur !== entity) continue;
+        this._hydrateFailed.add(id);
         this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
+        return false;
+      }
     })();
     this._hydrateInflight.set(id, p);
     try { return await p; } finally { this._hydrateInflight.delete(id); }
@@ -4465,14 +4623,31 @@ class ServerDBAdapter extends AbstractStorage {
     this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
     return this.hydrate(store, key);
   }
-  // Full hydration for whole-library exports — resolves every sentinel in
-  // every store. Genuinely fetches the world; call only when the user asked
-  // for a complete export.
+  // Whole-library export contract: true means every current entity is fully
+  // rehydrated. Otherwise throw one Error with `failures: [{ store, key }]`;
+  // callers must not serialize the cache after that rejection.
   async hydrateAll() {
-    if (!this.lazyImages) return;
+    if (!this.lazyImages) return true;
+    const failures = [], failedIds = new Set();
     for (const s of STORES)
-      for (const k of Object.keys(this.cache[s]))
-        await this.hydrate(s, k);
+      for (const k of Object.keys(this.cache[s])) {
+        if (await this.hydrate(s, k)) continue;
+        failures.push({ store: s, key: k });
+        failedIds.add(`${s}/${k}`);
+      }
+    // Include entities/refs that arrived during the fetch rounds. Reporting
+    // success with any sentinel left would make a full backup silently lossy.
+    for (const s of STORES)
+      for (const [k, value] of Object.entries(this.cache[s])) {
+        if (!collectImgrefIds(value).size || failedIds.has(`${s}/${k}`)) continue;
+        failures.push({ store: s, key: k });
+      }
+    if (failures.length) {
+      const err = new Error(`Could not load images for ${failures.length} ${failures.length === 1 ? 'entity' : 'entities'}; export cancelled.`);
+      err.failures = failures;
+      throw err;
+    }
+    return true;
   }
   // User picked a winner for a 409'd key:
   //   theirs — pull the server version over the local cache (local edits
@@ -4497,7 +4672,7 @@ class ServerDBAdapter extends AbstractStorage {
           throw e;
         }
         if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-        this.#mFire(this.#mDel(store, key));
+        await this.#mDel(store, key);
         await super.resolveConflict(store, key);
         return;
       }
@@ -4526,24 +4701,12 @@ class ServerDBAdapter extends AbstractStorage {
       if (value === undefined) { await super.resolveConflict(store, key); return; }
       const baseRev = this.conflicts.get(`${store}/${key}`)?.rev ?? 0;
       try {
-        let entity = value;
-        if (this.imagesEnabled) {
-          const out = extractImages(value, this.images);
-          entity = out.entity;
-          for (const [id, dataUrl] of out.images) {
-            await this.persistImage(id, dataUrl);
-            this.images.set(id, dataUrl);
-          }
-        }
-        const res = await this.#post('/save', { store, key, data: entity, baseRev });
-        if (Number.isInteger(res?.rev)) {
-          (this.revs[store] ??= {})[key] = res.rev;
-          this.#saveMirrorRevs();
-        }
-        this.#mFire(this.#mPut(store, key, entity));
+        // The shared put path also answers missingImages before completion;
+        // a failed re-upload keeps this conflict open for an explicit retry.
+        await this.persistEntity(store, key, value, { baseRev });
       } catch (e) {
-        if (e?.status === 409) { // the server moved again — refresh the conflict
-          this._addConflict({ store, key, rev: e.body?.rev ?? null });
+        if (e?.conflict) { // the server moved again — refresh the conflict
+          this._addConflict({ ...e.conflict, name: conflict?.name });
           return;
         }
         throw e;
@@ -4559,7 +4722,7 @@ class ServerDBAdapter extends AbstractStorage {
       if (e?.status === 404) { // deleted server-side in the meantime
         delete this.cache[store][key];
         if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-        this.#mFire(this.#mDel(store, key));
+        await this.#mDel(store, key);
         await super.resolveConflict(store, key);
         this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
         return;
@@ -4615,7 +4778,7 @@ class ServerDBAdapter extends AbstractStorage {
           // never reach this branch).
           delete this.cache[store][key];
           if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-          this.#mFire(this.#mDel(store, key));
+          await this.#mDel(store, key);
           removed++;
           this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
         }
@@ -4658,7 +4821,7 @@ class ServerDBAdapter extends AbstractStorage {
         || this.saveQueue.has(id) || this.conflicts.has(id)) return 'fresh';
       delete this.cache[store][key];
       if (this.revs[store]) { delete this.revs[store][key]; this.#saveMirrorRevs(); }
-      this.#mFire(this.#mDel(store, key));
+      await this.#mDel(store, key);
       this.dispatchEvent(new CustomEvent('storechange', { detail: { store, key } }));
       return 'removed';
     }
@@ -4717,7 +4880,7 @@ function isServerProxy(endpoint) {
 // endpoints pass through unchanged.
 function effectiveEndpoint(settings, serverStorageActive) {
   const ep = String(settings?.endpoint ?? '');
-  if (!ep || ep.startsWith('/proxy/')) return ep;
+  if (!ep || isServerProxy(ep)) return ep;
   return serverStorageActive && settings?.routeViaServer !== false ? `/proxy/${ep}` : ep;
 }
 
@@ -4794,7 +4957,7 @@ async function listModels({ endpoint, apiKey, serverToken, signal } = {}) {
     const ctx = Number(m.max_model_len ?? m.n_ctx ?? m.meta?.n_ctx ?? m.context_length);
     if (Number.isFinite(ctx) && ctx > 0) ctxs[m.id] = ctx;
   }
-  return { ids: ids.sort(), ctxs };
+  return { ids: [...new Set(ids)].sort(), ctxs };
 }
 
 // Error for a non-OK API response. An OpenAI-style JSON error body wins;
@@ -4835,18 +4998,25 @@ function describeApiError(e) {
   return msg;
 }
 
-// Minimal SSE parser: line-based, only data: fields, JSON payloads.
+// Minimal SSE parser: data fields accumulate until a blank event boundary;
+// multiline payloads join with newlines as required by the SSE wire format.
 // getReader()+TextDecoder instead of pipeThrough(TextDecoderStream): some
 // mobile WebKit builds lack ReadableStream.pipeThrough / TextDecoderStream.
 async function* parseEventStream(body) {
   let buf = '';
-  const take = function* (line) {
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
-    if (!data || data === '[DONE]') return;
+  const dataLines = [];
+  const take = function* () {
+    if (!dataLines.length) return;
+    const data = dataLines.join('\n');
+    dataLines.length = 0;
+    if (!data.trim() || data.trim() === '[DONE]') return;
     const json = JSON.parse(data);
     if (json.error?.message) throw new Error(json.error.message);
     yield json;
+  };
+  const line = function* (text) {
+    if (!text) { yield* take(); return; }
+    if (text.startsWith('data:')) dataLines.push(text.slice(5).replace(/^ /, ''));
   };
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -4856,10 +5026,11 @@ async function* parseEventStream(body) {
       if (done) break;
       const lines = (buf + decoder.decode(value, { stream: true })).split(/\r\n|\r|\n/);
       buf = lines.pop();
-      for (const line of lines) yield* take(line);
+      for (const text of lines) yield* line(text);
     }
     buf += decoder.decode();
-    if (buf) yield* take(buf);
+    if (buf) yield* line(buf);
+    yield* take();
   } finally {
     // Early exit (malformed data line, in-stream error chunk, a throw in the
     // consumer loop): cancel the body so the backend stops generating and the
@@ -4883,13 +5054,14 @@ async function* parseEventStream(body) {
 //                  when the backend doesn't report usage
 // Consumers display/accumulate content and collect the lp tape separately;
 // alignment against the text happens ONCE, globally, via alignTokensToSpans.
-async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true }) {
+async function* openaiChatStream({ endpoint, apiKey, serverToken, model, messages, samplers = {}, maxTokens, signal, tokenProbs = false, topLogprobs = 10, logitBias = null, stop = null, usageStats = true, strictUserAssistant = false }) {
   // `prefill` is intercepted here instead of going out as a request param: a
   // non-empty value rides as a trailing assistant message the model continues
   // from (the classic "put words in its mouth" trick — e.g. forcing a
   // reasoning tag open on backends whose template omits it).
   const { prefill, ...restSamplers } = samplers;
-  const msgs = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
+  const prefilled = typeof prefill === 'string' && prefill ? [...messages, { role: 'assistant', content: prefill }] : messages;
+  const msgs = strictUserAssistant ? strictUserAssistantMessages(prefilled) : prefilled;
   const stopSet = Array.isArray(stop) && stop.length ? new Set(stop) : null;
   // Client-side stop filter (fallback — backends normally strip server-side).
   // A stop string split across chunks must not leak into the display text or
@@ -4919,6 +5091,33 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
   } : null;
   let heldText = '';  // held-back content tail (split stop-string guard)
   const lpHeld = [];  // the same guard for the logprob tape
+  // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
+  const tapeOf = (choice) => {
+    const content = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
+    if (!Array.isArray(content)) return [];
+    const tape = [];
+    for (const t of content) {
+      if (!t?.token || stopSet?.has(t.token)) continue;
+      tape.push({
+        token: t.token,
+        logprob: t.logprob ?? null,
+        top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
+          .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
+      });
+    }
+    return tape;
+  };
+  const cutLp = () => {
+    const joined = lpHeld.map(e => e.token).join('');
+    const cut = stopCut(joined);
+    if (cut === -1) return [...lpHeld];
+    // Keep entries starting before the cut; global alignment resolves one that
+    // straddles the boundary against the authoritative display text.
+    const out = [];
+    let acc = 0;
+    for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
+    return out;
+  };
   const res = await fetchAPI(endpoint, chatCompletionsURL(endpoint), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey, endpoint, serverToken) },
@@ -4954,6 +5153,23 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     const thinkText = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
       ?? choice?.message?.reasoning_content;
     if (thinkText) yield { think: thinkText };
+    if (stopTail && deltaText) {
+      const combined = heldText + deltaText;
+      const cut = stopCut(combined);
+      if (cut !== -1) {
+        // The fallback owns termination once an unstripped stop is complete:
+        // emit only its prefix, trim the held tape on its own stop boundary,
+        // and close the SSE iterator (whose finally cancels the response).
+        if (cut) yield { content: combined.slice(0, cut) };
+        heldText = '';
+        lpHeld.push(...tapeOf(choice));
+        const out = cutLp();
+        lpHeld.length = 0;
+        if (out.length) yield { lp: out };
+        yield { done: true, finishReason: 'stop' };
+        return;
+      }
+    }
     // Terminal chunk: report the finish reason so the caller can tell a clean
     // finish from a dropped connection (stream that just ends). A finish
     // chunk with empty/missing delta carries the sampled EOS in logprobs —
@@ -4964,10 +5180,6 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     }
     if (deltaText) {
       if (!stopTail) yield { content: deltaText };
-      // A chunk that IS exactly a stop string is dropped outright, anywhere in
-      // the stream — the hold-back guard only covers split/tail cases and
-      // would re-emit an exact match once more text follows.
-      else if (stopSet.has(deltaText) && !heldText) { /* dropped */ }
       else {
         const combined = heldText + deltaText;
         heldText = stopTail(combined);
@@ -4975,35 +5187,21 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
           yield { content: combined.slice(0, combined.length - heldText.length) };
       }
     }
-    // vLLM/OpenAI put logprobs at choice level; tolerate delta-nested too.
-    const lpContent = choice?.logprobs?.content ?? choice?.delta?.logprobs?.content;
-    if (Array.isArray(lpContent) && lpContent.length) {
-      const tape = [];
-      for (const t of lpContent) {
-        if (!t?.token) continue;
-        if (stopSet?.has(t.token)) continue; // whole-token stop match, anywhere in the stream
-        tape.push({
-          token: t.token,
-          logprob: t.logprob ?? null,
-          top: (t.top_logprobs ?? []).slice(0, Math.max(1, Math.min(20, topLogprobs | 0 || 10)))
-            .map(x => ({ token: x.token, logprob: x.logprob ?? null })),
-        });
-      }
-      if (tape.length) {
-        if (!stopTail) yield { lp: tape };
-        else {
-          // Hold back enough trailing entries to cover a stop string still
-          // split across them; release the rest — their text can no longer
-          // be part of one.
-          lpHeld.push(...tape);
-          let total = 0;
-          for (const e of lpHeld) total += e.token.length;
-          const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
-          let n = 0;
-          while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
-            total -= lpHeld[n++].token.length;
-          if (n) yield { lp: lpHeld.splice(0, n) };
-        }
+    const tape = tapeOf(choice);
+    if (tape.length) {
+      if (!stopTail) yield { lp: tape };
+      else {
+        // Hold back enough trailing entries to cover a stop string still
+        // split across them; release the rest — their text can no longer
+        // be part of one.
+        lpHeld.push(...tape);
+        let total = 0;
+        for (const e of lpHeld) total += e.token.length;
+        const keep = stopTail(lpHeld.map(e => e.token).join('')).length;
+        let n = 0;
+        while (n < lpHeld.length && total - lpHeld[n].token.length >= keep)
+          total -= lpHeld[n++].token.length;
+        if (n) yield { lp: lpHeld.splice(0, n) };
       }
     }
   }
@@ -5016,16 +5214,7 @@ async function* openaiChatStream({ endpoint, apiKey, serverToken, model, message
     if (out) yield { content: out };
   }
   if (lpHeld.length) {
-    const joined = lpHeld.map(e => e.token).join('');
-    const cut = stopCut(joined);
-    let out = lpHeld;
-    if (cut !== -1) {
-      // Keep the entries starting before the cut; a token straddling the
-      // boundary is approximated away by the global alignment pass.
-      out = [];
-      let acc = 0;
-      for (const e of lpHeld) { if (acc >= cut) break; out.push(e); acc += e.token.length; }
-    }
+    const out = cutLp();
     if (out.length) yield { lp: out };
   }
 }
@@ -5702,7 +5891,7 @@ function ListSamplerInput({ values, onChange, numeric = false }) {
       <textarea rows=${10} value=${text}
         placeholder=${numeric ? '128009\n128001' : 'one per line (commas also split)'}
         onInput=${(e) => setText(e.target.value)} />
-      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''} — Done applies; ✕/Escape discard.</div>
+      <div class="hint" style=${{ marginTop: '6px' }}>${draftCount} item${draftCount === 1 ? '' : 's'}${numeric ? ' — non-numeric entries are dropped' : ''}</div>
     <//></span>`}
   `;
 }
@@ -5746,7 +5935,7 @@ function JsonSamplerInput({ value, onChange }) {
       <textarea rows=${8} value=${text} placeholder='{"key": "value"}' onInput=${handle}
         style=${{ fontFamily: 'monospace', ...(bad ? { borderColor: 'var(--c-danger)' } : {}) }} />
       <div class="hint" style=${{ marginTop: '6px', ...(bad ? { color: 'var(--c-danger)' } : {}) }}>
-        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing. Done applies; ✕/Escape discard.'}</div>
+        ${bad ? 'Invalid JSON — Done needs parseable JSON; ✕/Escape discard.' : 'Sent verbatim as the request value; blank sends nothing.'}</div>
     <//></span>`}
   `;
 }
@@ -5827,19 +6016,41 @@ function Modal({ title, onClose, wide, cls, children, footer }) {
   useEffect(() => {
     const dlg = dlgRef.current;
     if (!dlg) return;
+    const opener = document.activeElement;
     // Initial focus: first field in the body, else the dialog container.
     const target = dlg.querySelector('.m-body input, .m-body textarea, .m-body select, .m-body button') ?? dlg;
     target.focus?.();
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' && e.key !== 'Tab') return;
       // Only the topmost overlay reacts — one Escape must not close a stacked
-      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor).
+      // modal AND the dialog beneath it (e.g. the ✦ generator over an editor),
+      // and Tab must never cycle through a dialog underneath the active one.
       const overlays = document.querySelectorAll('.modal-overlay');
       if (overlays.length && overlays[overlays.length - 1] !== dlg.closest('.modal-overlay')) return;
-      onCloseRef.current();
+      if (e.key === 'Escape') { onCloseRef.current(); return; }
+      const items = [...dlg.querySelectorAll(
+        'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]'
+      )].filter(el => el.tabIndex >= 0 && !el.disabled && el.type !== 'hidden'
+        && !el.hidden && el.getAttribute('aria-hidden') !== 'true' && el.getClientRects().length);
+      if (!items.length) { e.preventDefault(); dlg.focus(); return; }
+      const first = items[0], last = items[items.length - 1];
+      const active = document.activeElement;
+      if (active === dlg || !dlg.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (opener?.isConnected) opener.focus?.();
+    };
   }, []);
   return html`
     <div class="modal-overlay" onMouseDown=${(e) => e.target === e.currentTarget && onClose()}>
@@ -5949,6 +6160,12 @@ function NumInput({ value, min, max, step, fallback, placeholder, onCommit }) {
 // list), else the viewport — caps its height to that, and flips above the
 // input when there is more room there. Re-measures on any scroll/resize
 // while open, so a row scrolled near the modal bottom never spills.
+function modelPickerItems(models, value, typing) {
+  const all = [...new Set(models ?? [])];
+  const q = (value ?? '').toLowerCase();
+  return typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+}
+
 function ModelPicker({ value, models, placeholder, onChange }) {
   const [open, setOpen] = useState(false);
   const [typing, setTyping] = useState(false);
@@ -5979,9 +6196,8 @@ function ModelPicker({ value, models, placeholder, onChange }) {
       window.removeEventListener('pointerdown', close, true);
     };
   }, [open]);
-  const all = models ?? [];
-  const q = (value ?? '').toLowerCase();
-  const shown = typing && q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+  const all = modelPickerItems(models, value, false);
+  const shown = modelPickerItems(models, value, typing);
   // Blur after a pick so the mobile keyboard dismisses over the confirmed
   // choice instead of staying up with the list already closed.
   const pick = (m) => { onChange(m); setTyping(false); setOpen(false); inputRef.current?.blur(); };
@@ -6561,6 +6777,7 @@ const DEFAULT_SETTINGS = {
   speakerPrompt: SPEAKER_PROMPT, // multi-speaker instructions appended to the platform prompt; user-editable
   stopStrings: [],  // sent as OpenAI `stop` when non-empty
   routeViaServer: true, // rewrite endpoint → /proxy/… at request time (server storage only)
+  strictUserAssistant: false, // inject blank user turns before assistant greetings/adjacent assistant turns
   serverToken: '',  // optional Bearer token for server storage (FICTIONPAD_TOKEN)
   logitBias: {},    // { [inputString]: { ids: number[], strings: string[], power: -100..100 } }
   layerCaps: { ...LAYER_CAPS }, // fraction of context budget per layer; history = remainder
@@ -6933,6 +7150,11 @@ function SettingsModal({ settings, onSave, onClose, theme, onThemeChange, accent
               <input type="checkbox" checked=${draft.routeViaServer !== false} onChange=${(e) => set({ routeViaServer: e.target.checked })} />
               Route API requests through this server (avoids CORS; the server calls the endpoint on your behalf)
             </label>`}
+          <label class="check">
+            <input type="checkbox" checked=${!!draft.strictUserAssistant} onChange=${(e) => set({ strictUserAssistant: e.target.checked })} />
+            Inject blank user turns for strict user/assistant backends
+          </label>
+          <div class="hint" style=${{ margin: '-4px 0 10px' }}>Adds a blank user turn before an assistant greeting or adjacent assistant turn (including prefill), or when the prompt has no user turn. Continuations still end with the assistant text being continued.</div>
           <div style=${{ display: 'flex', gap: '8px', alignItems: 'baseline', margin: '2px 0 10px', flexWrap: 'wrap' }}>
             <button class="btn small" disabled=${testState === 'busy'} onClick=${testConnection}>
               ${testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
@@ -7930,12 +8152,13 @@ function ChatOptions({ chat, personas, scenario, characters, onUpdateChat, onExp
             // A piece deleted meanwhile drops the save.
             const live = pieces.find(q => q.id === draft.id);
             if (!live) { setEditing(null); return; }
-            const merged = { ...draft,
+            const mergedDraft = { ...draft,
               ...(live.revisions ? { revisions: live.revisions } : {}),
               ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
                 .filter(k => live[k] !== undefined).map(k => [k, live[k]])),
               ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
                 ? { avatar: live.avatar ?? '', avatarFull: live.avatarFull ?? '' } : {}) };
+            const merged = editLorePiece(live, mergedDraft);
             setPieces(pieces.map(q => q.id === draft.id ? merged : q));
             setEditing(null);
           }}
@@ -8956,7 +9179,8 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // remounts per chat via key=chat.id) and every edit is reported back through
   // onDraft, so an unsent draft survives chat switches within the session.
   const [text, setTextRaw] = useState(() => initialText ?? '');
-  const setText = (v) => { setTextRaw(v); onDraft?.(chatId, v); };
+  const textRef = useRef(text);
+  const setText = (v) => { textRef.current = v; setTextRaw(v); onDraft?.(chatId, v); };
   const [hint, setHint] = useState(null);
   // Command feedback ("Theme set to Darker.", usage errors) auto-dismisses
   // after a few seconds instead of lingering under the composer.
@@ -8970,7 +9194,11 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
     // Async injects (e.g. /improve) resolve seconds later; if the user
     // switched chats meanwhile, the text belongs to the other chat.
     if (inject.chatId && chatId && inject.chatId !== chatId) return;
-    if ('text' in inject) setText(inject.text ?? '');
+    // baseText is the draft snapshot the async operation started from. Its
+    // presence makes replacement conditional: newer typing wins over a stale
+    // result, while hint-only and unconditional suggestion injects stay as-is.
+    if ('text' in inject && (!('baseText' in inject) || textRef.current === inject.baseText))
+      setText(inject.text ?? '');
     if ('hint' in inject) setHint(inject.hint ?? null);
     // Consumed: Main clears the inject, or a remount on chat-switch-back
     // would re-apply it over the edited draft (the effect runs per mount).
@@ -8985,13 +9213,17 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
   // double-Enter while that await is in flight (the text is still in the box).
   const [sending, setSending] = useState(false);
   const send = async () => {
-    const t = text.trim();
+    const submitted = textRef.current;
+    const t = submitted.trim();
     if (!t || sending) return;
     setSending(true);
     try {
       const res = await onSubmit(t);
       if (typeof res === 'string') setHint(res);
-      else if (res !== false) { setText(''); setHint(null); }
+      else if (res !== false) {
+        if (textRef.current === submitted) setText('');
+        setHint(null);
+      }
     } finally { setSending(false); }
   };
   // Touch devices (coarse pointer) have no Shift on the soft keyboard, so
@@ -9065,6 +9297,7 @@ function Composer({ generating, busy, onSubmit, onStop, inject, chatId, initialT
           placeholder="Type a message or /"
           onInput=${(e) => { setText(e.target.value); setHi(0); setEsc(false); }}
           onKeyDown=${(e) => {
+            if (e.isComposing || e.keyCode === 229) return;
             if (hintItems.length) {
               const n = hintItems.length;
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -9236,7 +9469,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
         skipLeafScrollRef.current = true; // the seenLeaf effect must not bottom-scroll after us
         pinnedRef.current = false;
         setPinned(false);
-        const nodeEl = el.querySelector(`[data-mid="${tgt.nodeId}"]`);
+        const nodeEl = el.querySelector(`[data-mid="${CSS.escape(tgt.nodeId)}"]`);
         if (nodeEl) {
           const r = nodeEl.getBoundingClientRect();
           const lr = el.getBoundingClientRect();
@@ -9288,7 +9521,7 @@ function ChatPane({ chat, persona, characterNames, characterColors, avatars = nu
   useEffect(() => {
     if (!selId) return;
     const el = logRef.current;
-    const nodeEl = el?.querySelector(`[data-mid="${selId}"]`);
+    const nodeEl = el?.querySelector(`[data-mid="${CSS.escape(selId)}"]`);
     if (!el || !nodeEl) return;
     const r = nodeEl.getBoundingClientRect();
     const lr = el.getBoundingClientRect();
@@ -10547,6 +10780,13 @@ function Main({ storage, storageKind, storageFailed }) {
   const lastMessages = manifests[ui.chatId]?.lastMessages ?? null; // chat-completions array behind manifest
   const [realCounts, setRealCounts] = useState(null); // /tokenize counts {static,lore,memory,total} | null
   const [modal, setModal] = useState(null);
+  const [recapQueue, setRecapQueue] = useState([]);
+  const queueRecap = (chatId, text) => setRecapQueue(q => [...q, { kind: 'recap', chatId, text }]);
+  useEffect(() => {
+    if (modal || !recapQueue.length) return;
+    setModal(recapQueue[0]);
+    setRecapQueue(q => q.slice(1));
+  }, [modal, recapQueue]);
   // Unsaved Settings draft, handed up when the modal detours into the logit-
   // bias editor — closing that editor returns to Settings with the draft
   // restored instead of silently losing it.
@@ -10560,7 +10800,7 @@ function Main({ storage, storageKind, storageFailed }) {
   const auxCtls = useRef(new Set()); // AbortControllers of in-flight aux calls — Stop aborts them all
   const imgCtls = useRef(new Set()); // AbortControllers of in-flight image jobs — deliberately NOT auxBusy (never blocks the composer, Stop leaves them running)
   const [error, setError] = useState(null);
-  const genRef = useRef(null); // { abort, chatId } — chatId lets background writers (image jobs) defer instead of being clobbered
+  const genRef = useRef(null); // { abort, chatId, completion } — background writers defer; conflict resolution can await the captured completion
   const guardPendingRef = useRef(false); // a genGuard freshness check is in flight — blocks a second generation entry until genRef can be claimed
   const summarizeGuardRef = useRef(false); // one summarizeNow pass at a time (manual click + generation-end cadence must not double-record a window)
   const scrollTargetRef = useRef(null); // { chatId, nodeId } — branch swap: scroll this msg into view, don't follow to the bottom
@@ -10908,8 +11148,14 @@ function Main({ storage, storageKind, storageFailed }) {
     return `${label} "${map[c.key]?.name ?? c.name ?? '…'}"`;
   };
   const onResolveConflict = async (c, mode) => {
-    try { await storage.resolveConflict(c.store, c.key, mode); }
-    catch (e) { setError(`Could not resolve the sync conflict: ${e?.message ?? e}`); }
+    const generation = c.store === 'Chats' && genRef.current?.chatId === c.key ? genRef.current : null;
+    try {
+      if (generation && (mode === 'theirs' || mode === 'copy')) {
+        generation.abort.abort();
+        await generation.completion;
+      }
+      await storage.resolveConflict(c.store, c.key, mode);
+    } catch (e) { setError(`Could not resolve the sync conflict: ${e?.message ?? e}`); }
   };
 
   // ---- side-pane sizing (auto slack-fill + drag-to-resize) ----
@@ -11138,8 +11384,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const pathIds = new Set(path.map(n => n.id));
     const priorTexts = (chatObj.memoryStore?.memories ?? [])
       .filter(m => m && (m.text ?? '').trim()
-        && !(m.atMsg != null && !pathIds.has(m.atMsg))
-        && !supPointsOf(m).some(id => pathIds.has(id)))
+        && !(m.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatObj.messages))
+        && !supPointsOf(m).some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatObj.messages)))
       .slice(-MEM_PRIOR_MAX).map(m => m.text);
     while (priorTexts.length > 1 && priorTexts.join('\n').length > MEM_PRIOR_CHARS) priorTexts.shift();
     const prior = priorTexts.length
@@ -11155,13 +11401,14 @@ function Main({ storage, storageKind, storageFailed }) {
     }, chatObj.id);
     return { text: out.slice(0, maxChars) || null, from, to, advance };
   }
-  // Append a memory to a chat's store, stamped with atLen (the chat's current
-  // active-path message count) so rewind keeps memories by position, not
-  // timestamp (see rewindChat), and with atMsg (the active leaf) so the
-  // assembler scopes it to this branch. Stamped at creation (see addMemory).
+  const activePathSignature = (c) => getActivePath(c?.messages ?? {}, c?.activeLeafId)
+    .map(n => `${n.id}:${n.activeSwipe ?? 0}`).join('|');
+  // Append a memory to a chat's store, stamped with its current path position,
+  // leaf, and viewed swipe so rewind and take switches derive its visibility.
   const pushMemory = (c, text) =>
     addMemory(c.memoryStore, text, Date.now(), ref.current.settings.memoryCap ?? MEMORY_CAP,
-      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId);
+      getActivePath(c.messages, c.activeLeafId).length, c.activeLeafId,
+      c.messages?.[c.activeLeafId]?.activeSwipe ?? null);
   // A failed summary/lore pass still skips its window (no re-banner loop),
   // but the failure rides the memory store as lastError — the Memory tab
   // shows it as a dismissible warning row. Cleared on the next success of
@@ -11176,16 +11423,14 @@ function Main({ storage, storageKind, storageFailed }) {
     if (summarizeGuardRef.current) return; // a second pass over the same window would double-record it
     summarizeGuardRef.current = true;
     setSummarizing(true);
+    const requestSig = activePathSignature(chatObj);
     try {
       const r = await generateMemory(chatObj);
       if (r?.text) {
-        // Merge-on-write: the chat may have changed (or been deleted) during
-        // the aux call — re-read it and overwrite only memoryStore. The cursor
-        // advances by exactly the covered chunk (clamped to the live path in
-        // case it shrank mid-call); a manual re-run (advance false) leaves it.
-        // touch:false — a background pass must not re-sort the sidebar.
+        // Merge metadata edits onto the live chat, but never apply a result
+        // requested for another branch or take (nor advance its cursor).
         const cur = ref.current.chats[chatObj.id];
-        if (cur)
+        if (cur && activePathSignature(cur) === requestSig)
           saveChat({ ...cur, memoryStore: { ...clearStoreError(pushMemory(cur, r.text), 'summary'),
             cursor: r.advance
               ? Math.min(r.to, getActivePath(cur.messages, cur.activeLeafId).length)
@@ -11199,7 +11444,7 @@ function Main({ storage, storageKind, storageFailed }) {
       // until dismissed or the next successful summary.
       console.warn('Memory summarization failed:', e);
       const cur = ref.current.chats[chatObj.id];
-      if (cur) {
+      if (cur && activePathSignature(cur) === requestSig) {
         const every = ref.current.settings.memoryEvery ?? MEMORY_EVERY;
         const store = cur.memoryStore ?? { memories: [], cursor: 0 };
         const pathLen = getActivePath(cur.messages, cur.activeLeafId).length;
@@ -11249,17 +11494,13 @@ function Main({ storage, storageKind, storageFailed }) {
   // head of the piece (prompt text — stays dash-free).
   const PASS_TRUNC_NOTE = '\n[…truncated; propose updates for this piece only if the change falls within the visible portion]';
   async function maybeExtractLore(chatObj, force = false) {
-    // Merge-on-write: re-read the chat at save time (a generation may have
-    // advanced it during the aux call) and apply the lore changes to the
-    // CURRENT object, so only lorePieces/loreQueue/memoryStore/emergentCursor
-    // are overwritten. Chat deleted mid-call → drop the write. The cursor is
-    // derived from the live re-read chat (summarizeNow's rule), not the
-    // pre-call snapshot. touch:false — a background pass must not re-sort
-    // the sidebar.
+    const requestSig = activePathSignature(chatObj);
+    // Merge metadata edits onto the live chat, but drop results, errors, and
+    // cursor movement when the active path or a viewed take changed mid-call.
     // ok=true marks a successful pass: clear a recorded lore failure.
     const advance = (fn, ok = false) => {
       const cur = ref.current.chats[chatObj.id];
-      if (!cur) return;
+      if (!cur || activePathSignature(cur) !== requestSig) return;
       // Advance by exactly the covered chunk (never a blind jump to pathLen —
       // a backlog is worked off in chunks, nothing gets skipped), clamped to
       // the live path; a forced re-run on a covered chat leaves the cursor.
@@ -11331,10 +11572,10 @@ function Main({ storage, storageKind, storageFailed }) {
         loreLines.unshift(entry); loreChars += entry.length;
       }
       // Memory digest (ids included so the pass can target revisions): visible
-      // cards only — off-branch and already-superseded ones are out of scope.
+      // cards only — off-branch/take and already-superseded ones are out of scope.
       const memVisible = (chatObj.memoryStore?.memories ?? []).filter(m => m && (m.text ?? '').trim()
-        && !(m.atMsg != null && !pathIds.has(m.atMsg))
-        && !supPointsOf(m).some(id => pathIds.has(id)));
+        && !(m.atMsg != null && !stampOnView(m.atMsg, m.atSwipe, pathIds, chatObj.messages))
+        && !supPointsOf(m).some((id, i) => stampOnView(id, m.supAtSwipes?.[i], pathIds, chatObj.messages)));
       const memLines = [];
       let memChars = 0;
       for (const m of [...memVisible].reverse()) {
@@ -11462,7 +11703,7 @@ function Main({ storage, storageKind, storageFailed }) {
             for (const u of memsOk)
               if ((work.memoryStore?.memories ?? []).some(m => m?.id === u.id))
                 work = { ...work, memoryStore: supersedeMemory(work.memoryStore, u.id,
-                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note) };
+                  u.text.slice(0, maxChars), n2, st.memoryCap ?? MEMORY_CAP, st2.atLen, st2.nodeId, u.note, st2.createdSwipe) };
           } else {
             for (const p of freshOk) work = queueLorePiece(work, { ...p, source: 'extract', atLen: pathLen });
             for (const u of updatesOk)
@@ -11506,8 +11747,8 @@ function Main({ storage, storageKind, storageFailed }) {
     const path = getActivePath(work.messages ?? {}, work.activeLeafId);
     if (q.kind === 'memory')
       return acceptQueuedMemory(work, q.id, { atLen: path.length,
-        atMsg: work.activeLeafId ?? null, cap: settings.memoryCap ?? MEMORY_CAP,
-        maxChars: settings.memoryMaxChars ?? 5000 });
+        atMsg: work.activeLeafId ?? null, atSwipe: work.messages?.[work.activeLeafId]?.activeSwipe ?? null,
+        cap: settings.memoryCap ?? MEMORY_CAP, maxChars: settings.memoryMaxChars ?? 5000 });
     if (q.updateOf) {
       const ids = pathIdSet(work.messages ?? {}, work.activeLeafId);
       const view = mergedLorePieces(chatScenario, work, ref.current.characters)
@@ -11622,48 +11863,44 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- image generation (/image command, v4.10 phase 3) ----
-  // One job fills one swipe's pending images entry, merge-on-write: the chat,
-  // node or swipe may have vanished (rewind, delete, regenerate) while the
-  // backend worked — then the write is dropped. Errors land on the entry as
-  // { error: <message> } (healImageEntry's reload debris stays { error: true })
-  // AND raise the sticky error toast — the bubble's failure note alone read as
-  // a silent failure (the reason used to die in console.warn).
-  // The pending entry is matched by `slot` (its placement id): two jobs on
-  // DIFFERENT slots of the same swipe may run concurrently and must not
-  // cross-patch.
+  // One job fills the original pending entry and any same-slot copies already
+  // made by forking, merge-on-write per chat. A vanished target is skipped.
+  // Errors land as { error: <message> } (reload debris stays { error: true })
+  // AND raise the sticky error toast. Matching by node, swipe, AND slot keeps
+  // concurrent jobs and unrelated pending entries from cross-patching.
   async function runImageJob(chatId, nodeId, swipeIdx, { prompt, caption = '', slot }) {
     const st = ref.current.settings;
     const { endpoint: ep, apiKey: key } = roleApi(st, 'image');
     const ctl = new AbortController();
     imgCtls.current.add(ctl);
-    // patch: rebuild the chat with the pending entry at (nodeId, swipeIdx)
-    // replaced by `entry`; returns false when the target vanished.
     const patch = async (makeEntry) => {
-      // A live generation owns this chat's message tree: its per-token
-      // applyText and the finally's commit() rebuild `messages` from a
-      // start-of-generation snapshot and would silently revert this write on
-      // the next token (the rule regenImage/swipeImage/onEdit refuse on).
-      // The image result is already in hand and the merge below re-reads
-      // ref.current, so waiting out the stream costs nothing. Capped: if the
-      // generation's finally ever wedges, warn and patch anyway (the merge is
-      // safe) rather than park the completed image forever.
+      const pendingIn = (c) => c?.messages?.[nodeId]?.swipes?.[swipeIdx]?.images
+        ?.some(e => e?.pending && e.slot === slot);
+      const chatIds = [...new Set([chatId,
+        ...Object.values(storage.getAll('Chats')).filter(pendingIn).map(c => c.id)])];
       const deferDeadline = Date.now() + 10 * 60 * 1000;
-      while (genRef.current?.chatId === chatId) {
-        if (Date.now() > deferDeadline) {
-          console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
-          break;
+      let patched = false;
+      for (const id of chatIds) {
+        // Each generation owns its chat's message tree. Wait for that specific
+        // chat, then re-read and merge so forks and unrelated edits survive.
+        while (genRef.current?.chatId === id) {
+          if (Date.now() > deferDeadline) {
+            console.warn('FictionPad: image patch deferred 10 min — patching over a wedged generation.');
+            break;
+          }
+          await new Promise(r => setTimeout(r, 250));
         }
-        await new Promise(r => setTimeout(r, 250));
+        const cur = storage.get('Chats', id) ?? ref.current.chats[id];
+        const node = cur?.messages?.[nodeId];
+        const swipe = node?.swipes?.[swipeIdx];
+        const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
+        if (!cur || !node || !swipe || !entry) continue;
+        const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
+        const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
+        saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
+        patched = true;
       }
-      const cur = ref.current.chats[chatId];
-      const node = cur?.messages?.[nodeId];
-      const swipe = node?.swipes?.[swipeIdx];
-      const entry = swipe?.images?.find(e => e?.pending && e.slot === slot);
-      if (!cur || !node || !swipe || !entry) return false;
-      const images = swipe.images.map(e => e === entry ? makeEntry(entry) : e);
-      const swipes = node.swipes.map((s, i) => i === swipeIdx ? { ...s, images } : s);
-      saveChat({ ...cur, messages: { ...cur.messages, [nodeId]: { ...node, swipes } } }, { touch: false });
-      return true;
+      return patched;
     };
     try {
       const src = await generateImage({ endpoint: ep, apiKey: key, serverToken: st.serverToken,
@@ -11739,7 +11976,23 @@ function Main({ storage, storageKind, storageFailed }) {
   // firing (regenerate, regen-from-token). discardEmptySwipe may only pop a
   // swipe when this holds — a bare continuation appends nothing, so popping
   // there would destroy a real take.
-  async function runGeneration(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}) {
+  async function runGeneration(chatObj, nodeId, options = {}) {
+    let resolveCompletion;
+    const completion = new Promise(resolve => { resolveCompletion = resolve; });
+    try {
+      await runGenerationInner(chatObj, nodeId, options, completion);
+    } finally {
+      // Also covers unexpected prep/finalization throws and every early return.
+      // A conflict resolver may hold this generation object after genRef clears.
+      if (genRef.current?.completion === completion) {
+        storage.endStream();
+        genRef.current = null;
+        setGenerating(null);
+      }
+      resolveCompletion();
+    }
+  }
+  async function runGenerationInner(chatObj, nodeId, { continuation = false, fresh = false, pov = null, appendedSwipe = !continuation && !fresh } = {}, completion) {
     const { scenarios: sc, personas: pe, characters: gchars, settings: baseSt } = ref.current;
     const model = chatObj.settings?.model || baseSt.model; // per-chat override wins
     if (!baseSt.endpoint || !model) { setError('Configure an endpoint and chat model in Settings first.'); return; }
@@ -11760,13 +12013,13 @@ function Main({ storage, storageKind, storageFailed }) {
     // derivation (the prompt excludes the node entirely, and afterwards the
     // node is viewed at the NEW swipe), so the new take starts clean while
     // the old take keeps its world state. No prune/restore machinery.
-    // Claim the generation slot before anything async (the prep below —
-    // semantic embeddings, exact token count — can take a long time on a slow
-    // backend, and the UI keys off this).
+    // Claim the generation slot and slow persistence BEFORE async prep so Stop
+    // works immediately and focus sync treats the appended swipe as dirty.
     const abort = new AbortController();
-    genRef.current = { abort, chatId: chatObj.id };
+    genRef.current = { abort, chatId: chatObj.id, completion };
     setError(null); // a fresh generation supersedes the last error toast
     setGenerating({ chatId: chatObj.id, nodeId });
+    storage.beginStream('Chats', chatObj.id);
     // The node being generated is excluded from the prompt unless continuing it.
     // NB: not `??` — the root's parentId is null, and null MUST survive: for a
     // greeting regenerate the path is empty (system prompt only), so the model
@@ -11860,7 +12113,8 @@ function Main({ storage, storageKind, storageFailed }) {
     {
       const nSys = messages.filter(m => m.role === 'system').length;
       const hasGreeting = (man.layers.greeting?.tokens ?? 0) > 0;
-      const head = messages.slice(0, nSys + (hasGreeting ? 1 : 0));
+      const greetingAt = hasGreeting ? messages.findIndex((m, i) => i >= nSys && m.role === 'assistant') : -1;
+      const head = messages.slice(0, greetingAt === -1 ? nSys : greetingAt + 1);
       const hist = messages.slice(head.length);
       const headTok = hist.length
         ? await getTokenCount({ endpoint: effEp(st), apiKey: st.apiKey, serverToken: st.serverToken, model,
@@ -11913,39 +12167,32 @@ function Main({ storage, storageKind, storageFailed }) {
     // assistant message would steer the model off the text being continued.
     if (continuation) delete effSamplers.prefill;
     let work = ref.current.chats[chatObj.id] ?? chatObj;
-    // ^ Re-base on the stored chat, not the caller's snapshot: a background
-    // merge-on-write (an image job's patch, enrichment) may have landed
-    // between the caller's read and the stream start. Callers saveChat the
-    // chat carrying the new empty swipe before firing (ref-synced), so the
-    // stored copy always includes our node — never reintroduce a bare
-    // upsertChat append upstream of fireGeneration.
-    // Coalesce persistence while streaming: applyText writes per token, and
-    // the storage layer stretches this key's flush debounce to 3 s until
-    // endStream (the finally) — the whole-chat row would otherwise re-upload
-    // twice a second for the stream's duration.
-    storage.beginStream('Chats', work.id);
+    // Re-base after prep on the stored chat. Continuation state comes from
+    // that copy too, not the request-start snapshot the async prep may stale.
+    const workNode = work.messages[nodeId] ?? node;
+    const baseSwipe = continuation ? workNode?.swipes?.[workNode.activeSwipe] : null;
     // Display text streams in plain (delta is the text authority). Logprobs
     // accumulate as a SEPARATE raw tape — a chunk's delta and its logprob
     // entries are not reliably related (middleware re-chunking can attach
     // them off by one), so alignment happens once, globally, at the end.
-    const baseText = continuation ? activeText(node) : '';
+    const baseText = continuation ? activeText(workNode) : '';
     const baseSpans = continuation
-      ? (node?.swipes?.[node.activeSwipe]?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
+      ? (baseSwipe?.tokens ?? [{ text: baseText, logprob: null, top: [] }])
       : [];
     let acc = baseText;
     // Reasoning channel (delta.reasoning_content) accumulates separately and
     // lands on the swipe as `think` — displayed collapsibly, never prompted.
     // Continuations prepend the base swipe's reasoning like its text.
-    let thinkAcc = continuation ? (node?.swipes?.[node.activeSwipe]?.think ?? '') : '';
+    let thinkAcc = continuation ? (baseSwipe?.think ?? '') : '';
     // Thinking wall time (first think chunk to the first content chunk —
     // prefill excluded) lands on the swipe as thinkMs; continuations add to
     // the base swipe's window.
-    const baseThinkMs = continuation ? (node?.swipes?.[node.activeSwipe]?.thinkMs ?? 0) : 0;
+    const baseThinkMs = continuation ? (baseSwipe?.thinkMs ?? 0) : 0;
     let thinkStartAt = null, thinkStopAt = null;
     // Backend-reported token counts (stream_options include_usage) land on
     // the swipe as usage.completion; on continuation the count adds the base
     // swipe's, so the ribbon total covers the whole reply.
-    const baseUsageTok = continuation ? (node?.swipes?.[node.activeSwipe]?.usage?.completion ?? 0) : 0;
+    const baseUsageTok = continuation ? (baseSwipe?.usage?.completion ?? 0) : 0;
     let usageRec = null;
     const lpTape = [];
     // Tool replies: the RAW accumulated text and its raw→stripped char map
@@ -12067,7 +12314,7 @@ function Main({ storage, storageKind, storageFailed }) {
             samplers: effSamplers,
             maxTokens: st.maxTokens, signal: abort.signal,
             tokenProbs: st.tokenProbs !== false, topLogprobs: st.topLogprobs ?? 10, logitBias, stop: stopList,
-            usageStats: wantUsage,
+            usageStats: wantUsage, strictUserAssistant: !!st.strictUserAssistant,
           })) {
             if (chunk.done) {
               sawDone = true;
@@ -12173,7 +12420,9 @@ function Main({ storage, storageKind, storageFailed }) {
           if (!acc.trim()) acc = '';
           if (parsed.text || !acc) applyText(acc);
         }
-        if (parsed.calls.length) {
+        // Abort still strips any partial protocol text and aligns its probs,
+        // but never executes tools or starts their follow-up jobs.
+        if (parsed.calls.length && !abort.signal.aborted) {
           toolCallsRan = true;
           const callCap = Math.max(1, st.toolCallCap ?? TOOL_CALL_CAP);
           // generate_image calls ride the tool machinery (a tools-disabled
@@ -12327,7 +12576,10 @@ function Main({ storage, storageKind, storageFailed }) {
             // completion covers the reasoning tokens too on thinking models.
             ...(usageRec?.completion != null
               ? { usage: { ...usageRec, completion: usageRec.completion + baseUsageTok } } : {}),
-            ...(interrupted ? { interrupted: true } : {}),
+            // Only a clean continuation clears the base take's old flag; an
+            // aborted continuation keeps it, and a new drop marks it again.
+            ...(interrupted ? { interrupted: true }
+              : continuation && sawDone && !abort.signal.aborted ? { interrupted: false } : {}),
             // Persisted on the swipe (full args) so the gear popover can show
             // them after the fact — the popover truncates for display only.
             ...(toolResults ? { toolCalls: toolResults.map(({ name, ok, note, args }) => ({
@@ -12342,29 +12594,22 @@ function Main({ storage, storageKind, storageFailed }) {
             work = { ...work, messages }; // deleted mid-generation — local only
           }
         }
-        maybeSummarize(work);
-        maybeExtractLore(work);
-        // Enrichment (settings.toolsEnrich): flesh out characters this
-        // generation registered, via the ✦ generator. Fire-and-forget like
-        // the passes above; merge-on-write at save time.
-        if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
-        // Same for their avatars (also needs Image generation on): one
-        // fire-and-forget portrait render per newly registered character.
-        if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
-        // Response suggestions: only after a full generation/regeneration —
-        // never mid-stream, never after /continue, never for OOC exchanges.
-        if (!continuation && st.suggestions) {
-          const parent = work.messages[node?.parentId];
-          const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
-          if (!parentIsOOC) fetchSuggestions(work, nodeId);
+        if (!abort.signal.aborted) {
+          maybeSummarize(work);
+          maybeExtractLore(work);
+          if (st.toolsEnrich && toolResults) maybeEnrichCharacters(work, nodeId, toolResults);
+          if (st.toolsEnrich && st.imagesEnabled && toolResults) maybeEnrichAvatars(work, nodeId, toolResults);
+          // Suggestions only follow a full, non-continuation generation.
+          if (!continuation && st.suggestions) {
+            const parent = work.messages[node?.parentId];
+            const parentIsOOC = parent?.role === 'user' && /^\[OOC:/i.test(activeText(parent).trim());
+            if (!parentIsOOC) fetchSuggestions(work, nodeId);
+          }
         }
       }
       storage.flush();
-      // Fire the image job only now, after the finally's state has settled —
-      // the pending entry is already on the swipe. runImageJob patches it
-      // merge-on-write when the backend answers and handles its own errors;
-      // it never blocks the composer (imgCtls, not auxBusy). Not awaited.
-      if (imageQueued)
+      // Fire the image job only after a non-aborted generation has settled.
+      if (imageQueued && !abort.signal.aborted)
         runImageJob(work.id, nodeId, imageQueued.swipeIdx,
           { prompt: imageQueued.prompt, caption: imageQueued.caption, slot: imageQueued.slot }).catch(() => {});
     }
@@ -12543,8 +12788,8 @@ function Main({ storage, storageKind, storageFailed }) {
       }
       if (cmd === '/improve') {
         if (!arg) return 'Usage: /improve <draft text>';
-        improveDraft(c, arg);
-        return null;
+        improveDraft(c, arg, raw);
+        return 'Improving draft…';
       }
       if (cmd === '/image') {
         const st = ref.current.settings;
@@ -12565,7 +12810,7 @@ function Main({ storage, storageKind, storageFailed }) {
           runImageJob(c2.id, id, 0, { prompt: arg, slot }).catch(() => {}); // handles its own errors
         });
       }
-      if (cmd === '/impersonate') { onImpersonate(); return null; }
+      if (cmd === '/impersonate') return onImpersonate(raw) ? 'Drafting your reply…' : false;
       if (cmd === '/export') {
         const fmt = (arg || 'png').toLowerCase();
         if (fmt === 'png') { onExportChatPNG(c); return null; }
@@ -12606,7 +12851,7 @@ function Main({ storage, storageKind, storageFailed }) {
   }
 
   // ---- aux slash commands ----
-  async function improveDraft(c, draft) {
+  async function improveDraft(c, draft, baseText) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     const conn = roleApi(st, 'aux');
@@ -12625,7 +12870,7 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: st.improveMaxTokens ?? 1500, temperature: st.improveTemp ?? 0.7, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
+      setComposerInject({ chatId: c.id, text: out, baseText, hint: null, nonce: Date.now() });
     } catch (e) {
       setError(`/improve failed: ${e.message ?? e}`);
     }
@@ -12635,7 +12880,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // composer as an editable draft — never sent automatically. Rides auxLogged,
   // so the composer's Stop aborts it and the call lands in the Inspector's
   // aux log like every background call.
-  async function impersonateDraft(c) {
+  async function impersonateDraft(c, baseText) {
     const { personas: pe, settings: st } = ref.current;
     const model = st.auxModel || st.model;
     const conn = roleApi(st, 'aux');
@@ -12653,15 +12898,19 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: 400, temperature: st.suggestionsTemp ?? 0.7, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setComposerInject({ chatId: c.id, text: out, nonce: Date.now() });
+      setComposerInject({ chatId: c.id, text: out, baseText, hint: null, nonce: Date.now() });
     } catch (e) {
       setError(`Impersonate failed: ${e.message ?? e}`);
     }
   }
-  const onImpersonate = () => {
+  const onImpersonate = (baseText) => {
     const c = ref.current.chats[ui.chatId];
-    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return;
-    impersonateDraft(c);
+    if (!c || genRef.current || auxBusy.length || !generationReady(c)) return false;
+    // The chip passes its click event rather than a draft; its live textarea
+    // is authoritative. The slash path passes the full raw command explicitly.
+    impersonateDraft(c, typeof baseText === 'string'
+      ? baseText : (document.querySelector('.composer textarea')?.value ?? ''));
+    return true;
   };
 
   async function recapChat(c, n) {
@@ -12682,13 +12931,14 @@ function Main({ storage, storageKind, storageFailed }) {
         maxTokens: st.recapMaxTokens ?? 1500, temperature: st.recapTemp ?? 0.4, stop: st.stopStrings,
       }, c.id);
       if (!out) throw new Error('empty response from the model');
-      setModal({ kind: 'recap', text: out });
+      queueRecap(c.id, out);
     } catch (e) {
       setError(`/recap failed: ${e.message ?? e}`);
     }
   }
 
   async function memoryCommand(c, n) {
+    const requestSig = activePathSignature(c);
     setComposerInject({ chatId: c.id, hint: 'Generating memory…', nonce: Date.now() });
     try {
       // Explicit span (last N messages, default one cadence window) — a manual
@@ -12697,10 +12947,12 @@ function Main({ storage, storageKind, storageFailed }) {
       const pathLen = getActivePath(c.messages, c.activeLeafId).length;
       const r = await generateMemory(c, { from: Math.max(0, pathLen - (n ?? every)), to: pathLen });
       if (!r?.text) { setComposerInject({ chatId: c.id, hint: 'Nothing to summarize yet.', nonce: Date.now() }); return; }
-      // Merge-on-write: re-read the chat after the aux call and overwrite
-      // only memoryStore (manual /memory: cursor untouched).
+      // Drop a result requested for a path/take that is no longer active.
       const cur = ref.current.chats[c.id];
-      if (!cur) { setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() }); return; }
+      if (!cur || activePathSignature(cur) !== requestSig) {
+        setComposerInject({ chatId: c.id, hint: null, nonce: Date.now() });
+        return;
+      }
       const store = pushMemory(cur, r.text);
       saveChat({ ...cur, memoryStore: { ...clearStoreError(store, 'summary'), cursor: cur.memoryStore?.cursor ?? 0 } });
       setComposerInject({ chatId: c.id, hint: `Memory saved (${store.memories.length} total).`, nonce: Date.now() });
@@ -12731,9 +12983,13 @@ function Main({ storage, storageKind, storageFailed }) {
       const bn = base.messages[nodeId];
       if (!bn) return; // a freshness pull may have changed the viewed branch
       const swipes = [...bn.swipes, { text: '', createdAt: Date.now(), modelId: null }];
+      const parentLen = getActivePath(base.messages, bn.parentId).length;
+      const memoryStore = { ...(base.memoryStore ?? { memories: [], cursor: 0 }),
+        cursor: Math.min(base.memoryStore?.cursor ?? 0, parentLen) };
       // The regenerated node becomes the tip: the previous continuation is kept
       // as a branch of the swipe it followed, reachable via swipe-back / ⎇.
-      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId,
+        memoryStore, emergentCursor: Math.min(base.emergentCursor ?? 0, parentLen), updatedAt: Date.now() };
       saveChat(c1); // ref-sync before firing — runGeneration re-bases on the stored chat
       fireGeneration(c1, nodeId);
     });
@@ -12754,7 +13010,11 @@ function Main({ storage, storageKind, storageFailed }) {
       const prefix = keep.map(t => t.text).join('') + (alt ?? '');
       const prefixToks = alt == null ? keep : [...keep, { text: alt, logprob: null, top: [] }];
       const swipes = [...bn.swipes, { text: prefix, createdAt: Date.now(), modelId: null, tokens: prefixToks }];
-      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId, updatedAt: Date.now() };
+      const parentLen = getActivePath(base.messages, bn.parentId).length;
+      const memoryStore = { ...(base.memoryStore ?? { memories: [], cursor: 0 }),
+        cursor: Math.min(base.memoryStore?.cursor ?? 0, parentLen) };
+      const c1 = { ...base, messages: { ...base.messages, [nodeId]: { ...bn, swipes, activeSwipe: swipes.length - 1 } }, activeLeafId: nodeId,
+        memoryStore, emergentCursor: Math.min(base.emergentCursor ?? 0, parentLen), updatedAt: Date.now() };
       saveChat(c1);
       // continuation drives the prefill mechanics, but the caller DID append a
       // swipe — an abort may discard it (appendedSwipe).
@@ -12994,18 +13254,25 @@ function Main({ storage, storageKind, storageFailed }) {
   };
 
   // ---- export / import ----
+  const hydrateForExport = async (store, key, label) => {
+    try {
+      if (await storage.hydrate(store, key)) return true;
+      setError(`Export cancelled: images for ${label} are unavailable.`);
+    } catch (e) {
+      setError(`Export cancelled: could not load images for ${label} (${e?.message ?? e}).`);
+    }
+    return false;
+  };
   // A scenario export is a BUNDLE: the scenario plus its linked global
   // characters (scenario.characterIds), so the file works standalone on
   // import. The legacy single-scenario type stays importable (below).
   const onExportScenario = async (id) => {
-    // Hydrate first (lazy images): an export must never carry imgref
-    // sentinels. Reads below take the fresh post-hydration cache copy.
-    await storage.hydrate('Scenarios', id);
+    if (!await hydrateForExport('Scenarios', id, 'this scenario')) return;
     const s0 = storage.get('Scenarios', id) ?? scenarios[id];
     if (!s0) return;
     const chars = [];
     for (const cid of s0.characterIds ?? []) {
-      await storage.hydrate('Characters', cid);
+      if (!await hydrateForExport('Characters', cid, 'a linked character')) return;
       const c = storage.get('Characters', cid) ?? characters[cid];
       if (c) chars.push(c);
     }
@@ -13015,7 +13282,7 @@ function Main({ storage, storageKind, storageFailed }) {
     });
   };
   const onExportChat = async (c) => {
-    await storage.hydrate('Chats', c.id);
+    if (!await hydrateForExport('Chats', c.id, 'this chat')) return;
     const fresh = storage.get('Chats', c.id) ?? c;
     downloadJSON(`fictionpad-chat-${fresh.name}.json`, { type: 'fictionpad-chat', version: 1, data: fresh });
   };
@@ -13023,8 +13290,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // zero-dep SVG-foreignObject snapshot in 70-util) and a Markdown transcript
   // of the active branch. Both are read-only — no genGuard needed.
   const onExportChatPNG = async (c) => {
+    if (!await hydrateForExport('Chats', c.id, 'this chat')) return;
+    const fresh = storage.get('Chats', c.id) ?? c;
     try {
-      await snapshotChatLogPNG(`fictionpad-chat-${(c.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
+      await snapshotChatLogPNG(`fictionpad-chat-${(fresh.name || 'chat').replace(/[^\w-]+/g, '-')}.png`);
     } catch (e) { setError(`PNG export failed: ${e?.message ?? e}`); }
   };
   const onExportChatMarkdown = (c) => {
@@ -13037,9 +13306,10 @@ function Main({ storage, storageKind, storageFailed }) {
   // lack fields the editors and message UI assume (the draft.lorePieces crash
   // class); already-stored malformed entities heal at editor draft init.
   const onExportCharacter = async (id) => {
-    await storage.hydrate('Characters', id);
+    if (!await hydrateForExport('Characters', id, 'this character')) return;
     const c = storage.get('Characters', id) ?? characters[id];
-    downloadJSON(`fictionpad-character-${c?.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: c });
+    if (!c) return;
+    downloadJSON(`fictionpad-character-${c.name ?? id}.json`, { type: 'fictionpad-character', version: 1, data: c });
   };
   // Duplicate in place: deep clone with a fresh id and a " (copy)" name
   // suffix — the export → edit-the-id → reimport roundtrip as one click. A
@@ -13075,16 +13345,21 @@ function Main({ storage, storageKind, storageFailed }) {
   // a global character card: pure-core mapping, fresh id, provenance stripped.
   // The new card just appears in the sidebar Characters section.
   const onExportPieceToCharacter = async (piece) => {
-    // The piece may hold unresolved imgref avatars (lazy images): hydrate the
-    // likely owners and re-resolve the piece fresh before mapping it.
+    // Resolve the actual owner (including a scenario editor for a non-active
+    // chat), hydrate it, then map the fresh piece rather than a stale prop.
+    const chatOwner = Object.values(ref.current.chats)
+      .find(c => (c.lorePieces ?? []).some(q => q.id === piece.id));
+    const scenarioOwner = chatOwner ? null : Object.values(ref.current.scenarios)
+      .find(s => (s.lorePieces ?? []).some(q => q.id === piece.id));
+    const owner = chatOwner ? { store: 'Chats', value: chatOwner }
+      : scenarioOwner ? { store: 'Scenarios', value: scenarioOwner } : null;
     let p = piece;
-    if (chat?.id) {
-      await storage.hydrate('Chats', chat.id);
-      if (chatScenario?.id) await storage.hydrate('Scenarios', chatScenario.id);
-      p = (storage.get('Chats', chat.id)?.lorePieces ?? []).find(q => q.id === piece.id)
-        ?? (chatScenario?.id ? (storage.get('Scenarios', chatScenario.id)?.lorePieces ?? []).find(q => q.id === piece.id) : null)
-        ?? piece;
+    if (owner) {
+      if (!await hydrateForExport(owner.store, owner.value.id, 'this lore piece')) return;
+      p = (storage.get(owner.store, owner.value.id)?.lorePieces ?? []).find(q => q.id === piece.id) ?? piece;
     }
+    if (collectImgrefIds(p).size)
+      return setError('Export cancelled: images for this lore piece are unavailable.');
     const c = normalizeCharacter(characterFromPiece(p));
     if (!c.name.trim()) return setError('Give the piece a title first — it becomes the character name.');
     upsertCharacter(c.id, c);
@@ -13095,7 +13370,7 @@ function Main({ storage, storageKind, storageFailed }) {
   // linked scenario when one exists — buildCharacterCard tolerates null)
   // embedded as a tEXt chunk (pure core). Importable by SillyTavern-style tools.
   const onExportCharacterPng = async (character0) => {
-    await storage.hydrate('Characters', character0?.id);
+    if (!await hydrateForExport('Characters', character0?.id, 'this character')) return;
     const character = storage.get('Characters', character0?.id) ?? character0;
     if (!character?.avatar)
       return setError('Set an avatar first — the avatar becomes the card image.');
@@ -13109,8 +13384,13 @@ function Main({ storage, storageKind, storageFailed }) {
       const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
       if (!blob) throw new Error('the browser refused to encode the PNG');
       const u8 = new Uint8Array(await blob.arrayBuffer());
-      const scenario = Object.values(scenarios ?? {})
+      const scenario0 = Object.values(ref.current.scenarios ?? {})
         .find(s => (s.characterIds ?? []).includes(character.id)) ?? null;
+      let scenario = null;
+      if (scenario0) {
+        if (!await hydrateForExport('Scenarios', scenario0.id, 'the linked scenario')) return;
+        scenario = storage.get('Scenarios', scenario0.id) ?? scenario0;
+      }
       downloadBlob(new Blob([embedPngCardJson(u8, JSON.stringify(buildCharacterCard(scenario, character)))],
         { type: 'image/png' }), `${character.name}.png`);
     } catch (e) { setError(`PNG card export failed: ${e?.message ?? e}`); }
@@ -13191,18 +13471,22 @@ function Main({ storage, storageKind, storageFailed }) {
   // serverToken is per-device and NEVER leaves the machine — stripped here on
   // export and ignored on import (same rule as the Meta/app.settings sync).
   const onExportAll = async () => {
-    // A full backup must be complete: resolve every lazy imgref sentinel
-    // first, then read the stores fresh (state maps may lag the hydration).
-    await storage.hydrateAll();
-    const { serverToken, ...rest } = settingsRaw ?? {};
-    downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
-      type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
-      data: {
-        scenarios: storage.getAll('Scenarios'), chats: storage.getAll('Chats'),
-        personas: storage.getAll('Personas'), characters: storage.getAll('Characters'),
-        settings: rest,
-      },
-    });
+    try {
+      // A full backup must be complete: resolve every lazy imgref sentinel
+      // first, then read the stores fresh (state maps may lag the hydration).
+      await storage.hydrateAll();
+      const { serverToken, ...rest } = settingsRaw ?? {};
+      downloadJSON(`fictionpad-backup-${new Date().toISOString().slice(0, 10)}.json`, {
+        type: 'fictionpad-backup', version: 1, exportedAt: Date.now(),
+        data: {
+          scenarios: storage.getAll('Scenarios'), chats: storage.getAll('Chats'),
+          personas: storage.getAll('Personas'), characters: storage.getAll('Characters'),
+          settings: rest,
+        },
+      });
+    } catch (e) {
+      setError(`Backup export failed: ${e?.message ?? e}`);
+    }
   };
   // Upserts everything by id (last write wins — entities absent from the file
   // are kept). Returns { note, settings } for the Settings modal, null when
@@ -13228,6 +13512,9 @@ function Main({ storage, storageKind, storageFailed }) {
     let applied = null;
     if (d.settings && typeof d.settings === 'object') {
       const { serverToken, ...rest } = d.settings; // any serverToken in the file is dropped
+      for (const key of ['profiles', 'customSamplers'])
+        rest[key] = Array.isArray(rest[key])
+          ? rest[key].filter(v => v && typeof v === 'object' && !Array.isArray(v)) : [];
       applied = rest;
       // One setSettings commit → the settings-sync effect uploads it once.
       setSettings(prev => ({ ...rest, serverToken: prev?.serverToken ?? '' }));
@@ -13471,17 +13758,17 @@ function Main({ storage, storageKind, storageFailed }) {
       <${ErrorBoundary} name="lore piece"><${LorePieceEditor} piece=${modalPiece} isNew=${false}
         allPieces=${mergedLorePieces(chatScenario, chat, characters)}
         onSave=${(draft, mountPiece) => {
-          // Merge the draft over the LIVE piece list (re-read — a generation
-          // may have streamed mid-edit): the revision log and an
-          // enrichment-written avatar pair always survive Save; the draft owns
-          // the avatar only when the user actually changed those fields.
-          const merge = (list) => (list ?? []).map(q => q.id !== draft.id ? q : {
-            ...draft,
-            ...(q.revisions ? { revisions: q.revisions } : {}),
-            ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
-              .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
-            ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
-              ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}),
+          // Merge over the LIVE piece, then let the shared editor helper record
+          // content/key edits without dropping revisions or provenance.
+          const merge = (list) => (list ?? []).map(q => {
+            if (q.id !== draft.id) return q;
+            const mergedDraft = { ...draft,
+              ...(q.revisions ? { revisions: q.revisions } : {}),
+              ...Object.fromEntries(['createdAt', 'createdBy', 'createdSwipe', 'atLen']
+                .filter(k => q[k] !== undefined).map(k => [k, q[k]])),
+              ...(draft.avatar === (mountPiece.avatar ?? '') && draft.avatarFull === (mountPiece.avatarFull ?? '')
+                ? { avatar: q.avatar ?? '', avatarFull: q.avatarFull ?? '' } : {}) };
+            return editLorePiece(q, mergedDraft);
           });
           if (modal.source === 'chat') {
             const live = ref.current.chats[chat.id];
@@ -13537,7 +13824,7 @@ function Main({ storage, storageKind, storageFailed }) {
     ${modal?.kind === 'recap' && html`
       <${ErrorBoundary} name="recap"><${RecapModal} text=${modal.text} onClose=${() => setModal(null)}
         onSaveMemory=${() => {
-          const c = ref.current.chats[ui.chatId];
+          const c = ref.current.chats[modal.chatId];
           if (c) {
             const store = pushMemory(c, modal.text);
             saveChat({ ...c, memoryStore: { ...store, cursor: c.memoryStore?.cursor ?? 0 } });
@@ -13651,6 +13938,7 @@ function App() {
   const [storageFailed, setStorageFailed] = useState(false);
   const [gate, setGate] = useState(null); // { error } — server storage expected but unreachable
   const [bootNonce, setBootNonce] = useState(0);
+  const [importMirror, setImportMirror] = useState(false);
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -13675,7 +13963,7 @@ function App() {
         }
       }
       if (!adapter) {
-        adapter = new IndexedDBAdapter();
+        adapter = new IndexedDBAdapter('FictionPad', { importMirror });
         try { await adapter.init(); }
         catch (e) { console.error(e); if (alive) setStorageFailed(true); }
       }
@@ -13713,12 +14001,15 @@ function App() {
         s.serverToken = token;
         localStorage.setItem('fictionpad.settings', JSON.stringify(s));
       } catch {}
+      setImportMirror(false);
       setGate(null);
       setBootNonce(n => n + 1);
     }}
     onUseLocal=${() => {
-      // Explicit opt-out: forget the server flag and boot browser storage.
+      // Explicit opt-out preserves both worlds: seed only missing local rows
+      // from the separate server mirror, never normal browser-storage boots.
       try { localStorage.removeItem(SERVER_FLAG_KEY); } catch {}
+      setImportMirror(true);
       setGate(null);
       setBootNonce(n => n + 1);
     }} />`;
