@@ -286,7 +286,7 @@ function GenerationDefaultsFields({ draft, settings, set }) {
                 <input type="checkbox" checked=${on}
                   onChange=${(e) => {
                     const samplers = { ...sv };
-                    if (e.target.checked) samplers[f.key] = settings.samplers?.[f.key] ?? f.def;
+                    if (e.target.checked) samplers[f.key] = settings.samplers?.[f.key] ?? f.def ?? '';
                     else delete samplers[f.key];
                     set({ samplers });
                   }} />

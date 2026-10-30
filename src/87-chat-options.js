@@ -192,7 +192,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
     const disabledSamplers = (settings?.disabledSamplers ?? []).filter(k => k !== f.key);
     if (!on) disabledSamplers.push(f.key);
     const samplers = { ...global };
-    if (on && samplers[f.key] == null) samplers[f.key] = f.def;
+    if (on && samplers[f.key] == null) samplers[f.key] = f.def ?? '';
     onUpdateSettings({ samplers, disabledSamplers });
   };
   // What the global side would actually send (disabled keys excluded) — the
@@ -255,7 +255,7 @@ function ChatSamplers({ chat, settings, onUpdateChat, onUpdateSettings }) {
                   <input type="checkbox" checked=${on}
                     onChange=${(e) => {
                       const samplers = { ...overrides };
-                      if (e.target.checked) samplers[f.key] = global[f.key] ?? f.def;
+                      if (e.target.checked) samplers[f.key] = global[f.key] ?? f.def ?? '';
                       else delete samplers[f.key];
                       putChatSettings({ samplers });
                     }} />
