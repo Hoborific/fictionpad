@@ -408,7 +408,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-
 .msg .md th, .msg .md td { border: 1px solid var(--c-border); padding: 4px 10px; }
 .msg .md th { background: var(--c-bg-2); }
 .msg .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--c-accent); color: var(--c-dim); }
-.msg textarea.edit { width: 100%; min-height: 120px; margin-bottom: 6px; }
+.msg textarea.edit { width: 100%; min-height: 120px; margin-bottom: 6px; overflow-y: hidden; }
 .streaming-cursor::after { content: "▌"; color: var(--c-accent); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 /* pre-first-token waiting state (slow backend wake-up): three staggered dots */

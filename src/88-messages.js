@@ -165,6 +165,13 @@ function SwipeImage({ sv, onZoom, generating, canRegen, onImgSwipe, onImgRegen, 
 function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaName, characterNames, characterColors, avatars = null, avatarsOn = false, streaming, generating, auxBusy, dateFormat, showThinking, onEdit, onRegenerate, onSwipe, onSwipeTo, onBranch, onRewind, onDelete, onReply, onRegenFromToken, onImgSwipe, onImgRegen, imagesEnabled = false, memCount = 0, onOpenMemory, branchKids = [], childOnPathId = null, onJump, onOpenBranches, onOpenCharacter = null, chatId = null }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const editRef = useRef(null);
+  useLayoutEffect(() => {
+    const ta = editRef.current;
+    if (!editing || !ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  }, [editing, draft]);
   const [showProbs, setShowProbs] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false); // mobile: actions collapsed behind ›
   const [metaOpen, setMetaOpen] = useState(false); // mobile: meta details collapsed behind ›
@@ -554,7 +561,7 @@ ${showNav && html`
         ...${gestureHandlers}>
         ${!editing && headImgs && swipeImgs(headImgs)}
         ${editing ? html`
-          <textarea class="edit" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
+          <textarea class="edit" ref=${editRef} value=${draft} onInput=${(e) => setDraft(e.target.value)} />
           <div style=${{ display: 'flex', gap: '6px' }}>
             <button class="btn small primary" onClick=${() => { onEdit(node.id, draft); setEditing(false); }}>Save</button>
             <button class="btn small" onClick=${() => setEditing(false)}>Cancel</button>
