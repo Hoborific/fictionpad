@@ -528,6 +528,11 @@ section('speaker segments');
     'no prefixes → single narration segment');
   ok(splitSpeakerSegments('Vex: hi', null)[0].speaker === null, 'no names → narration');
   {
+    const s = splitSpeakerSegments('Narrator: Rain ticks.\nNarrator: The orrery turns.', []);
+    ok(s.length === 1 && s[0].speaker === null && s[0].text === 'Rain ticks.\nThe orrery turns.',
+      'Narrator prefixes strip and merge without known characters');
+  }
+  {
     const s = splitSpeakerSegments('Vex: hello there\nsecond line', names);
     ok(s.length === 1 && s[0].speaker === 'Vex' && s[0].text === 'hello there\nsecond line',
       'leading prefix: single character segment, prefix stripped');

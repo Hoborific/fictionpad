@@ -305,7 +305,8 @@ function MessageItem({ node, index, isRoot, isLeaf, selected = false, personaNam
   // The speaker is already labeled in the meta row — hide the `Name:` prefix.
   // Whitespace-only text (a pre-fix multi-tool reply keeps the newlines that
   // separated its stripped blocks) renders exactly like an empty swipe.
-  const rawDisplay = isCharacter ? stripSpeakerPrefix(text, speaker) : text;
+  const rawDisplay = isCharacter ? stripSpeakerPrefix(text, speaker)
+    : !isUser && !isOOC ? dedupeSpeakerPrefixes(text, characterNames) : text;
   const displayText = rawDisplay.trim() ? rawDisplay : '';
   const n = node.activeSwipe + 1, m = node.swipes.length;
   // Swipe nav on every assistant message: at the last swipe ▶⁺ generates a

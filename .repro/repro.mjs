@@ -304,6 +304,18 @@ trial('speaker prefix strip keeps action stars across a newline', () => {
   if (out.includes('Mia:')) throw new Error('speaker prefix not stripped: ' + out);
 });
 
+trial('single Narrator segment strips prefixes without known characters', () => {
+  const out = renderToStaticMarkup(html`
+    <${MessageItem} node=${node('x1n', null, 'assistant', 'Narrator: Rain ticks.\nNarrator: The orrery turns.')}
+      isRoot=${false} personaName="Ari" characterNames=${[]}
+      streaming=${false} generating=${false}
+      onEdit=${() => {}} onRegenerate=${() => {}} onSwipe=${() => {}}
+      onBranch=${() => {}} onRewind=${() => {}} onDelete=${() => {}} onReply=${() => {}} />`);
+  if (out.includes('Narrator:')) throw new Error('Narrator prefix not stripped: ' + out);
+  if (!out.includes('Rain ticks.') || !out.includes('The orrery turns.'))
+    throw new Error('Narrator content missing: ' + out);
+});
+
 // Multi-speaker swipe: the header names everyone who spoke, in order.
 trial('multi-speaker header lists all speakers in order', () => {
   const out = renderToStaticMarkup(html`

@@ -1642,8 +1642,8 @@ Rules: the JSON field for the tool is "tool", never "name"; emit a block at the 
 const SPEAKER_LINE_RE = /^\s*\*{0,2}\s*([\p{L}\p{N}][\p{L}\p{M}\p{N}'. \-]{0,59}?)\s*\*{0,2}\s*:(?:[ \t]*\*{1,2}(?=\s|$))?\s*/u;
 function dedupeSpeakerPrefixes(text, names) {
   const s = String(text ?? '');
-  if (!s || !names?.length) return s;
-  const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
+  if (!s) return s;
+  const byLower = new Map((names ?? []).map(n => [String(n).toLowerCase(), n]));
   const lineRe = SPEAKER_LINE_RE;
   const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const midReFor = (spk) => new RegExp(`(\\s)\\*{0,2}${escRe(spk)}\\*{0,2}:[ \\t]+`, 'giu');
@@ -1674,8 +1674,8 @@ function dedupeSpeakerPrefixes(text, names) {
 function splitSpeakerSegments(text, names) {
   const input = String(text ?? '');
   const s = dedupeSpeakerPrefixes(input, names);
-  if (!s || !names?.length) return [{ speaker: null, text: s, start: 0, end: s.length }];
-  const byLower = new Map(names.map(n => [String(n).toLowerCase(), n]));
+  if (!s) return [{ speaker: null, text: s, start: 0, end: s.length }];
+  const byLower = new Map((names ?? []).map(n => [String(n).toLowerCase(), n]));
   // Stars after the colon only close a bold prefix (`**Name:**` — stars
   // followed by whitespace/EOL); an action's opening star (`Mira: *nods*`)
   // must survive or the emphasis is left unpaired.
